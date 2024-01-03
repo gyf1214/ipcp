@@ -10,6 +10,7 @@ def main(args):
         'daemon': CProject(
             'daemon',
             output_name='ipcpd', output_type=CProject.OutputType.BINARY,
+            libs=['pthread'],
         ),
     }
     make_projects(projects, debug=args.debug, test=args.test)
