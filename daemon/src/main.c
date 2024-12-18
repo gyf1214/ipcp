@@ -8,6 +8,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -41,7 +42,6 @@ int tunOpen(const char *ifName) {
    * interface to open: "tun0", etc. */
   if ((err = ioctl(fd, TUNSETIFF, (void*)&ifr)) == -1) {
     perror("ioctl TUNSETIFF");
-    close(fd);
     exit(1);
   }
 
@@ -51,84 +51,142 @@ int tunOpen(const char *ifName) {
   return fd;
 }
 
-volatile bool stop;
-
 #define PACKET_SIZE 4096
+#define TIMEOUT     2000
 
 typedef struct packet_t {
   long nbytes;
   char buf[PACKET_SIZE];
 } packet_t;
 
-void serveTun(int connFd, int tunFd) {
-  packet_t packet;
-  logf("start serve tun device");
-  while (1) {
-    packet.nbytes = read(tunFd, packet.buf, sizeof(packet.buf));
-    if (stop || packet.nbytes <= 0) {
-      break;
-    }
-    dbgf("read %ld bytes from tun", packet.nbytes);
+bool pipeTun(int tunFd, int connFd) {
+  static packet_t packet;
 
-    int i = 0;
-    int nbytes = sizeof(packet.nbytes) + packet.nbytes;
-    while (i < nbytes) {
-      i += write(connFd, (char *)&packet + i, nbytes - i);
-    }
+  packet.nbytes = read(tunFd, packet.buf, sizeof(packet.buf));
+  if (packet.nbytes <= 0) {
+    return false;
   }
-  logf("serve tun device stopped");
+
+  dbgf("read %ld bytes from tun", packet.nbytes);
+
+  int i = 0;
+  int nbytes = sizeof(packet.nbytes) + packet.nbytes;
+  while (i < nbytes) {
+    int k = write(connFd, (char *)&packet + i, nbytes - i);
+    if (k <= 0) {
+      return false;
+    }
+    i += k;
+  }
+  return true;
 }
 
-typedef struct arg_t {
-  int connFd;
-  int tunFd;
-} arg_t;
+packet_t tcpPacket;
+int tcpPacketOffset;
 
-void *serveTunFunc(void *arg) {
-  arg_t *arg1 = (arg_t *)arg;
-  int connFd = arg1->connFd;
-  int tunFd = arg1->tunFd;
-  free(arg);
+bool pipeTcp(int tunFd, int connFd) {
+  if (tcpPacketOffset < sizeof(tcpPacket.nbytes)) {
+    int k = read(connFd, (char *)&tcpPacket + tcpPacketOffset, sizeof(tcpPacket.nbytes) - tcpPacketOffset);
+    if (k <= 0) {
+      return false;
+    }
+    tcpPacketOffset += k;
+    if (tcpPacketOffset < sizeof(tcpPacket.nbytes)) {
+      return true;
+    }
+    if (tcpPacket.nbytes <= 0 || tcpPacket.nbytes > PACKET_SIZE) {
+      logf("bad packet");
+      return false;
+    }
+    return true;
+  }
 
-  serveTun(connFd, tunFd);
+  int nbytes = sizeof(tcpPacket.nbytes) + tcpPacket.nbytes;
+  if (tcpPacketOffset < nbytes) {
+    int k = read(connFd, (char *)&tcpPacket + tcpPacketOffset, nbytes - tcpPacketOffset);
+    if (k <= 0) {
+      return false;
+    }
+    tcpPacketOffset += k;
+  }
+  if (tcpPacketOffset < nbytes) {
+    return true;
+  }
 
-  return NULL;
+  dbgf("read %ld bytes from remote", tcpPacket.nbytes);
+
+  nbytes = tcpPacket.nbytes;
+  int i = 0;
+  while (i < nbytes) {
+    int k = write(tunFd, tcpPacket.buf + i, nbytes - i);
+    if (k <= 0) {
+      return false;
+    }
+    i += k;
+  }
+  tcpPacketOffset = 0;
+  return true;
+}
+
+void epollAdd(int epollFd, int fd) {
+  struct epoll_event event;
+  event.events = EPOLLIN | EPOLLRDHUP;
+  event.data.fd = fd;
+
+  if (epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &event) < 0) {
+    perror("epoll");
+    exit(1);
+  }
 }
 
 void serveTcp(const char *ifName, int connFd) {
   int tunFd = tunOpen(ifName);
 
-  stop = false;
-  arg_t *arg = malloc(sizeof(arg_t));
-  arg->connFd = connFd;
-  arg->tunFd = tunFd;
-  pthread_t threadId;
-  pthread_create(&threadId, NULL, serveTunFunc, arg);
+  int epollFd = epoll_create(1);
+  if (epollFd < 0) {
+    perror("epoll");
+    exit(1);
+  }
+  epollAdd(epollFd, tunFd);
+  epollAdd(epollFd, connFd);
+  memset(&tcpPacket, 0, sizeof(tcpPacket));
+  tcpPacketOffset = 0;
 
-  packet_t packet;
-  while (1) {
-    if (read(connFd, &packet.nbytes, sizeof(packet.nbytes)) <= 0) {
-      logf("connection closed by remote");
-      break;
+  bool stop = false;
+  while (!stop) {
+    struct epoll_event event;
+    int n = epoll_wait(epollFd, &event, 1, TIMEOUT);
+    int i;
+    if (n < 0) {
+      perror("epoll_wait");
+      exit(1);
+    } else if (n == 0) {
+      dbgf("no event");
+      continue;
     }
-    if (packet.nbytes > 0 && packet.nbytes < sizeof(packet.buf)) {
-      int i = 0;
-      while (i < packet.nbytes) {
-        i += read(connFd, packet.buf + i, packet.nbytes - i);
+    for (i = 0; i < n; i++) {
+      if (event.events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)) {
+        logf("connection error or closed");
+        stop = true;
+        break;
+      } else if (event.events & EPOLLIN) {
+        bool result;
+        if (event.data.fd == tunFd) {
+          result = pipeTun(tunFd, connFd);
+        } else {
+          result = pipeTcp(tunFd, connFd);
+        }
+        if (!result) {
+          logf("connection closed");
+          stop = true;
+        }
+        break;
       }
-      dbgf("read %ld bytes from remote", packet.nbytes);
-
-      write(tunFd, packet.buf, packet.nbytes);
-    } else {
-      dbgf("discard bad packet");
     }
   }
 
-  stop = true;
-  close(tunFd);
-  void *nothing;
-  pthread_join(threadId, &nothing);
   close(connFd);
+  close(tunFd);
   logf("connection stopped");
 }
 
@@ -142,7 +200,6 @@ void listenTcp(const char *ifName, const char *listenIP, int port) {
 
   if (bind(listenFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
     perror("bind");
-    close(listenFd);
     exit(1);
   }
   listen(listenFd, 1);
