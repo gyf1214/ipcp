@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -15,14 +16,23 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
-#include <pthread.h>
+#define TIME_BUF_SIZE 128
+
+const char *timeStr() {
+  static char buffer[TIME_BUF_SIZE];
+
+  time_t nowTime = time(NULL);
+  struct tm *now = localtime(&nowTime);
+  strftime(buffer, TIME_BUF_SIZE, "%Y-%m-%d %H:%M:%S", now);
+  return buffer;
+}
 
 #ifdef NDEBUG
 #define dbgf(...)           do {} while (0)
-#define logf(fmt, ...)      fprintf(stderr, fmt"\n", ##__VA_ARGS__)
+#define logf(fmt, ...)      fprintf(stderr, "[%s] "fmt"\n", timeStr(), ##__VA_ARGS__)
 #else
-#define dbgf(fmt, ...)      fprintf(stderr, "[DEBUG] (%s:%d) "fmt"\n", __FILE__, __LINE__, ##__VA_ARGS__)
-#define logf(fmt, ...)      fprintf(stderr, "[ INFO] (%s:%d) "fmt"\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#define dbgf(fmt, ...)      fprintf(stderr, "[%s][DEBUG] (%s:%d) "fmt"\n", timeStr(), __FILE__, __LINE__, ##__VA_ARGS__)
+#define logf(fmt, ...)      fprintf(stderr, "[%s][ INFO] (%s:%d) "fmt"\n", timeStr(), __FILE__, __LINE__, ##__VA_ARGS__)
 #endif
 
 int tunOpen(const char *ifName) {
