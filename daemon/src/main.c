@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
-#include <time.h>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -16,24 +15,7 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
-#define TIME_BUF_SIZE 128
-
-const char *timeStr() {
-  static char buffer[TIME_BUF_SIZE];
-
-  time_t nowTime = time(NULL);
-  struct tm *now = localtime(&nowTime);
-  strftime(buffer, TIME_BUF_SIZE, "%Y-%m-%d %H:%M:%S", now);
-  return buffer;
-}
-
-#ifdef NDEBUG
-#define dbgf(...)           do {} while (0)
-#define logf(fmt, ...)      fprintf(stderr, "[%s] "fmt"\n", timeStr(), ##__VA_ARGS__)
-#else
-#define dbgf(fmt, ...)      fprintf(stderr, "[%s][DEBUG] (%s:%d) "fmt"\n", timeStr(), __FILE__, __LINE__, ##__VA_ARGS__)
-#define logf(fmt, ...)      fprintf(stderr, "[%s][ INFO] (%s:%d) "fmt"\n", timeStr(), __FILE__, __LINE__, ##__VA_ARGS__)
-#endif
+#include "log.h"
 
 int tunOpen(const char *ifName) {
   struct ifreq ifr;
@@ -41,8 +23,7 @@ int tunOpen(const char *ifName) {
   logf("opening tun device %s", ifName);
 
   if ((fd = open("/dev/net/tun", O_RDWR)) == -1) {
-    perror("open /dev/net/tun");
-    exit(1);
+    perrf("failed to open /dev/net/tun");
   }
   memset(&ifr, 0, sizeof(ifr));
   ifr.ifr_flags = IFF_TUN;
@@ -51,8 +32,7 @@ int tunOpen(const char *ifName) {
   /* ioctl will use ifr.if_name as the name of TUN
    * interface to open: "tun0", etc. */
   if ((err = ioctl(fd, TUNSETIFF, (void*)&ifr)) == -1) {
-    perror("ioctl TUNSETIFF");
-    exit(1);
+    perrf("ioctl failed on tun device");
   }
 
   /* After the ioctl call the fd is "connected" to tun device specified
@@ -144,8 +124,7 @@ void epollAdd(int epollFd, int fd) {
   event.data.fd = fd;
 
   if (epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &event) < 0) {
-    perror("epoll");
-    exit(1);
+    perrf("setup epoll failed");
   }
 }
 
@@ -154,8 +133,7 @@ void serveTcp(const char *ifName, int connFd) {
 
   int epollFd = epoll_create(1);
   if (epollFd < 0) {
-    perror("epoll");
-    exit(1);
+    perrf("setup epoll failed");
   }
   epollAdd(epollFd, tunFd);
   epollAdd(epollFd, connFd);
@@ -168,8 +146,7 @@ void serveTcp(const char *ifName, int connFd) {
     int n = epoll_wait(epollFd, &event, 1, TIMEOUT);
     int i;
     if (n < 0) {
-      perror("epoll_wait");
-      exit(1);
+      perrf("epoll wait failed");
     } else if (n == 0) {
       dbgf("no event");
       continue;
@@ -209,8 +186,7 @@ void listenTcp(const char *ifName, const char *listenIP, int port) {
   serverAddr.sin_port = htons(port);
 
   if (bind(listenFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
-    perror("bind");
-    exit(1);
+    perrf("bind failed");
   }
   listen(listenFd, 1);
   logf("listening on %s:%d", listenIP, port);
@@ -248,8 +224,7 @@ void connTcp(const char *ifName, const char *remoteIP, int port) {
 
 int main(int argc, char **argv) {
   if (argc != 5) {
-    fprintf(stderr, "invalid arguments\n");
-    exit(1);
+    panicf("invalid arguments");
   }
   const char *ifName = argv[1];
   const char *ip = argv[2];
