@@ -356,7 +356,7 @@ void listenTcp(const char *ifName, const char *listenIP, int port, const cryptCt
     int connFd = accept(listenFd, (struct sockaddr *)&clientAddr, &addrLen);
 
     char clientIP[256];
-    inet_ntop(AF_INET, &clientAddr, clientIP, sizeof(clientIP));
+    inet_ntop(AF_INET, &clientAddr.sin_addr, clientIP, sizeof(clientIP));
     int clientPort = ntohs(clientAddr.sin_port);
     logf("connected with %s:%d", clientIP, clientPort);
 
