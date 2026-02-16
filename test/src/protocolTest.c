@@ -107,6 +107,88 @@ void testDecryptRejectTamper() {
   assertTrue(status == protocolStatusBadFrame, "tampered payload should fail authentication");
 }
 
+void testMessageDataRoundTrip() {
+  const char *payload = "typed-data";
+  protocolMessage_t in = {
+      .type = protocolMsgData,
+      .nbytes = (long)strlen(payload),
+      .buf = payload,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolMessageEncodeFrame(&in, &frame);
+  assertTrue(status == protocolStatusOk, "data message encode should succeed");
+
+  protocolMessage_t out;
+  status = protocolMessageDecodeFrame(&frame, &out);
+  assertTrue(status == protocolStatusOk, "data message decode should succeed");
+  assertTrue(out.type == protocolMsgData, "decoded data message type should match");
+  assertTrue(out.nbytes == in.nbytes, "decoded data payload length should match");
+  assertTrue(memcmp(out.buf, payload, (size_t)out.nbytes) == 0, "decoded data payload should match");
+}
+
+void testMessageHeartbeatReqRoundTrip() {
+  protocolMessage_t in = {
+      .type = protocolMsgHeartbeatReq,
+      .nbytes = 0,
+      .buf = NULL,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolMessageEncodeFrame(&in, &frame);
+  assertTrue(status == protocolStatusOk, "heartbeat request encode should succeed");
+
+  protocolMessage_t out;
+  status = protocolMessageDecodeFrame(&frame, &out);
+  assertTrue(status == protocolStatusOk, "heartbeat request decode should succeed");
+  assertTrue(out.type == protocolMsgHeartbeatReq, "decoded heartbeat request type should match");
+  assertTrue(out.nbytes == 0, "decoded heartbeat request should be empty");
+}
+
+void testMessageHeartbeatAckRoundTrip() {
+  protocolMessage_t in = {
+      .type = protocolMsgHeartbeatAck,
+      .nbytes = 0,
+      .buf = NULL,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolMessageEncodeFrame(&in, &frame);
+  assertTrue(status == protocolStatusOk, "heartbeat ack encode should succeed");
+
+  protocolMessage_t out;
+  status = protocolMessageDecodeFrame(&frame, &out);
+  assertTrue(status == protocolStatusOk, "heartbeat ack decode should succeed");
+  assertTrue(out.type == protocolMsgHeartbeatAck, "decoded heartbeat ack type should match");
+  assertTrue(out.nbytes == 0, "decoded heartbeat ack should be empty");
+}
+
+void testMessageRejectInvalidType() {
+  protocolFrame_t frame;
+  frame.buf[0] = (char)0x7f;
+  frame.nbytes = 1;
+  protocolMessage_t out;
+  protocolStatus_t status = protocolMessageDecodeFrame(&frame, &out);
+  assertTrue(status == protocolStatusBadFrame, "invalid message type should fail");
+}
+
+void testMessageRejectInvalidSizeTypeCombo() {
+  const char *payload = "x";
+  protocolMessage_t hbReqBad = {
+      .type = protocolMsgHeartbeatReq,
+      .nbytes = 1,
+      .buf = payload,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolMessageEncodeFrame(&hbReqBad, &frame);
+  assertTrue(status == protocolStatusBadFrame, "heartbeat request with payload should fail");
+
+  protocolMessage_t dataBad = {
+      .type = protocolMsgData,
+      .nbytes = 0,
+      .buf = NULL,
+  };
+  status = protocolMessageEncodeFrame(&dataBad, &frame);
+  assertTrue(status == protocolStatusBadFrame, "data message without payload should fail");
+}
+
 int main() {
   assertTrue(sodium_init() >= 0, "sodium init should succeed");
   testEncode();
@@ -115,6 +197,11 @@ int main() {
   testGenericLoggingAvailable();
   testEncryptDecryptRoundTrip();
   testDecryptRejectTamper();
+  testMessageDataRoundTrip();
+  testMessageHeartbeatReqRoundTrip();
+  testMessageHeartbeatAckRoundTrip();
+  testMessageRejectInvalidType();
+  testMessageRejectInvalidSizeTypeCombo();
   fprintf(stderr, "PASS protocol tests\n");
   return 0;
 }

@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -19,6 +20,36 @@
 #include "protocol.h"
 #include "crypt.h"
 
+#define EPOLL_WAIT_MS          200
+#define HEARTBEAT_INTERVAL_MS  5000
+#define HEARTBEAT_MISS_LIMIT   3
+
+typedef struct {
+  bool isServer;
+  protocolDecoder_t tcpDecoder;
+  char tcpBuf[ProtocolFrameSize];
+  long long lastValidInboundMs;
+  long long lastDataSentMs;
+  long long lastDataRecvMs;
+  bool heartbeatPending;
+  long long heartbeatSentMs;
+  long long lastHeartbeatReqMs;
+} sessionState_t;
+
+static long long nowMs() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
+}
+
+static long long heartbeatTimeoutMs() {
+  return (long long)HEARTBEAT_INTERVAL_MS * HEARTBEAT_MISS_LIMIT;
+}
+
+static long messageHeaderSize() {
+  return (long)sizeof(unsigned char) + (long)sizeof(long);
+}
+
 int tunOpen(const char *ifName) {
   struct ifreq ifr;
   int fd, err;
@@ -31,44 +62,19 @@ int tunOpen(const char *ifName) {
   ifr.ifr_flags = IFF_TUN;
   strncpy(ifr.ifr_name, ifName, IFNAMSIZ - 1);
 
-  /* ioctl will use ifr.if_name as the name of TUN
-   * interface to open: "tun0", etc. */
-  if ((err = ioctl(fd, TUNSETIFF, (void*)&ifr)) == -1) {
+  if ((err = ioctl(fd, TUNSETIFF, (void *)&ifr)) == -1) {
     perrf("ioctl failed on tun device");
   }
 
-  /* After the ioctl call the fd is "connected" to tun device specified
-   * by devname ("tun0", "tun1", etc)*/
   logf("successfully opened tun device %s", ifName);
   return fd;
 }
 
-#define TIMEOUT     2000
-
-bool pipeTun(int tunFd, int connFd, const cryptCtx_t *crypt) {
-  protocolFrame_t frame;
-  long maxPlain = protocolMaxPlaintextSize();
-
-  long nbytes = read(tunFd, frame.buf, (size_t)maxPlain);
-  if (nbytes <= 0) {
-    return false;
-  }
-
-  dbgf("read %ld bytes from tun", nbytes);
-
-  if (protocolEncode(frame.buf, nbytes, &frame) != protocolStatusOk) {
-    logf("bad frame size from tun");
-    return false;
-  }
-  if (protocolFrameEncrypt(&frame, crypt->key) != protocolStatusOk) {
-    logf("failed to encrypt frame");
-    return false;
-  }
-
-  int i = 0;
-  nbytes = sizeof(frame.nbytes) + frame.nbytes;
+static bool writeAll(int fd, const void *data, long nbytes) {
+  long i = 0;
+  const char *buf = (const char *)data;
   while (i < nbytes) {
-    int k = write(connFd, (char *)&frame + i, nbytes - i);
+    long k = (long)write(fd, buf + i, (size_t)(nbytes - i));
     if (k <= 0) {
       return false;
     }
@@ -77,11 +83,113 @@ bool pipeTun(int tunFd, int connFd, const cryptCtx_t *crypt) {
   return true;
 }
 
-protocolDecoder_t tcpDecoder;
-char tcpBuf[ProtocolFrameSize];
+static bool sendMessage(int connFd, const cryptCtx_t *crypt, const protocolMessage_t *msg) {
+  protocolFrame_t frame;
+  if (protocolMessageEncodeFrame(msg, &frame) != protocolStatusOk) {
+    return false;
+  }
+  if (protocolFrameEncrypt(&frame, crypt->key) != protocolStatusOk) {
+    return false;
+  }
 
-bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt) {
-  int k = read(connFd, tcpBuf, sizeof(tcpBuf));
+  long nbytes = (long)sizeof(frame.nbytes) + frame.nbytes;
+  return writeAll(connFd, &frame, nbytes);
+}
+
+static void sessionStateInit(sessionState_t *state, bool isServer) {
+  long long now = nowMs();
+  memset(state, 0, sizeof(*state));
+  state->isServer = isServer;
+  protocolDecoderInit(&state->tcpDecoder);
+  state->lastValidInboundMs = now;
+  state->lastDataSentMs = now;
+  state->lastDataRecvMs = now;
+  state->lastHeartbeatReqMs = now;
+}
+
+static bool pipeTun(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState_t *state) {
+  char payload[ProtocolFrameSize];
+  long maxPayload = protocolMaxPlaintextSize() - messageHeaderSize();
+  if (maxPayload <= 0) {
+    return false;
+  }
+
+  long nbytes = (long)read(tunFd, payload, (size_t)maxPayload);
+  if (nbytes <= 0) {
+    return false;
+  }
+
+  protocolMessage_t msg = {
+      .type = protocolMsgData,
+      .nbytes = nbytes,
+      .buf = payload,
+  };
+  if (!sendMessage(connFd, crypt, &msg)) {
+    return false;
+  }
+
+  if (!state->isServer) {
+    state->lastDataSentMs = nowMs();
+  }
+
+  dbgf("sent %ld bytes of data", nbytes);
+  return true;
+}
+
+static bool handleInboundMessage(
+    int tunFd,
+    int connFd,
+    const cryptCtx_t *crypt,
+    sessionState_t *state,
+    const protocolMessage_t *msg) {
+  long long now = nowMs();
+  state->lastValidInboundMs = now;
+
+  if (msg->type == protocolMsgData) {
+    if (!writeAll(tunFd, msg->buf, msg->nbytes)) {
+      return false;
+    }
+    if (!state->isServer) {
+      state->lastDataRecvMs = now;
+    }
+    dbgf("received %ld bytes of data", msg->nbytes);
+    return true;
+  }
+
+  if (msg->type == protocolMsgHeartbeatReq) {
+    if (!state->isServer) {
+      logf("unexpected heartbeat request on client");
+      return false;
+    }
+
+    protocolMessage_t ack = {
+        .type = protocolMsgHeartbeatAck,
+        .nbytes = 0,
+        .buf = NULL,
+    };
+    if (!sendMessage(connFd, crypt, &ack)) {
+      return false;
+    }
+    dbgf("heartbeat request received, sent ack");
+    return true;
+  }
+
+  if (msg->type == protocolMsgHeartbeatAck) {
+    if (state->isServer || !state->heartbeatPending) {
+      logf("unexpected heartbeat ack");
+      return false;
+    }
+
+    state->heartbeatPending = false;
+    dbgf("heartbeat ack received");
+    return true;
+  }
+
+  return false;
+}
+
+static bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState_t *state) {
+  int k = (int)read(connFd, state->tcpBuf, sizeof(state->tcpBuf));
   if (k <= 0) {
     return false;
   }
@@ -89,7 +197,8 @@ bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt) {
   int offset = 0;
   while (offset < k) {
     long consumed = 0;
-    protocolStatus_t status = protocolDecodeFeed(&tcpDecoder, tcpBuf + offset, k - offset, &consumed);
+    protocolStatus_t status =
+        protocolDecodeFeed(&state->tcpDecoder, state->tcpBuf + offset, k - offset, &consumed);
     if (status == protocolStatusBadFrame) {
       logf("bad frame");
       return false;
@@ -97,14 +206,14 @@ bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt) {
     if (consumed <= 0) {
       break;
     }
-    offset += consumed;
+    offset += (int)consumed;
 
-    if (!protocolDecoderHasFrame(&tcpDecoder)) {
+    if (!protocolDecoderHasFrame(&state->tcpDecoder)) {
       continue;
     }
 
     protocolFrame_t frame;
-    status = protocolDecoderTake(&tcpDecoder, &frame);
+    status = protocolDecoderTake(&state->tcpDecoder, &frame);
     if (status != protocolStatusOk) {
       return false;
     }
@@ -113,21 +222,58 @@ bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt) {
       return false;
     }
 
-    dbgf("read %ld bytes from remote", frame.nbytes);
+    protocolMessage_t msg;
+    if (protocolMessageDecodeFrame(&frame, &msg) != protocolStatusOk) {
+      logf("failed to decode message");
+      return false;
+    }
 
-    int i = 0;
-    while (i < frame.nbytes) {
-      int w = write(tunFd, frame.buf + i, frame.nbytes - i);
-      if (w <= 0) {
-        return false;
-      }
-      i += w;
+    if (!handleInboundMessage(tunFd, connFd, crypt, state, &msg)) {
+      return false;
     }
   }
 
-  if (offset < k) {
+  return true;
+}
+
+static bool heartbeatTick(int connFd, const cryptCtx_t *crypt, sessionState_t *state) {
+  long long now = nowMs();
+  long long timeoutMs = heartbeatTimeoutMs();
+
+  if (state->isServer) {
+    if (now - state->lastValidInboundMs >= timeoutMs) {
+      logf("server heartbeat timeout");
+      return false;
+    }
     return true;
   }
+
+  if (!state->heartbeatPending) {
+    bool idleSend = now - state->lastDataSentMs >= HEARTBEAT_INTERVAL_MS;
+    bool idleRecv = now - state->lastDataRecvMs >= HEARTBEAT_INTERVAL_MS;
+    bool intervalElapsed = now - state->lastHeartbeatReqMs >= HEARTBEAT_INTERVAL_MS;
+    if (idleSend && idleRecv && intervalElapsed) {
+      protocolMessage_t req = {
+          .type = protocolMsgHeartbeatReq,
+          .nbytes = 0,
+          .buf = NULL,
+      };
+      if (!sendMessage(connFd, crypt, &req)) {
+        return false;
+      }
+
+      state->heartbeatPending = true;
+      state->heartbeatSentMs = now;
+      state->lastHeartbeatReqMs = now;
+      dbgf("sent heartbeat request");
+    }
+  }
+
+  if (state->heartbeatPending && now - state->heartbeatSentMs >= timeoutMs) {
+    logf("client heartbeat timeout waiting for ack");
+    return false;
+  }
+
   return true;
 }
 
@@ -141,7 +287,7 @@ void epollAdd(int epollFd, int fd) {
   }
 }
 
-void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt) {
+void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt, bool isServer) {
   int tunFd = tunOpen(ifName);
 
   int epollFd = epoll_create(1);
@@ -150,37 +296,38 @@ void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt) {
   }
   epollAdd(epollFd, tunFd);
   epollAdd(epollFd, connFd);
-  protocolDecoderInit(&tcpDecoder);
+
+  sessionState_t state;
+  sessionStateInit(&state, isServer);
 
   bool stop = false;
   while (!stop) {
     struct epoll_event event;
-    int n = epoll_wait(epollFd, &event, 1, TIMEOUT);
-    int i;
+    int n = epoll_wait(epollFd, &event, 1, EPOLL_WAIT_MS);
     if (n < 0) {
       perrf("epoll wait failed");
-    } else if (n == 0) {
-      dbgf("no event");
-      continue;
     }
-    for (i = 0; i < n; i++) {
+    if (n > 0) {
       if (event.events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)) {
         logf("connection error or closed");
         stop = true;
-        break;
       } else if (event.events & EPOLLIN) {
         bool result;
         if (event.data.fd == tunFd) {
-          result = pipeTun(tunFd, connFd, crypt);
+          result = pipeTun(tunFd, connFd, crypt, &state);
         } else {
-          result = pipeTcp(tunFd, connFd, crypt);
+          result = pipeTcp(tunFd, connFd, crypt, &state);
         }
         if (!result) {
           logf("connection closed");
           stop = true;
         }
-        break;
       }
+    }
+
+    if (!stop && !heartbeatTick(connFd, crypt, &state)) {
+      logf("heartbeat failure");
+      stop = true;
     }
   }
 
@@ -213,7 +360,7 @@ void listenTcp(const char *ifName, const char *listenIP, int port, const cryptCt
     int clientPort = ntohs(clientAddr.sin_port);
     logf("connected with %s:%d", clientIP, clientPort);
 
-    serveTcp(ifName, connFd, crypt);
+    serveTcp(ifName, connFd, crypt, true);
   }
 
   close(listenFd);
@@ -231,7 +378,7 @@ void connTcp(const char *ifName, const char *remoteIP, int port, const cryptCtx_
   connect(connFd, (struct sockaddr *)&remoteAddr, sizeof(remoteAddr));
   logf("connected to %s:%d", remoteIP, port);
 
-  serveTcp(ifName, connFd, crypt);
+  serveTcp(ifName, connFd, crypt, false);
 }
 
 int main(int argc, char **argv) {

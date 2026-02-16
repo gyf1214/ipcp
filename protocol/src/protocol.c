@@ -3,6 +3,16 @@
 
 #include "protocol.h"
 
+static long protocolMessageHeaderSize() {
+  return (long)sizeof(unsigned char) + (long)sizeof(long);
+}
+
+static int protocolMessageTypeValid(protocolMessageType_t type) {
+  return type == protocolMsgData
+      || type == protocolMsgHeartbeatReq
+      || type == protocolMsgHeartbeatAck;
+}
+
 static long protocolExpectedSize(const protocolDecoder_t *decoder) {
   if (decoder->offset < (long)sizeof(decoder->frame.nbytes)) {
     return (long)sizeof(decoder->frame.nbytes);
@@ -84,6 +94,70 @@ protocolStatus_t protocolDecoderTake(protocolDecoder_t *decoder, protocolFrame_t
 
   memcpy(frame, &decoder->frame, (size_t)sizeof(frame->nbytes) + (size_t)decoder->frame.nbytes);
   protocolDecoderInit(decoder);
+  return protocolStatusOk;
+}
+
+long protocolMessageMaxPayloadSize() {
+  return protocolMaxPlaintextSize() - protocolMessageHeaderSize();
+}
+
+protocolStatus_t protocolMessageEncodeFrame(const protocolMessage_t *msg, protocolFrame_t *frame) {
+  if (msg == NULL || frame == NULL || !protocolMessageTypeValid(msg->type)) {
+    return protocolStatusBadFrame;
+  }
+  if (msg->nbytes < 0 || msg->nbytes > protocolMessageMaxPayloadSize()) {
+    return protocolStatusBadFrame;
+  }
+  if (msg->type == protocolMsgData && msg->nbytes <= 0) {
+    return protocolStatusBadFrame;
+  }
+  if ((msg->type == protocolMsgHeartbeatReq || msg->type == protocolMsgHeartbeatAck) && msg->nbytes != 0) {
+    return protocolStatusBadFrame;
+  }
+  if (msg->nbytes > 0 && msg->buf == NULL) {
+    return protocolStatusBadFrame;
+  }
+
+  long headerSize = protocolMessageHeaderSize();
+  frame->buf[0] = (char)msg->type;
+  memcpy(frame->buf + sizeof(unsigned char), &msg->nbytes, sizeof(msg->nbytes));
+  if (msg->nbytes > 0) {
+    memcpy(frame->buf + headerSize, msg->buf, (size_t)msg->nbytes);
+  }
+  frame->nbytes = headerSize + msg->nbytes;
+  return protocolStatusOk;
+}
+
+protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protocolMessage_t *msg) {
+  if (frame == NULL || msg == NULL || frame->nbytes < protocolMessageHeaderSize()) {
+    return protocolStatusBadFrame;
+  }
+
+  protocolMessageType_t type = (protocolMessageType_t)(unsigned char)frame->buf[0];
+  if (!protocolMessageTypeValid(type)) {
+    return protocolStatusBadFrame;
+  }
+
+  long nbytes = 0;
+  memcpy(&nbytes, frame->buf + sizeof(unsigned char), sizeof(nbytes));
+  if (nbytes < 0 || nbytes > protocolMessageMaxPayloadSize()) {
+    return protocolStatusBadFrame;
+  }
+
+  long expected = protocolMessageHeaderSize() + nbytes;
+  if (expected != frame->nbytes) {
+    return protocolStatusBadFrame;
+  }
+  if (type == protocolMsgData && nbytes <= 0) {
+    return protocolStatusBadFrame;
+  }
+  if ((type == protocolMsgHeartbeatReq || type == protocolMsgHeartbeatAck) && nbytes != 0) {
+    return protocolStatusBadFrame;
+  }
+
+  msg->type = type;
+  msg->nbytes = nbytes;
+  msg->buf = nbytes > 0 ? frame->buf + protocolMessageHeaderSize() : NULL;
   return protocolStatusOk;
 }
 
