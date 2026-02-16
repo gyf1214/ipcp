@@ -1,10 +1,12 @@
 #include <string.h>
+#include <stdint.h>
+#include <arpa/inet.h>
 #include <sodium.h>
 
 #include "protocol.h"
 
 static long protocolMessageHeaderSize() {
-  return (long)sizeof(unsigned char) + (long)sizeof(long);
+  return (long)sizeof(unsigned char) + ProtocolWireLengthSize;
 }
 
 static int protocolMessageTypeValid(protocolMessageType_t type) {
@@ -14,10 +16,27 @@ static int protocolMessageTypeValid(protocolMessageType_t type) {
 }
 
 static long protocolExpectedSize(const protocolDecoder_t *decoder) {
-  if (decoder->offset < (long)sizeof(decoder->frame.nbytes)) {
-    return (long)sizeof(decoder->frame.nbytes);
+  if (decoder->offset < ProtocolWireLengthSize) {
+    return ProtocolWireLengthSize;
   }
-  return (long)sizeof(decoder->frame.nbytes) + decoder->frame.nbytes;
+  return ProtocolWireLengthSize + decoder->frame.nbytes;
+}
+
+static int protocolLengthToWire(long nbytes, unsigned char out[ProtocolWireLengthSize]) {
+  if (nbytes < 0 || nbytes > ProtocolFrameSize) {
+    return 0;
+  }
+
+  uint32_t wire = htonl((uint32_t)nbytes);
+  memcpy(out, &wire, ProtocolWireLengthSize);
+  return 1;
+}
+
+static int protocolLengthFromWire(const unsigned char in[ProtocolWireLengthSize], long *nbytes) {
+  uint32_t wire = 0;
+  memcpy(&wire, in, ProtocolWireLengthSize);
+  *nbytes = (long)ntohl(wire);
+  return *nbytes >= 0 && *nbytes <= ProtocolFrameSize;
 }
 
 protocolStatus_t protocolEncode(const void *payload, long nbytes, protocolFrame_t *frame) {
@@ -56,16 +75,36 @@ protocolStatus_t protocolDecodeFeed(
       remain = available;
     }
 
+    if (decoder->offset < ProtocolWireLengthSize) {
+      memcpy(decoder->header + decoder->offset, input + totalConsumed, (size_t)remain);
+      decoder->offset += remain;
+      totalConsumed += remain;
+
+      if (decoder->offset < ProtocolWireLengthSize) {
+        continue;
+      }
+      if (!protocolLengthFromWire(decoder->header, &decoder->frame.nbytes)) {
+        if (consumed != NULL) {
+          *consumed = totalConsumed;
+        }
+        return protocolStatusBadFrame;
+      }
+      if (decoder->frame.nbytes <= 0) {
+        if (consumed != NULL) {
+          *consumed = totalConsumed;
+        }
+        return protocolStatusBadFrame;
+      }
+      continue;
+    }
+
     memcpy(
-        (char *)&decoder->frame + decoder->offset,
+        decoder->frame.buf + (decoder->offset - ProtocolWireLengthSize),
         input + totalConsumed,
         (size_t)remain);
     decoder->offset += remain;
     totalConsumed += remain;
 
-    if (decoder->offset < (long)sizeof(decoder->frame.nbytes)) {
-      continue;
-    }
     if (decoder->frame.nbytes <= 0 || decoder->frame.nbytes > ProtocolFrameSize) {
       if (consumed != NULL) {
         *consumed = totalConsumed;
@@ -122,8 +161,12 @@ protocolStatus_t protocolMessageEncodeFrame(const protocolMessage_t *msg, protoc
   }
 
   long headerSize = protocolMessageHeaderSize();
+  unsigned char wireLength[ProtocolWireLengthSize];
+  if (!protocolLengthToWire(msg->nbytes, wireLength)) {
+    return protocolStatusBadFrame;
+  }
   frame->buf[0] = (char)msg->type;
-  memcpy(frame->buf + sizeof(unsigned char), &msg->nbytes, sizeof(msg->nbytes));
+  memcpy(frame->buf + sizeof(unsigned char), wireLength, ProtocolWireLengthSize);
   if (msg->nbytes > 0) {
     memcpy(frame->buf + headerSize, msg->buf, (size_t)msg->nbytes);
   }
@@ -142,8 +185,10 @@ protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protoc
   }
 
   long nbytes = 0;
-  memcpy(&nbytes, frame->buf + sizeof(unsigned char), sizeof(nbytes));
-  if (nbytes < 0 || nbytes > protocolMessageMaxPayloadSize()) {
+  if (!protocolLengthFromWire((const unsigned char *)(frame->buf + sizeof(unsigned char)), &nbytes)) {
+    return protocolStatusBadFrame;
+  }
+  if (nbytes > protocolMessageMaxPayloadSize()) {
     return protocolStatusBadFrame;
   }
 

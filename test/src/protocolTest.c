@@ -31,16 +31,16 @@ void testEncodeRejectNullPayloadWithPositiveLength() {
 
 void testDecodeSplitFrame() {
   const char *payload = "hello";
-  protocolFrame_t encoded;
-  protocolStatus_t status = protocolEncode(payload, 5, &encoded);
-  assertTrue(status == protocolStatusOk, "encode should succeed");
-
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
 
-  const char *raw = (const char *)&encoded;
-  long rawLen = (long)sizeof(encoded.nbytes) + encoded.nbytes;
+  const unsigned char raw[] = {
+      0x00, 0x00, 0x00, 0x05,
+      'h', 'e', 'l', 'l', 'o',
+  };
+  long rawLen = (long)sizeof(raw);
   long consumed = 0;
+  protocolStatus_t status;
 
   status = protocolDecodeFeed(&decoder, raw, 2, &consumed);
   assertTrue(status == protocolStatusNeedMore, "partial header should require more");
@@ -63,11 +63,34 @@ void testDecodeRejectBadLength() {
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
 
-  long badSize = ProtocolFrameSize + 1;
+  const unsigned char badSize[] = {
+      0x00, 0x00, 0x10, 0x01,
+  };
   long consumed = 0;
   protocolStatus_t status = protocolDecodeFeed(
       &decoder, &badSize, sizeof(badSize), &consumed);
   assertTrue(status == protocolStatusBadFrame, "invalid size should fail");
+}
+
+void testDecodeUsesFixedBigEndianLengthHeader() {
+  protocolDecoder_t decoder;
+  protocolDecoderInit(&decoder);
+
+  const unsigned char raw[] = {
+      0x00, 0x00, 0x00, 0x03,
+      'a', 'b', 'c',
+  };
+  long consumed = 0;
+  protocolStatus_t status = protocolDecodeFeed(&decoder, raw, (long)sizeof(raw), &consumed);
+  assertTrue(status == protocolStatusOk, "decoder should accept fixed 32-bit length header");
+  assertTrue(consumed == (long)sizeof(raw), "decoder should consume full frame bytes");
+  assertTrue(protocolDecoderHasFrame(&decoder), "decoder should expose a frame");
+
+  protocolFrame_t frame;
+  status = protocolDecoderTake(&decoder, &frame);
+  assertTrue(status == protocolStatusOk, "taking decoded frame should succeed");
+  assertTrue(frame.nbytes == 3, "decoded frame length should match header");
+  assertTrue(memcmp(frame.buf, "abc", 3) == 0, "decoded frame payload should match");
 }
 
 void testGenericLoggingAvailable() {
@@ -195,12 +218,49 @@ void testMessageRejectInvalidSizeTypeCombo() {
   assertTrue(status == protocolStatusBadFrame, "data message without payload should fail");
 }
 
+void testMessageEncodeUsesFixedBigEndianLengthHeader() {
+  const char *payload = "abc";
+  protocolMessage_t msg = {
+      .type = protocolMsgData,
+      .nbytes = 3,
+      .buf = payload,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolMessageEncodeFrame(&msg, &frame);
+  assertTrue(status == protocolStatusOk, "message encode should succeed");
+  assertTrue(frame.nbytes == 8, "message wire size should be type + 32-bit length + payload");
+  assertTrue((unsigned char)frame.buf[0] == (unsigned char)protocolMsgData, "encoded type should match");
+  assertTrue((unsigned char)frame.buf[1] == 0x00, "length byte 0 should be big-endian");
+  assertTrue((unsigned char)frame.buf[2] == 0x00, "length byte 1 should be big-endian");
+  assertTrue((unsigned char)frame.buf[3] == 0x00, "length byte 2 should be big-endian");
+  assertTrue((unsigned char)frame.buf[4] == 0x03, "length byte 3 should be big-endian");
+  assertTrue(memcmp(frame.buf + 5, payload, 3) == 0, "encoded payload should match");
+}
+
+void testMessageDecodeUsesFixedBigEndianLengthHeader() {
+  protocolFrame_t frame = {
+      .nbytes = 8,
+      .buf = {
+          (char)protocolMsgData,
+          0x00, 0x00, 0x00, 0x03,
+          'x', 'y', 'z',
+      },
+  };
+  protocolMessage_t msg;
+  protocolStatus_t status = protocolMessageDecodeFrame(&frame, &msg);
+  assertTrue(status == protocolStatusOk, "message decode should parse fixed big-endian length");
+  assertTrue(msg.type == protocolMsgData, "decoded type should match");
+  assertTrue(msg.nbytes == 3, "decoded payload length should match");
+  assertTrue(memcmp(msg.buf, "xyz", 3) == 0, "decoded payload should match");
+}
+
 int main() {
   assertTrue(sodium_init() >= 0, "sodium init should succeed");
   testEncode();
   testEncodeRejectNullPayloadWithPositiveLength();
   testDecodeSplitFrame();
   testDecodeRejectBadLength();
+  testDecodeUsesFixedBigEndianLengthHeader();
   testGenericLoggingAvailable();
   testEncryptDecryptRoundTrip();
   testDecryptRejectTamper();
@@ -209,6 +269,8 @@ int main() {
   testMessageHeartbeatAckRoundTrip();
   testMessageRejectInvalidType();
   testMessageRejectInvalidSizeTypeCombo();
+  testMessageEncodeUsesFixedBigEndianLengthHeader();
+  testMessageDecodeUsesFixedBigEndianLengthHeader();
   fprintf(stderr, "PASS protocol tests\n");
   return 0;
 }

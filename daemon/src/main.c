@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 
 #include <unistd.h>
@@ -47,7 +48,7 @@ static long long heartbeatTimeoutMs() {
 }
 
 static long messageHeaderSize() {
-  return (long)sizeof(unsigned char) + (long)sizeof(long);
+  return (long)sizeof(unsigned char) + ProtocolWireLengthSize;
 }
 
 int tunOpen(const char *ifName) {
@@ -92,8 +93,9 @@ static bool sendMessage(int connFd, const cryptCtx_t *crypt, const protocolMessa
     return false;
   }
 
-  long nbytes = (long)sizeof(frame.nbytes) + frame.nbytes;
-  return writeAll(connFd, &frame, nbytes);
+  uint32_t wireLength = htonl((uint32_t)frame.nbytes);
+  return writeAll(connFd, &wireLength, ProtocolWireLengthSize)
+      && writeAll(connFd, frame.buf, frame.nbytes);
 }
 
 static void sessionStateInit(sessionState_t *state, bool isServer) {

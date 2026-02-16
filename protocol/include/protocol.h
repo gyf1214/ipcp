@@ -1,6 +1,7 @@
 #pragma once
 
 #define ProtocolFrameSize 4096
+#define ProtocolWireLengthSize 4
 #define ProtocolPskSize 32
 #define ProtocolNonceSize 24
 #define ProtocolAuthTagSize 16
@@ -14,6 +15,7 @@ typedef struct {
   protocolFrame_t frame;
   long offset;
   int hasFrame;
+  unsigned char header[ProtocolWireLengthSize];
 } protocolDecoder_t;
 
 typedef enum {
