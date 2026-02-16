@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "log.h"
 #include "protocol.h"
 
 void assertTrue(int cond, const char *msg) {
@@ -62,10 +63,18 @@ void testDecodeRejectBadLength() {
   assertTrue(status == protocolStatusBadFrame, "invalid size should fail");
 }
 
+void testGenericLoggingAvailable() {
+  const char *ts = logTimeStr();
+  assertTrue(ts != NULL, "logTimeStr should return a string");
+  assertTrue(ts[0] != '\0', "logTimeStr should not be empty");
+  logf("generic logging smoke test");
+}
+
 int main() {
   testEncode();
   testDecodeSplitFrame();
   testDecodeRejectBadLength();
+  testGenericLoggingAvailable();
   fprintf(stderr, "PASS protocol tests\n");
   return 0;
 }
