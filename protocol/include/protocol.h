@@ -1,6 +1,9 @@
 #pragma once
 
 #define ProtocolFrameSize 4096
+#define ProtocolPskSize 32
+#define ProtocolNonceSize 24
+#define ProtocolAuthTagSize 16
 
 typedef struct {
   long nbytes;
@@ -25,3 +28,7 @@ protocolStatus_t protocolDecodeFeed(
     protocolDecoder_t *decoder, const void *data, long nbytes, long *consumed);
 int protocolDecoderHasFrame(const protocolDecoder_t *decoder);
 protocolStatus_t protocolDecoderTake(protocolDecoder_t *decoder, protocolFrame_t *frame);
+
+long protocolMaxPlaintextSize();
+protocolStatus_t protocolFrameEncrypt(protocolFrame_t *frame, const unsigned char key[ProtocolPskSize]);
+protocolStatus_t protocolFrameDecrypt(protocolFrame_t *frame, const unsigned char key[ProtocolPskSize]);

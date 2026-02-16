@@ -17,6 +17,7 @@
 
 #include "log.h"
 #include "protocol.h"
+#include "crypt.h"
 
 int tunOpen(const char *ifName) {
   struct ifreq ifr;
@@ -44,10 +45,11 @@ int tunOpen(const char *ifName) {
 
 #define TIMEOUT     2000
 
-bool pipeTun(int tunFd, int connFd) {
+bool pipeTun(int tunFd, int connFd, const cryptCtx_t *crypt) {
   protocolFrame_t frame;
+  long maxPlain = protocolMaxPlaintextSize();
 
-  long nbytes = read(tunFd, frame.buf, sizeof(frame.buf));
+  long nbytes = read(tunFd, frame.buf, (size_t)maxPlain);
   if (nbytes <= 0) {
     return false;
   }
@@ -56,6 +58,10 @@ bool pipeTun(int tunFd, int connFd) {
 
   if (protocolEncode(frame.buf, nbytes, &frame) != protocolStatusOk) {
     logf("bad frame size from tun");
+    return false;
+  }
+  if (protocolFrameEncrypt(&frame, crypt->key) != protocolStatusOk) {
+    logf("failed to encrypt frame");
     return false;
   }
 
@@ -74,7 +80,7 @@ bool pipeTun(int tunFd, int connFd) {
 protocolDecoder_t tcpDecoder;
 char tcpBuf[ProtocolFrameSize];
 
-bool pipeTcp(int tunFd, int connFd) {
+bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt) {
   int k = read(connFd, tcpBuf, sizeof(tcpBuf));
   if (k <= 0) {
     return false;
@@ -100,6 +106,10 @@ bool pipeTcp(int tunFd, int connFd) {
     protocolFrame_t frame;
     status = protocolDecoderTake(&tcpDecoder, &frame);
     if (status != protocolStatusOk) {
+      return false;
+    }
+    if (protocolFrameDecrypt(&frame, crypt->key) != protocolStatusOk) {
+      logf("failed to decrypt/authenticate frame");
       return false;
     }
 
@@ -131,7 +141,7 @@ void epollAdd(int epollFd, int fd) {
   }
 }
 
-void serveTcp(const char *ifName, int connFd) {
+void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt) {
   int tunFd = tunOpen(ifName);
 
   int epollFd = epoll_create(1);
@@ -161,9 +171,9 @@ void serveTcp(const char *ifName, int connFd) {
       } else if (event.events & EPOLLIN) {
         bool result;
         if (event.data.fd == tunFd) {
-          result = pipeTun(tunFd, connFd);
+          result = pipeTun(tunFd, connFd, crypt);
         } else {
-          result = pipeTcp(tunFd, connFd);
+          result = pipeTcp(tunFd, connFd, crypt);
         }
         if (!result) {
           logf("connection closed");
@@ -179,7 +189,7 @@ void serveTcp(const char *ifName, int connFd) {
   logf("connection stopped");
 }
 
-void listenTcp(const char *ifName, const char *listenIP, int port) {
+void listenTcp(const char *ifName, const char *listenIP, int port, const cryptCtx_t *crypt) {
   int listenFd = socket(AF_INET, SOCK_STREAM, 0);
 
   struct sockaddr_in serverAddr;
@@ -203,14 +213,14 @@ void listenTcp(const char *ifName, const char *listenIP, int port) {
     int clientPort = ntohs(clientAddr.sin_port);
     logf("connected with %s:%d", clientIP, clientPort);
 
-    serveTcp(ifName, connFd);
+    serveTcp(ifName, connFd, crypt);
   }
 
   close(listenFd);
   logf("server stopped");
 }
 
-void connTcp(const char *ifName, const char *remoteIP, int port) {
+void connTcp(const char *ifName, const char *remoteIP, int port, const cryptCtx_t *crypt) {
   int connFd = socket(AF_INET, SOCK_STREAM, 0);
 
   struct sockaddr_in remoteAddr;
@@ -221,22 +231,29 @@ void connTcp(const char *ifName, const char *remoteIP, int port) {
   connect(connFd, (struct sockaddr *)&remoteAddr, sizeof(remoteAddr));
   logf("connected to %s:%d", remoteIP, port);
 
-  serveTcp(ifName, connFd);
+  serveTcp(ifName, connFd, crypt);
 }
 
 int main(int argc, char **argv) {
-  if (argc != 5) {
-    panicf("invalid arguments");
+  if (argc != 6) {
+    panicf("invalid arguments: <ifName> <ip> <port> <serverFlag> <secretFile>");
   }
   const char *ifName = argv[1];
   const char *ip = argv[2];
   int port = atoi(argv[3]);
   int server = atoi(argv[4]);
+  const char *secretFile = argv[5];
+
+  cryptCtx_t crypt;
+  cryptGlobalInit();
+  if (cryptInitFromFile(&crypt, secretFile) != 0) {
+    panicf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
+  }
 
   if (server) {
-    listenTcp(ifName, ip, port);
+    listenTcp(ifName, ip, port, &crypt);
   } else {
-    connTcp(ifName, ip, port);
+    connTcp(ifName, ip, port, &crypt);
   }
 
   return 0;

@@ -26,6 +26,7 @@ def main(args):
             'test',
             depends=['protocol', 'generic'],
             test_command='./target/test',
+            libs=[':libsodium.a']
         ),
     }
     make_projects(projects, debug=args.debug, test=args.test)

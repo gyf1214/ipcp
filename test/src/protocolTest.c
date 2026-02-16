@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sodium.h>
 
 #include "log.h"
 #include "protocol.h"
@@ -70,11 +71,50 @@ void testGenericLoggingAvailable() {
   logf("generic logging smoke test");
 }
 
+void testEncryptDecryptRoundTrip() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x2a, sizeof(key));
+
+  const char *payload = "secret-payload";
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolEncode(payload, (long)strlen(payload), &frame);
+  assertTrue(status == protocolStatusOk, "encode should succeed");
+
+  status = protocolFrameEncrypt(&frame, key);
+  assertTrue(status == protocolStatusOk, "encrypt should succeed");
+  assertTrue(frame.nbytes > (long)strlen(payload), "encrypted frame should be larger than plaintext");
+
+  status = protocolFrameDecrypt(&frame, key);
+  assertTrue(status == protocolStatusOk, "decrypt should succeed");
+  assertTrue(frame.nbytes == (long)strlen(payload), "decrypted length should match");
+  assertTrue(memcmp(frame.buf, payload, (size_t)frame.nbytes) == 0, "decrypted payload should match");
+}
+
+void testDecryptRejectTamper() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x7f, sizeof(key));
+
+  const char *payload = "auth-check";
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolEncode(payload, (long)strlen(payload), &frame);
+  assertTrue(status == protocolStatusOk, "encode should succeed");
+
+  status = protocolFrameEncrypt(&frame, key);
+  assertTrue(status == protocolStatusOk, "encrypt should succeed");
+
+  frame.buf[frame.nbytes - 1] ^= 0x1;
+  status = protocolFrameDecrypt(&frame, key);
+  assertTrue(status == protocolStatusBadFrame, "tampered payload should fail authentication");
+}
+
 int main() {
+  assertTrue(sodium_init() >= 0, "sodium init should succeed");
   testEncode();
   testDecodeSplitFrame();
   testDecodeRejectBadLength();
   testGenericLoggingAvailable();
+  testEncryptDecryptRoundTrip();
+  testDecryptRejectTamper();
   fprintf(stderr, "PASS protocol tests\n");
   return 0;
 }
