@@ -16,6 +16,7 @@
 #include <linux/if_tun.h>
 
 #include "log.h"
+#include "protocol.h"
 
 int tunOpen(const char *ifName) {
   struct ifreq ifr;
@@ -41,28 +42,27 @@ int tunOpen(const char *ifName) {
   return fd;
 }
 
-#define PACKET_SIZE 4096
 #define TIMEOUT     2000
 
-typedef struct packet_t {
-  long nbytes;
-  char buf[PACKET_SIZE];
-} packet_t;
-
 bool pipeTun(int tunFd, int connFd) {
-  static packet_t packet;
+  protocolFrame_t frame;
 
-  packet.nbytes = read(tunFd, packet.buf, sizeof(packet.buf));
-  if (packet.nbytes <= 0) {
+  long nbytes = read(tunFd, frame.buf, sizeof(frame.buf));
+  if (nbytes <= 0) {
     return false;
   }
 
-  dbgf("read %ld bytes from tun", packet.nbytes);
+  dbgf("read %ld bytes from tun", nbytes);
+
+  if (protocolEncode(frame.buf, nbytes, &frame) != protocolStatusOk) {
+    logf("bad frame size from tun");
+    return false;
+  }
 
   int i = 0;
-  int nbytes = sizeof(packet.nbytes) + packet.nbytes;
+  nbytes = sizeof(frame.nbytes) + frame.nbytes;
   while (i < nbytes) {
-    int k = write(connFd, (char *)&packet + i, nbytes - i);
+    int k = write(connFd, (char *)&frame + i, nbytes - i);
     if (k <= 0) {
       return false;
     }
@@ -71,50 +71,53 @@ bool pipeTun(int tunFd, int connFd) {
   return true;
 }
 
-packet_t tcpPacket;
-int tcpPacketOffset;
+protocolDecoder_t tcpDecoder;
+char tcpBuf[ProtocolFrameSize];
 
 bool pipeTcp(int tunFd, int connFd) {
-  if (tcpPacketOffset < sizeof(tcpPacket.nbytes)) {
-    int k = read(connFd, (char *)&tcpPacket + tcpPacketOffset, sizeof(tcpPacket.nbytes) - tcpPacketOffset);
-    if (k <= 0) {
+  int k = read(connFd, tcpBuf, sizeof(tcpBuf));
+  if (k <= 0) {
+    return false;
+  }
+
+  int offset = 0;
+  while (offset < k) {
+    long consumed = 0;
+    protocolStatus_t status = protocolDecodeFeed(&tcpDecoder, tcpBuf + offset, k - offset, &consumed);
+    if (status == protocolStatusBadFrame) {
+      logf("bad frame");
       return false;
     }
-    tcpPacketOffset += k;
-    if (tcpPacketOffset < sizeof(tcpPacket.nbytes)) {
-      return true;
+    if (consumed <= 0) {
+      break;
     }
-    if (tcpPacket.nbytes <= 0 || tcpPacket.nbytes > PACKET_SIZE) {
-      logf("bad packet");
+    offset += consumed;
+
+    if (!protocolDecoderHasFrame(&tcpDecoder)) {
+      continue;
+    }
+
+    protocolFrame_t frame;
+    status = protocolDecoderTake(&tcpDecoder, &frame);
+    if (status != protocolStatusOk) {
       return false;
     }
+
+    dbgf("read %ld bytes from remote", frame.nbytes);
+
+    int i = 0;
+    while (i < frame.nbytes) {
+      int w = write(tunFd, frame.buf + i, frame.nbytes - i);
+      if (w <= 0) {
+        return false;
+      }
+      i += w;
+    }
+  }
+
+  if (offset < k) {
     return true;
   }
-
-  int nbytes = sizeof(tcpPacket.nbytes) + tcpPacket.nbytes;
-  if (tcpPacketOffset < nbytes) {
-    int k = read(connFd, (char *)&tcpPacket + tcpPacketOffset, nbytes - tcpPacketOffset);
-    if (k <= 0) {
-      return false;
-    }
-    tcpPacketOffset += k;
-  }
-  if (tcpPacketOffset < nbytes) {
-    return true;
-  }
-
-  dbgf("read %ld bytes from remote", tcpPacket.nbytes);
-
-  nbytes = tcpPacket.nbytes;
-  int i = 0;
-  while (i < nbytes) {
-    int k = write(tunFd, tcpPacket.buf + i, nbytes - i);
-    if (k <= 0) {
-      return false;
-    }
-    i += k;
-  }
-  tcpPacketOffset = 0;
   return true;
 }
 
@@ -137,8 +140,7 @@ void serveTcp(const char *ifName, int connFd) {
   }
   epollAdd(epollFd, tunFd);
   epollAdd(epollFd, connFd);
-  memset(&tcpPacket, 0, sizeof(tcpPacket));
-  tcpPacketOffset = 0;
+  protocolDecoderInit(&tcpDecoder);
 
   bool stop = false;
   while (!stop) {

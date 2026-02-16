@@ -7,10 +7,20 @@ from metaproject import make_projects
 def main(args):
     print(f"Build config={args}")
     projects = {
+        'protocol': CProject(
+            'protocol',
+            output_name='libprotocol.a', output_type=CProject.OutputType.STATIC,
+        ),
         'daemon': CProject(
             'daemon',
             output_name='ipcpd', output_type=CProject.OutputType.BINARY,
+            depends=['protocol'],
             libs=[':libsodium.a']
+        ),
+        'test': TestProject(
+            'test',
+            depends=['protocol'],
+            test_command='./target/test',
         ),
     }
     make_projects(projects, debug=args.debug, test=args.test)
