@@ -23,6 +23,12 @@ void testEncode() {
   assertTrue(memcmp(frame.buf, payload, 3) == 0, "encoded payload should match");
 }
 
+void testEncodeRejectNullPayloadWithPositiveLength() {
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolEncode(NULL, 1, &frame);
+  assertTrue(status == protocolStatusBadFrame, "encode should reject NULL payload with positive length");
+}
+
 void testDecodeSplitFrame() {
   const char *payload = "hello";
   protocolFrame_t encoded;
@@ -192,6 +198,7 @@ void testMessageRejectInvalidSizeTypeCombo() {
 int main() {
   assertTrue(sodium_init() >= 0, "sodium init should succeed");
   testEncode();
+  testEncodeRejectNullPayloadWithPositiveLength();
   testDecodeSplitFrame();
   testDecodeRejectBadLength();
   testGenericLoggingAvailable();

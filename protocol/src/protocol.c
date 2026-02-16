@@ -21,7 +21,10 @@ static long protocolExpectedSize(const protocolDecoder_t *decoder) {
 }
 
 protocolStatus_t protocolEncode(const void *payload, long nbytes, protocolFrame_t *frame) {
-  if (nbytes <= 0 || nbytes > ProtocolFrameSize) {
+  if (frame == NULL || nbytes <= 0 || nbytes > ProtocolFrameSize) {
+    return protocolStatusBadFrame;
+  }
+  if (payload == NULL) {
     return protocolStatusBadFrame;
   }
 
