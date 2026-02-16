@@ -375,7 +375,10 @@ void connTcp(const char *ifName, const char *remoteIP, int port, const cryptCtx_
   inet_pton(AF_INET, remoteIP, &remoteAddr.sin_addr);
   remoteAddr.sin_port = htons(port);
 
-  connect(connFd, (struct sockaddr *)&remoteAddr, sizeof(remoteAddr));
+  if (connect(connFd, (struct sockaddr *)&remoteAddr, sizeof(remoteAddr)) < 0) {
+    close(connFd);
+    perrf("connect to %s:%d failed", remoteIP, port);
+  }
   logf("connected to %s:%d", remoteIP, port);
 
   serveTcp(ifName, connFd, crypt, false);
