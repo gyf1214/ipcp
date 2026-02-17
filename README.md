@@ -21,6 +21,7 @@
 ## Build
 
 This project assumes a Linux host.
+If you prefer containerized builds, this repository includes a `Dockerfile`.
 
 ### Required tools and libraries
 
