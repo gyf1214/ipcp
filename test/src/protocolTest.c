@@ -5,6 +5,7 @@
 
 #include "log.h"
 #include "protocol.h"
+#include "ioTest.h"
 
 void assertTrue(int cond, const char *msg) {
   if (!cond) {
@@ -271,6 +272,7 @@ int main() {
   testMessageRejectInvalidSizeTypeCombo();
   testMessageEncodeUsesFixedBigEndianLengthHeader();
   testMessageDecodeUsesFixedBigEndianLengthHeader();
+  runIoTests();
   fprintf(stderr, "PASS protocol tests\n");
   return 0;
 }

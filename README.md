@@ -56,6 +56,7 @@ After `make all`:
 - `daemon/target/ipcpd` - daemon binary
 - `generic/target/libgeneric.a` - generic utility static library
 - `protocol/target/libprotocol.a` - protocol static library
+- `io/target/libio.a` - fd-level I/O and poller static library
 
 After `make test`:
 
@@ -102,3 +103,9 @@ Client:
 - Requires Linux with `/dev/net/tun`
 - `ipcpd` does not inherently require root; TUN create/manage operations require appropriate privileges (typically `CAP_NET_ADMIN`, often via root or pre-provisioned device ownership)
 - Interface IP assignment and routing are environment-specific and should be configured separately with `ip` tooling
+
+## Component Roles
+
+- `io`: fd-level polling and read/write primitives (`epoll`, bounded reads, full writes)
+- `protocol`: framing, typed messages, and crypto envelope
+- `daemon`: runtime policy and session behavior (TUN/TCP flow, heartbeat, client/server lifecycle)

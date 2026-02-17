@@ -10,7 +10,6 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -20,6 +19,7 @@
 #include "log.h"
 #include "protocol.h"
 #include "crypt.h"
+#include "io.h"
 
 #define EPOLL_WAIT_MS          200
 #define HEARTBEAT_INTERVAL_MS  5000
@@ -71,19 +71,6 @@ int tunOpen(const char *ifName) {
   return fd;
 }
 
-static bool writeAll(int fd, const void *data, long nbytes) {
-  long i = 0;
-  const char *buf = (const char *)data;
-  while (i < nbytes) {
-    long k = (long)write(fd, buf + i, (size_t)(nbytes - i));
-    if (k <= 0) {
-      return false;
-    }
-    i += k;
-  }
-  return true;
-}
-
 static bool sendMessage(int connFd, const cryptCtx_t *crypt, const protocolMessage_t *msg) {
   protocolFrame_t frame;
   if (protocolMessageEncodeFrame(msg, &frame) != protocolStatusOk) {
@@ -94,8 +81,8 @@ static bool sendMessage(int connFd, const cryptCtx_t *crypt, const protocolMessa
   }
 
   uint32_t wireLength = htonl((uint32_t)frame.nbytes);
-  return writeAll(connFd, &wireLength, ProtocolWireLengthSize)
-      && writeAll(connFd, frame.buf, frame.nbytes);
+  return ioWriteAll(connFd, &wireLength, ProtocolWireLengthSize)
+      && ioWriteAll(connFd, frame.buf, frame.nbytes);
 }
 
 static void sessionStateInit(sessionState_t *state, bool isServer) {
@@ -112,12 +99,13 @@ static void sessionStateInit(sessionState_t *state, bool isServer) {
 static bool pipeTun(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState_t *state) {
   char payload[ProtocolFrameSize];
   long maxPayload = protocolMaxPlaintextSize() - messageHeaderSize();
+  long nbytes = 0;
+
   if (maxPayload <= 0) {
     return false;
   }
 
-  long nbytes = (long)read(tunFd, payload, (size_t)maxPayload);
-  if (nbytes <= 0) {
+  if (ioReadSome(tunFd, payload, maxPayload, &nbytes) != ioStatusOk) {
     return false;
   }
 
@@ -148,7 +136,7 @@ static bool handleInboundMessage(
   state->lastValidInboundMs = now;
 
   if (msg->type == protocolMsgData) {
-    if (!writeAll(tunFd, msg->buf, msg->nbytes)) {
+    if (!ioWriteAll(tunFd, msg->buf, msg->nbytes)) {
       return false;
     }
     if (!state->isServer) {
@@ -191,12 +179,15 @@ static bool handleInboundMessage(
 }
 
 static bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState_t *state) {
-  int k = (int)read(connFd, state->tcpBuf, sizeof(state->tcpBuf));
-  if (k <= 0) {
+  long nbytes = 0;
+  int offset = 0;
+  int k;
+
+  if (ioReadSome(connFd, state->tcpBuf, sizeof(state->tcpBuf), &nbytes) != ioStatusOk) {
     return false;
   }
+  k = (int)nbytes;
 
-  int offset = 0;
   while (offset < k) {
     long consumed = 0;
     protocolStatus_t status =
@@ -279,51 +270,33 @@ static bool heartbeatTick(int connFd, const cryptCtx_t *crypt, sessionState_t *s
   return true;
 }
 
-void epollAdd(int epollFd, int fd) {
-  struct epoll_event event;
-  event.events = EPOLLIN | EPOLLRDHUP;
-  event.data.fd = fd;
-
-  if (epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &event) < 0) {
-    perrf("setup epoll failed");
-  }
-}
-
 void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt, bool isServer) {
   int tunFd = tunOpen(ifName);
+  ioPoller_t poller;
 
-  int epollFd = epoll_create(1);
-  if (epollFd < 0) {
+  if (ioPollerInit(&poller, tunFd, connFd) != 0) {
     perrf("setup epoll failed");
   }
-  epollAdd(epollFd, tunFd);
-  epollAdd(epollFd, connFd);
 
   sessionState_t state;
   sessionStateInit(&state, isServer);
 
   bool stop = false;
   while (!stop) {
-    struct epoll_event event;
-    int n = epoll_wait(epollFd, &event, 1, EPOLL_WAIT_MS);
-    if (n < 0) {
-      perrf("epoll wait failed");
-    }
-    if (n > 0) {
-      if (event.events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)) {
-        logf("connection error or closed");
+    ioEvent_t event = ioPollerWait(&poller, EPOLL_WAIT_MS);
+    if (event == ioEventError) {
+      logf("connection error or closed");
+      stop = true;
+    } else if (event == ioEventTun || event == ioEventTcp) {
+      bool result;
+      if (event == ioEventTun) {
+        result = pipeTun(tunFd, connFd, crypt, &state);
+      } else {
+        result = pipeTcp(tunFd, connFd, crypt, &state);
+      }
+      if (!result) {
+        logf("connection closed");
         stop = true;
-      } else if (event.events & EPOLLIN) {
-        bool result;
-        if (event.data.fd == tunFd) {
-          result = pipeTun(tunFd, connFd, crypt, &state);
-        } else {
-          result = pipeTcp(tunFd, connFd, crypt, &state);
-        }
-        if (!result) {
-          logf("connection closed");
-          stop = true;
-        }
       }
     }
 
@@ -333,6 +306,7 @@ void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt, bool isSe
     }
   }
 
+  ioPollerClose(&poller);
   close(connFd);
   close(tunFd);
   logf("connection stopped");

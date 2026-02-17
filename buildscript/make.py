@@ -16,15 +16,19 @@ def main(args):
             output_name='libprotocol.a', output_type=CProject.OutputType.STATIC,
             depends=['generic'],
         ),
+        'io': CProject(
+            'io',
+            output_name='libio.a', output_type=CProject.OutputType.STATIC,
+        ),
         'daemon': CProject(
             'daemon',
             output_name='ipcpd', output_type=CProject.OutputType.BINARY,
-            depends=['protocol', 'generic'],
+            depends=['protocol', 'generic', 'io'],
             libs=[':libsodium.a']
         ),
         'test': TestProject(
             'test',
-            depends=['protocol', 'generic'],
+            depends=['protocol', 'generic', 'io'],
             test_command='./target/test',
             libs=[':libsodium.a']
         ),
