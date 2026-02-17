@@ -34,8 +34,10 @@ def main(args):
 
 def add_flag(parser: ArgumentParser, flag: str):
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(f'-{flag}', f'--{flag}', action='store_true')
-    group.add_argument(f'-no-{flag}', f'--no-{flag}', action='store_true')
+    group.add_argument(f'-{flag}', f'--{flag}', dest=flag,
+                       action='store_true')
+    group.add_argument(f'-no-{flag}', f'--no-{flag}', dest=flag,
+                       action='store_false')
 
 
 def parse_args():
