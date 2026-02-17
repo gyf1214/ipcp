@@ -5,29 +5,22 @@
 
 #include "log.h"
 #include "protocol.h"
-#include "ioTest.h"
-
-void assertTrue(int cond, const char *msg) {
-  if (!cond) {
-    fprintf(stderr, "FAIL: %s\n", msg);
-    exit(1);
-  }
-}
+#include "testAssert.h"
 
 void testEncode() {
   const char *payload = "abc";
   protocolFrame_t frame;
   protocolStatus_t status = protocolEncode(payload, 3, &frame);
 
-  assertTrue(status == protocolStatusOk, "encode should succeed");
-  assertTrue(frame.nbytes == 3, "encoded length should match input");
-  assertTrue(memcmp(frame.buf, payload, 3) == 0, "encoded payload should match");
+  testAssertTrue(status == protocolStatusOk, "encode should succeed");
+  testAssertTrue(frame.nbytes == 3, "encoded length should match input");
+  testAssertTrue(memcmp(frame.buf, payload, 3) == 0, "encoded payload should match");
 }
 
 void testEncodeRejectNullPayloadWithPositiveLength() {
   protocolFrame_t frame;
   protocolStatus_t status = protocolEncode(NULL, 1, &frame);
-  assertTrue(status == protocolStatusBadFrame, "encode should reject NULL payload with positive length");
+  testAssertTrue(status == protocolStatusBadFrame, "encode should reject NULL payload with positive length");
 }
 
 void testDecodeSplitFrame() {
@@ -44,20 +37,20 @@ void testDecodeSplitFrame() {
   protocolStatus_t status;
 
   status = protocolDecodeFeed(&decoder, raw, 2, &consumed);
-  assertTrue(status == protocolStatusNeedMore, "partial header should require more");
-  assertTrue(consumed == 2, "should consume provided bytes");
-  assertTrue(!protocolDecoderHasFrame(&decoder), "frame should not be ready");
+  testAssertTrue(status == protocolStatusNeedMore, "partial header should require more");
+  testAssertTrue(consumed == 2, "should consume provided bytes");
+  testAssertTrue(!protocolDecoderHasFrame(&decoder), "frame should not be ready");
 
   status = protocolDecodeFeed(&decoder, raw + 2, rawLen - 2, &consumed);
-  assertTrue(status == protocolStatusOk, "rest of frame should decode");
-  assertTrue(consumed == rawLen - 2, "should consume remaining bytes");
-  assertTrue(protocolDecoderHasFrame(&decoder), "frame should be ready");
+  testAssertTrue(status == protocolStatusOk, "rest of frame should decode");
+  testAssertTrue(consumed == rawLen - 2, "should consume remaining bytes");
+  testAssertTrue(protocolDecoderHasFrame(&decoder), "frame should be ready");
 
   protocolFrame_t decoded;
   status = protocolDecoderTake(&decoder, &decoded);
-  assertTrue(status == protocolStatusOk, "take should succeed");
-  assertTrue(decoded.nbytes == 5, "decoded length should match");
-  assertTrue(memcmp(decoded.buf, payload, 5) == 0, "decoded payload should match");
+  testAssertTrue(status == protocolStatusOk, "take should succeed");
+  testAssertTrue(decoded.nbytes == 5, "decoded length should match");
+  testAssertTrue(memcmp(decoded.buf, payload, 5) == 0, "decoded payload should match");
 }
 
 void testDecodeRejectBadLength() {
@@ -70,7 +63,7 @@ void testDecodeRejectBadLength() {
   long consumed = 0;
   protocolStatus_t status = protocolDecodeFeed(
       &decoder, &badSize, sizeof(badSize), &consumed);
-  assertTrue(status == protocolStatusBadFrame, "invalid size should fail");
+  testAssertTrue(status == protocolStatusBadFrame, "invalid size should fail");
 }
 
 void testDecodeUsesFixedBigEndianLengthHeader() {
@@ -83,21 +76,21 @@ void testDecodeUsesFixedBigEndianLengthHeader() {
   };
   long consumed = 0;
   protocolStatus_t status = protocolDecodeFeed(&decoder, raw, (long)sizeof(raw), &consumed);
-  assertTrue(status == protocolStatusOk, "decoder should accept fixed 32-bit length header");
-  assertTrue(consumed == (long)sizeof(raw), "decoder should consume full frame bytes");
-  assertTrue(protocolDecoderHasFrame(&decoder), "decoder should expose a frame");
+  testAssertTrue(status == protocolStatusOk, "decoder should accept fixed 32-bit length header");
+  testAssertTrue(consumed == (long)sizeof(raw), "decoder should consume full frame bytes");
+  testAssertTrue(protocolDecoderHasFrame(&decoder), "decoder should expose a frame");
 
   protocolFrame_t frame;
   status = protocolDecoderTake(&decoder, &frame);
-  assertTrue(status == protocolStatusOk, "taking decoded frame should succeed");
-  assertTrue(frame.nbytes == 3, "decoded frame length should match header");
-  assertTrue(memcmp(frame.buf, "abc", 3) == 0, "decoded frame payload should match");
+  testAssertTrue(status == protocolStatusOk, "taking decoded frame should succeed");
+  testAssertTrue(frame.nbytes == 3, "decoded frame length should match header");
+  testAssertTrue(memcmp(frame.buf, "abc", 3) == 0, "decoded frame payload should match");
 }
 
 void testGenericLoggingAvailable() {
   const char *ts = logTimeStr();
-  assertTrue(ts != NULL, "logTimeStr should return a string");
-  assertTrue(ts[0] != '\0', "logTimeStr should not be empty");
+  testAssertTrue(ts != NULL, "logTimeStr should return a string");
+  testAssertTrue(ts[0] != '\0', "logTimeStr should not be empty");
   logf("generic logging smoke test");
 }
 
@@ -108,16 +101,16 @@ void testEncryptDecryptRoundTrip() {
   const char *payload = "secret-payload";
   protocolFrame_t frame;
   protocolStatus_t status = protocolEncode(payload, (long)strlen(payload), &frame);
-  assertTrue(status == protocolStatusOk, "encode should succeed");
+  testAssertTrue(status == protocolStatusOk, "encode should succeed");
 
   status = protocolFrameEncrypt(&frame, key);
-  assertTrue(status == protocolStatusOk, "encrypt should succeed");
-  assertTrue(frame.nbytes > (long)strlen(payload), "encrypted frame should be larger than plaintext");
+  testAssertTrue(status == protocolStatusOk, "encrypt should succeed");
+  testAssertTrue(frame.nbytes > (long)strlen(payload), "encrypted frame should be larger than plaintext");
 
   status = protocolFrameDecrypt(&frame, key);
-  assertTrue(status == protocolStatusOk, "decrypt should succeed");
-  assertTrue(frame.nbytes == (long)strlen(payload), "decrypted length should match");
-  assertTrue(memcmp(frame.buf, payload, (size_t)frame.nbytes) == 0, "decrypted payload should match");
+  testAssertTrue(status == protocolStatusOk, "decrypt should succeed");
+  testAssertTrue(frame.nbytes == (long)strlen(payload), "decrypted length should match");
+  testAssertTrue(memcmp(frame.buf, payload, (size_t)frame.nbytes) == 0, "decrypted payload should match");
 }
 
 void testDecryptRejectTamper() {
@@ -127,14 +120,14 @@ void testDecryptRejectTamper() {
   const char *payload = "auth-check";
   protocolFrame_t frame;
   protocolStatus_t status = protocolEncode(payload, (long)strlen(payload), &frame);
-  assertTrue(status == protocolStatusOk, "encode should succeed");
+  testAssertTrue(status == protocolStatusOk, "encode should succeed");
 
   status = protocolFrameEncrypt(&frame, key);
-  assertTrue(status == protocolStatusOk, "encrypt should succeed");
+  testAssertTrue(status == protocolStatusOk, "encrypt should succeed");
 
   frame.buf[frame.nbytes - 1] ^= 0x1;
   status = protocolFrameDecrypt(&frame, key);
-  assertTrue(status == protocolStatusBadFrame, "tampered payload should fail authentication");
+  testAssertTrue(status == protocolStatusBadFrame, "tampered payload should fail authentication");
 }
 
 void testMessageDataRoundTrip() {
@@ -146,14 +139,14 @@ void testMessageDataRoundTrip() {
   };
   protocolFrame_t frame;
   protocolStatus_t status = protocolMessageEncodeFrame(&in, &frame);
-  assertTrue(status == protocolStatusOk, "data message encode should succeed");
+  testAssertTrue(status == protocolStatusOk, "data message encode should succeed");
 
   protocolMessage_t out;
   status = protocolMessageDecodeFrame(&frame, &out);
-  assertTrue(status == protocolStatusOk, "data message decode should succeed");
-  assertTrue(out.type == protocolMsgData, "decoded data message type should match");
-  assertTrue(out.nbytes == in.nbytes, "decoded data payload length should match");
-  assertTrue(memcmp(out.buf, payload, (size_t)out.nbytes) == 0, "decoded data payload should match");
+  testAssertTrue(status == protocolStatusOk, "data message decode should succeed");
+  testAssertTrue(out.type == protocolMsgData, "decoded data message type should match");
+  testAssertTrue(out.nbytes == in.nbytes, "decoded data payload length should match");
+  testAssertTrue(memcmp(out.buf, payload, (size_t)out.nbytes) == 0, "decoded data payload should match");
 }
 
 void testMessageHeartbeatReqRoundTrip() {
@@ -164,13 +157,13 @@ void testMessageHeartbeatReqRoundTrip() {
   };
   protocolFrame_t frame;
   protocolStatus_t status = protocolMessageEncodeFrame(&in, &frame);
-  assertTrue(status == protocolStatusOk, "heartbeat request encode should succeed");
+  testAssertTrue(status == protocolStatusOk, "heartbeat request encode should succeed");
 
   protocolMessage_t out;
   status = protocolMessageDecodeFrame(&frame, &out);
-  assertTrue(status == protocolStatusOk, "heartbeat request decode should succeed");
-  assertTrue(out.type == protocolMsgHeartbeatReq, "decoded heartbeat request type should match");
-  assertTrue(out.nbytes == 0, "decoded heartbeat request should be empty");
+  testAssertTrue(status == protocolStatusOk, "heartbeat request decode should succeed");
+  testAssertTrue(out.type == protocolMsgHeartbeatReq, "decoded heartbeat request type should match");
+  testAssertTrue(out.nbytes == 0, "decoded heartbeat request should be empty");
 }
 
 void testMessageHeartbeatAckRoundTrip() {
@@ -181,13 +174,13 @@ void testMessageHeartbeatAckRoundTrip() {
   };
   protocolFrame_t frame;
   protocolStatus_t status = protocolMessageEncodeFrame(&in, &frame);
-  assertTrue(status == protocolStatusOk, "heartbeat ack encode should succeed");
+  testAssertTrue(status == protocolStatusOk, "heartbeat ack encode should succeed");
 
   protocolMessage_t out;
   status = protocolMessageDecodeFrame(&frame, &out);
-  assertTrue(status == protocolStatusOk, "heartbeat ack decode should succeed");
-  assertTrue(out.type == protocolMsgHeartbeatAck, "decoded heartbeat ack type should match");
-  assertTrue(out.nbytes == 0, "decoded heartbeat ack should be empty");
+  testAssertTrue(status == protocolStatusOk, "heartbeat ack decode should succeed");
+  testAssertTrue(out.type == protocolMsgHeartbeatAck, "decoded heartbeat ack type should match");
+  testAssertTrue(out.nbytes == 0, "decoded heartbeat ack should be empty");
 }
 
 void testMessageRejectInvalidType() {
@@ -196,7 +189,7 @@ void testMessageRejectInvalidType() {
   frame.nbytes = 1;
   protocolMessage_t out;
   protocolStatus_t status = protocolMessageDecodeFrame(&frame, &out);
-  assertTrue(status == protocolStatusBadFrame, "invalid message type should fail");
+  testAssertTrue(status == protocolStatusBadFrame, "invalid message type should fail");
 }
 
 void testMessageRejectInvalidSizeTypeCombo() {
@@ -208,7 +201,7 @@ void testMessageRejectInvalidSizeTypeCombo() {
   };
   protocolFrame_t frame;
   protocolStatus_t status = protocolMessageEncodeFrame(&hbReqBad, &frame);
-  assertTrue(status == protocolStatusBadFrame, "heartbeat request with payload should fail");
+  testAssertTrue(status == protocolStatusBadFrame, "heartbeat request with payload should fail");
 
   protocolMessage_t dataBad = {
       .type = protocolMsgData,
@@ -216,7 +209,7 @@ void testMessageRejectInvalidSizeTypeCombo() {
       .buf = NULL,
   };
   status = protocolMessageEncodeFrame(&dataBad, &frame);
-  assertTrue(status == protocolStatusBadFrame, "data message without payload should fail");
+  testAssertTrue(status == protocolStatusBadFrame, "data message without payload should fail");
 }
 
 void testMessageEncodeUsesFixedBigEndianLengthHeader() {
@@ -228,14 +221,14 @@ void testMessageEncodeUsesFixedBigEndianLengthHeader() {
   };
   protocolFrame_t frame;
   protocolStatus_t status = protocolMessageEncodeFrame(&msg, &frame);
-  assertTrue(status == protocolStatusOk, "message encode should succeed");
-  assertTrue(frame.nbytes == 8, "message wire size should be type + 32-bit length + payload");
-  assertTrue((unsigned char)frame.buf[0] == (unsigned char)protocolMsgData, "encoded type should match");
-  assertTrue((unsigned char)frame.buf[1] == 0x00, "length byte 0 should be big-endian");
-  assertTrue((unsigned char)frame.buf[2] == 0x00, "length byte 1 should be big-endian");
-  assertTrue((unsigned char)frame.buf[3] == 0x00, "length byte 2 should be big-endian");
-  assertTrue((unsigned char)frame.buf[4] == 0x03, "length byte 3 should be big-endian");
-  assertTrue(memcmp(frame.buf + 5, payload, 3) == 0, "encoded payload should match");
+  testAssertTrue(status == protocolStatusOk, "message encode should succeed");
+  testAssertTrue(frame.nbytes == 8, "message wire size should be type + 32-bit length + payload");
+  testAssertTrue((unsigned char)frame.buf[0] == (unsigned char)protocolMsgData, "encoded type should match");
+  testAssertTrue((unsigned char)frame.buf[1] == 0x00, "length byte 0 should be big-endian");
+  testAssertTrue((unsigned char)frame.buf[2] == 0x00, "length byte 1 should be big-endian");
+  testAssertTrue((unsigned char)frame.buf[3] == 0x00, "length byte 2 should be big-endian");
+  testAssertTrue((unsigned char)frame.buf[4] == 0x03, "length byte 3 should be big-endian");
+  testAssertTrue(memcmp(frame.buf + 5, payload, 3) == 0, "encoded payload should match");
 }
 
 void testMessageDecodeUsesFixedBigEndianLengthHeader() {
@@ -249,14 +242,14 @@ void testMessageDecodeUsesFixedBigEndianLengthHeader() {
   };
   protocolMessage_t msg;
   protocolStatus_t status = protocolMessageDecodeFrame(&frame, &msg);
-  assertTrue(status == protocolStatusOk, "message decode should parse fixed big-endian length");
-  assertTrue(msg.type == protocolMsgData, "decoded type should match");
-  assertTrue(msg.nbytes == 3, "decoded payload length should match");
-  assertTrue(memcmp(msg.buf, "xyz", 3) == 0, "decoded payload should match");
+  testAssertTrue(status == protocolStatusOk, "message decode should parse fixed big-endian length");
+  testAssertTrue(msg.type == protocolMsgData, "decoded type should match");
+  testAssertTrue(msg.nbytes == 3, "decoded payload length should match");
+  testAssertTrue(memcmp(msg.buf, "xyz", 3) == 0, "decoded payload should match");
 }
 
 void runProtocolTests(void) {
-  assertTrue(sodium_init() >= 0, "sodium init should succeed");
+  testAssertTrue(sodium_init() >= 0, "sodium init should succeed");
   testEncode();
   testEncodeRejectNullPayloadWithPositiveLength();
   testDecodeSplitFrame();
@@ -272,6 +265,5 @@ void runProtocolTests(void) {
   testMessageRejectInvalidSizeTypeCombo();
   testMessageEncodeUsesFixedBigEndianLengthHeader();
   testMessageDecodeUsesFixedBigEndianLengthHeader();
-  runIoTests();
   fprintf(stderr, "PASS protocol tests\n");
 }

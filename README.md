@@ -60,7 +60,13 @@ After `make all`:
 
 After `make test`:
 
-- `test/target/test` - protocol test binary (also executed by `make test`)
+- `test/target/test` - unified test runner binary (executed by `make test`)
+
+Manual subset examples:
+
+- `./test/target/test protocol` - run protocol suite only
+- `./test/target/test io` - run IO suite only
+- unknown suite names return a non-zero exit and usage message
 
 ## `ipcpd` Usage
 

@@ -6,13 +6,7 @@
 
 #include "ioTest.h"
 #include "io.h"
-
-static void assertIoTrue(int cond, const char *msg) {
-  if (!cond) {
-    fprintf(stderr, "FAIL: %s\n", msg);
-    exit(1);
-  }
-}
+#include "testAssert.h"
 
 static void testIoWriteAllAndReadSomeOk(void) {
   int fds[2];
@@ -21,13 +15,13 @@ static void testIoWriteAllAndReadSomeOk(void) {
   const char *payload = "io-write-all";
   ioStatus_t status;
 
-  assertIoTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair should succeed");
-  assertIoTrue(ioWriteAll(fds[0], payload, (long)strlen(payload)), "ioWriteAll should succeed");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair should succeed");
+  testAssertTrue(ioWriteAll(fds[0], payload, (long)strlen(payload)), "ioWriteAll should succeed");
 
   status = ioReadSome(fds[1], buf, sizeof(buf), &outNbytes);
-  assertIoTrue(status == ioStatusOk, "ioReadSome should report ioStatusOk");
-  assertIoTrue(outNbytes == (long)strlen(payload), "ioReadSome should report bytes read");
-  assertIoTrue(memcmp(buf, payload, (size_t)outNbytes) == 0, "ioReadSome bytes should match written payload");
+  testAssertTrue(status == ioStatusOk, "ioReadSome should report ioStatusOk");
+  testAssertTrue(outNbytes == (long)strlen(payload), "ioReadSome should report bytes read");
+  testAssertTrue(memcmp(buf, payload, (size_t)outNbytes) == 0, "ioReadSome bytes should match written payload");
 
   close(fds[0]);
   close(fds[1]);
@@ -39,12 +33,12 @@ static void testIoReadSomeClosed(void) {
   long outNbytes = -1;
   ioStatus_t status;
 
-  assertIoTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair should succeed");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair should succeed");
   close(fds[0]);
   status = ioReadSome(fds[1], buf, sizeof(buf), &outNbytes);
 
-  assertIoTrue(status == ioStatusClosed, "ioReadSome should report ioStatusClosed on EOF");
-  assertIoTrue(outNbytes == 0, "ioReadSome closed should return outNbytes=0");
+  testAssertTrue(status == ioStatusClosed, "ioReadSome should report ioStatusClosed on EOF");
+  testAssertTrue(outNbytes == 0, "ioReadSome closed should return outNbytes=0");
   close(fds[1]);
 }
 
@@ -53,8 +47,8 @@ static void testIoReadSomeError(void) {
   long outNbytes = -1;
   ioStatus_t status = ioReadSome(-1, buf, sizeof(buf), &outNbytes);
 
-  assertIoTrue(status == ioStatusError, "ioReadSome should report ioStatusError on invalid fd");
-  assertIoTrue(outNbytes == 0, "ioReadSome error should return outNbytes=0");
+  testAssertTrue(status == ioStatusError, "ioReadSome should report ioStatusError on invalid fd");
+  testAssertTrue(outNbytes == 0, "ioReadSome error should return outNbytes=0");
 }
 
 static void testIoPollerTimeout(void) {
@@ -63,12 +57,12 @@ static void testIoPollerTimeout(void) {
   ioPoller_t poller;
   ioEvent_t event;
 
-  assertIoTrue(pipe(tunPipe) == 0, "tun pipe should be created");
-  assertIoTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
-  assertIoTrue(ioPollerInit(&poller, tunPipe[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(pipe(tunPipe) == 0, "tun pipe should be created");
+  testAssertTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
+  testAssertTrue(ioPollerInit(&poller, tunPipe[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
 
   event = ioPollerWait(&poller, 10);
-  assertIoTrue(event == ioEventTimeout, "ioPollerWait should return timeout when idle");
+  testAssertTrue(event == ioEventTimeout, "ioPollerWait should return timeout when idle");
 
   ioPollerClose(&poller);
   close(tunPipe[0]);
@@ -83,19 +77,19 @@ static void testIoPollerSourceReadable(void) {
   ioPoller_t poller;
   ioEvent_t event;
 
-  assertIoTrue(pipe(tunPipe) == 0, "tun pipe should be created");
-  assertIoTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
-  assertIoTrue(ioPollerInit(&poller, tunPipe[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(pipe(tunPipe) == 0, "tun pipe should be created");
+  testAssertTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
+  testAssertTrue(ioPollerInit(&poller, tunPipe[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
 
-  assertIoTrue(write(tunPipe[1], "a", 1) == 1, "write tun pipe should succeed");
+  testAssertTrue(write(tunPipe[1], "a", 1) == 1, "write tun pipe should succeed");
   event = ioPollerWait(&poller, 100);
-  assertIoTrue(event == ioEventTun, "ioPollerWait should tag tun source");
-  assertIoTrue(read(tunPipe[0], (char[2]){0}, 1) == 1, "tun byte should drain");
+  testAssertTrue(event == ioEventTun, "ioPollerWait should tag tun source");
+  testAssertTrue(read(tunPipe[0], (char[2]){0}, 1) == 1, "tun byte should drain");
 
-  assertIoTrue(write(tcpPipe[1], "b", 1) == 1, "write tcp pipe should succeed");
+  testAssertTrue(write(tcpPipe[1], "b", 1) == 1, "write tcp pipe should succeed");
   event = ioPollerWait(&poller, 100);
-  assertIoTrue(event == ioEventTcp, "ioPollerWait should tag tcp source");
-  assertIoTrue(read(tcpPipe[0], (char[2]){0}, 1) == 1, "tcp byte should drain");
+  testAssertTrue(event == ioEventTcp, "ioPollerWait should tag tcp source");
+  testAssertTrue(read(tcpPipe[0], (char[2]){0}, 1) == 1, "tcp byte should drain");
 
   ioPollerClose(&poller);
   close(tunPipe[0]);
@@ -110,13 +104,13 @@ static void testIoPollerError(void) {
   ioPoller_t poller;
   ioEvent_t event;
 
-  assertIoTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunSock) == 0, "tun socketpair should be created");
-  assertIoTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
-  assertIoTrue(ioPollerInit(&poller, tunSock[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunSock) == 0, "tun socketpair should be created");
+  testAssertTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
+  testAssertTrue(ioPollerInit(&poller, tunSock[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
 
   close(tunSock[1]);
   event = ioPollerWait(&poller, 100);
-  assertIoTrue(event == ioEventError, "ioPollerWait should map closed peer to ioEventError");
+  testAssertTrue(event == ioEventError, "ioPollerWait should map closed peer to ioEventError");
 
   ioPollerClose(&poller);
   close(tunSock[0]);
