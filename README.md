@@ -87,17 +87,17 @@ head -c 32 /dev/urandom > secret.key
 Server:
 
 ```bash
-sudo ./daemon/target/ipcpd tun0 0.0.0.0 5000 1 secret.key
+./daemon/target/ipcpd tun0 0.0.0.0 5000 1 secret.key
 ```
 
 Client:
 
 ```bash
-sudo ./daemon/target/ipcpd tun0 203.0.113.10 5000 0 secret.key
+./daemon/target/ipcpd tun0 203.0.113.10 5000 0 secret.key
 ```
 
 ## Runtime Notes
 
 - Requires Linux with `/dev/net/tun`
-- Usually requires root or equivalent capabilities (`CAP_NET_ADMIN`) to create/manage TUN interfaces
+- `ipcpd` does not inherently require root; TUN create/manage operations require appropriate privileges (typically `CAP_NET_ADMIN`, often via root or pre-provisioned device ownership)
 - Interface IP assignment and routing are environment-specific and should be configured separately with `ip` tooling
