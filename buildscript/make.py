@@ -1,7 +1,7 @@
 from argparse import ArgumentParser
 
-from project import CProject, TestProject
-from metaproject import make_projects
+from mkmake import make_projects
+from mkmake.projects import CProject, TestProject
 
 
 def main(args):
