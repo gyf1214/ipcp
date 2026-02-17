@@ -130,6 +130,47 @@ void testDecryptRejectTamper() {
   testAssertTrue(status == protocolStatusBadFrame, "tampered payload should fail authentication");
 }
 
+void testSecureMessageRoundTrip() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x33, sizeof(key));
+
+  const char *payload = "secure-message";
+  protocolMessage_t in = {
+      .type = protocolMsgData,
+      .nbytes = (long)strlen(payload),
+      .buf = payload,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolSecureEncodeMessage(&in, key, &frame);
+  testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
+
+  protocolMessage_t out;
+  status = protocolSecureDecodeFrame(&frame, key, &out);
+  testAssertTrue(status == protocolStatusOk, "secure decode should succeed");
+  testAssertTrue(out.type == protocolMsgData, "decoded secure message type should match");
+  testAssertTrue(out.nbytes == in.nbytes, "decoded secure payload length should match");
+  testAssertTrue(memcmp(out.buf, payload, (size_t)out.nbytes) == 0, "decoded secure payload should match");
+}
+
+void testSecureMessageRejectTamper() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x19, sizeof(key));
+
+  protocolMessage_t in = {
+      .type = protocolMsgHeartbeatReq,
+      .nbytes = 0,
+      .buf = NULL,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolSecureEncodeMessage(&in, key, &frame);
+  testAssertTrue(status == protocolStatusOk, "secure encode for heartbeat should succeed");
+
+  frame.buf[frame.nbytes - 1] ^= 0x1;
+  protocolMessage_t out;
+  status = protocolSecureDecodeFrame(&frame, key, &out);
+  testAssertTrue(status == protocolStatusBadFrame, "secure decode should reject tampered frame");
+}
+
 void testMessageDataRoundTrip() {
   const char *payload = "typed-data";
   protocolMessage_t in = {
@@ -258,6 +299,8 @@ void runProtocolTests(void) {
   testGenericLoggingAvailable();
   testEncryptDecryptRoundTrip();
   testDecryptRejectTamper();
+  testSecureMessageRoundTrip();
+  testSecureMessageRejectTamper();
   testMessageDataRoundTrip();
   testMessageHeartbeatReqRoundTrip();
   testMessageHeartbeatAckRoundTrip();

@@ -6,15 +6,7 @@
 #include <time.h>
 
 #include <unistd.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/types.h>
 #include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/ip.h>
-#include <linux/if.h>
-#include <linux/if_tun.h>
 
 #include "log.h"
 #include "protocol.h"
@@ -51,32 +43,10 @@ static long messageHeaderSize() {
   return (long)sizeof(unsigned char) + ProtocolWireLengthSize;
 }
 
-int tunOpen(const char *ifName) {
-  struct ifreq ifr;
-  int fd, err;
-  logf("opening tun device %s", ifName);
-
-  if ((fd = open("/dev/net/tun", O_RDWR)) == -1) {
-    perrf("failed to open /dev/net/tun");
-  }
-  memset(&ifr, 0, sizeof(ifr));
-  ifr.ifr_flags = IFF_TUN;
-  strncpy(ifr.ifr_name, ifName, IFNAMSIZ - 1);
-
-  if ((err = ioctl(fd, TUNSETIFF, (void *)&ifr)) == -1) {
-    perrf("ioctl failed on tun device");
-  }
-
-  logf("successfully opened tun device %s", ifName);
-  return fd;
-}
-
-static bool sendMessage(int connFd, const cryptCtx_t *crypt, const protocolMessage_t *msg) {
+static bool sendMessage(
+    int connFd, const unsigned char key[ProtocolPskSize], const protocolMessage_t *msg) {
   protocolFrame_t frame;
-  if (protocolMessageEncodeFrame(msg, &frame) != protocolStatusOk) {
-    return false;
-  }
-  if (protocolFrameEncrypt(&frame, crypt->key) != protocolStatusOk) {
+  if (protocolSecureEncodeMessage(msg, key, &frame) != protocolStatusOk) {
     return false;
   }
 
@@ -96,7 +66,11 @@ static void sessionStateInit(sessionState_t *state, bool isServer) {
   state->lastHeartbeatReqMs = now;
 }
 
-static bool pipeTun(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState_t *state) {
+static bool pipeTun(
+    int tunFd,
+    int connFd,
+    const unsigned char key[ProtocolPskSize],
+    sessionState_t *state) {
   char payload[ProtocolFrameSize];
   long maxPayload = protocolMaxPlaintextSize() - messageHeaderSize();
   long nbytes = 0;
@@ -114,7 +88,7 @@ static bool pipeTun(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState
       .nbytes = nbytes,
       .buf = payload,
   };
-  if (!sendMessage(connFd, crypt, &msg)) {
+  if (!sendMessage(connFd, key, &msg)) {
     return false;
   }
 
@@ -129,7 +103,7 @@ static bool pipeTun(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState
 static bool handleInboundMessage(
     int tunFd,
     int connFd,
-    const cryptCtx_t *crypt,
+    const unsigned char key[ProtocolPskSize],
     sessionState_t *state,
     const protocolMessage_t *msg) {
   long long now = nowMs();
@@ -157,7 +131,7 @@ static bool handleInboundMessage(
         .nbytes = 0,
         .buf = NULL,
     };
-    if (!sendMessage(connFd, crypt, &ack)) {
+    if (!sendMessage(connFd, key, &ack)) {
       return false;
     }
     dbgf("heartbeat request received, sent ack");
@@ -178,7 +152,11 @@ static bool handleInboundMessage(
   return false;
 }
 
-static bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState_t *state) {
+static bool pipeTcp(
+    int tunFd,
+    int connFd,
+    const unsigned char key[ProtocolPskSize],
+    sessionState_t *state) {
   long nbytes = 0;
   int offset = 0;
   int k;
@@ -210,18 +188,13 @@ static bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState
     if (status != protocolStatusOk) {
       return false;
     }
-    if (protocolFrameDecrypt(&frame, crypt->key) != protocolStatusOk) {
-      logf("failed to decrypt/authenticate frame");
-      return false;
-    }
-
     protocolMessage_t msg;
-    if (protocolMessageDecodeFrame(&frame, &msg) != protocolStatusOk) {
-      logf("failed to decode message");
+    if (protocolSecureDecodeFrame(&frame, key, &msg) != protocolStatusOk) {
+      logf("failed to decrypt/decode message");
       return false;
     }
 
-    if (!handleInboundMessage(tunFd, connFd, crypt, state, &msg)) {
+    if (!handleInboundMessage(tunFd, connFd, key, state, &msg)) {
       return false;
     }
   }
@@ -229,7 +202,8 @@ static bool pipeTcp(int tunFd, int connFd, const cryptCtx_t *crypt, sessionState
   return true;
 }
 
-static bool heartbeatTick(int connFd, const cryptCtx_t *crypt, sessionState_t *state) {
+static bool heartbeatTick(
+    int connFd, const unsigned char key[ProtocolPskSize], sessionState_t *state) {
   long long now = nowMs();
   long long timeoutMs = heartbeatTimeoutMs();
 
@@ -251,7 +225,7 @@ static bool heartbeatTick(int connFd, const cryptCtx_t *crypt, sessionState_t *s
           .nbytes = 0,
           .buf = NULL,
       };
-      if (!sendMessage(connFd, crypt, &req)) {
+      if (!sendMessage(connFd, key, &req)) {
         return false;
       }
 
@@ -270,8 +244,17 @@ static bool heartbeatTick(int connFd, const cryptCtx_t *crypt, sessionState_t *s
   return true;
 }
 
-void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt, bool isServer) {
-  int tunFd = tunOpen(ifName);
+void serveTcp(
+    const char *ifName,
+    int connFd,
+    const unsigned char key[ProtocolPskSize],
+    bool isServer) {
+  logf("opening tun device %s", ifName);
+  int tunFd = ioTunOpen(ifName);
+  if (tunFd < 0) {
+    perrf("failed to open tun device %s", ifName);
+  }
+  logf("successfully opened tun device %s", ifName);
   ioPoller_t poller;
 
   if (ioPollerInit(&poller, tunFd, connFd) != 0) {
@@ -290,9 +273,9 @@ void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt, bool isSe
     } else if (event == ioEventTun || event == ioEventTcp) {
       bool result;
       if (event == ioEventTun) {
-        result = pipeTun(tunFd, connFd, crypt, &state);
+        result = pipeTun(tunFd, connFd, key, &state);
       } else {
-        result = pipeTcp(tunFd, connFd, crypt, &state);
+        result = pipeTcp(tunFd, connFd, key, &state);
       }
       if (!result) {
         logf("connection closed");
@@ -300,7 +283,7 @@ void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt, bool isSe
       }
     }
 
-    if (!stop && !heartbeatTick(connFd, crypt, &state)) {
+    if (!stop && !heartbeatTick(connFd, key, &state)) {
       logf("heartbeat failure");
       stop = true;
     }
@@ -312,52 +295,45 @@ void serveTcp(const char *ifName, int connFd, const cryptCtx_t *crypt, bool isSe
   logf("connection stopped");
 }
 
-void listenTcp(const char *ifName, const char *listenIP, int port, const cryptCtx_t *crypt) {
-  int listenFd = socket(AF_INET, SOCK_STREAM, 0);
-
-  struct sockaddr_in serverAddr;
-  serverAddr.sin_family = AF_INET;
-  inet_pton(AF_INET, listenIP, &serverAddr.sin_addr);
-  serverAddr.sin_port = htons(port);
-
-  if (bind(listenFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
-    perrf("bind failed");
+void listenTcp(
+    const char *ifName,
+    const char *listenIP,
+    int port,
+    const unsigned char key[ProtocolPskSize]) {
+  int listenFd = ioTcpListen(listenIP, port);
+  if (listenFd < 0) {
+    perrf("listen setup failed");
   }
-  listen(listenFd, 1);
   logf("listening on %s:%d", listenIP, port);
 
   while (1) {
-    struct sockaddr_in clientAddr;
-    socklen_t addrLen = sizeof(clientAddr);
-    int connFd = accept(listenFd, (struct sockaddr *)&clientAddr, &addrLen);
-
     char clientIP[256];
-    inet_ntop(AF_INET, &clientAddr.sin_addr, clientIP, sizeof(clientIP));
-    int clientPort = ntohs(clientAddr.sin_port);
+    int clientPort = 0;
+    int connFd = ioTcpAccept(listenFd, clientIP, sizeof(clientIP), &clientPort);
+    if (connFd < 0) {
+      perrf("accept failed");
+    }
     logf("connected with %s:%d", clientIP, clientPort);
 
-    serveTcp(ifName, connFd, crypt, true);
+    serveTcp(ifName, connFd, key, true);
   }
 
   close(listenFd);
   logf("server stopped");
 }
 
-void connTcp(const char *ifName, const char *remoteIP, int port, const cryptCtx_t *crypt) {
-  int connFd = socket(AF_INET, SOCK_STREAM, 0);
-
-  struct sockaddr_in remoteAddr;
-  remoteAddr.sin_family = AF_INET;
-  inet_pton(AF_INET, remoteIP, &remoteAddr.sin_addr);
-  remoteAddr.sin_port = htons(port);
-
-  if (connect(connFd, (struct sockaddr *)&remoteAddr, sizeof(remoteAddr)) < 0) {
-    close(connFd);
+void connTcp(
+    const char *ifName,
+    const char *remoteIP,
+    int port,
+    const unsigned char key[ProtocolPskSize]) {
+  int connFd = ioTcpConnect(remoteIP, port);
+  if (connFd < 0) {
     perrf("connect to %s:%d failed", remoteIP, port);
   }
   logf("connected to %s:%d", remoteIP, port);
 
-  serveTcp(ifName, connFd, crypt, false);
+  serveTcp(ifName, connFd, key, false);
 }
 
 int main(int argc, char **argv) {
@@ -370,16 +346,16 @@ int main(int argc, char **argv) {
   int server = atoi(argv[4]);
   const char *secretFile = argv[5];
 
-  cryptCtx_t crypt;
+  unsigned char key[ProtocolPskSize];
   cryptGlobalInit();
-  if (cryptInitFromFile(&crypt, secretFile) != 0) {
+  if (cryptLoadKeyFromFile(key, secretFile) != 0) {
     panicf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
   }
 
   if (server) {
-    listenTcp(ifName, ip, port, &crypt);
+    listenTcp(ifName, ip, port, key);
   } else {
-    connTcp(ifName, ip, port, &crypt);
+    connTcp(ifName, ip, port, key);
   }
 
   return 0;

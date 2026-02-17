@@ -209,6 +209,24 @@ protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protoc
   return protocolStatusOk;
 }
 
+protocolStatus_t protocolSecureEncodeMessage(
+    const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize], protocolFrame_t *frame) {
+  protocolStatus_t status = protocolMessageEncodeFrame(msg, frame);
+  if (status != protocolStatusOk) {
+    return status;
+  }
+  return protocolFrameEncrypt(frame, key);
+}
+
+protocolStatus_t protocolSecureDecodeFrame(
+    protocolFrame_t *frame, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg) {
+  protocolStatus_t status = protocolFrameDecrypt(frame, key);
+  if (status != protocolStatusOk) {
+    return status;
+  }
+  return protocolMessageDecodeFrame(frame, msg);
+}
+
 long protocolMaxPlaintextSize() {
   return ProtocolFrameSize - ProtocolNonceSize - ProtocolAuthTagSize;
 }
