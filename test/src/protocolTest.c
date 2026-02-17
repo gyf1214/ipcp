@@ -255,7 +255,7 @@ void testMessageDecodeUsesFixedBigEndianLengthHeader() {
   assertTrue(memcmp(msg.buf, "xyz", 3) == 0, "decoded payload should match");
 }
 
-int main() {
+void runProtocolTests(void) {
   assertTrue(sodium_init() >= 0, "sodium init should succeed");
   testEncode();
   testEncodeRejectNullPayloadWithPositiveLength();
@@ -274,5 +274,4 @@ int main() {
   testMessageDecodeUsesFixedBigEndianLengthHeader();
   runIoTests();
   fprintf(stderr, "PASS protocol tests\n");
-  return 0;
 }
