@@ -112,6 +112,6 @@ Client:
 
 ## Component Roles
 
-- `io`: fd-level polling and read/write primitives (`epoll`, bounded reads, full writes)
-- `protocol`: framing, typed messages, and crypto envelope
-- `daemon`: runtime policy and session behavior (TUN/TCP flow, heartbeat, client/server lifecycle)
+- `io`: fd-level setup/poll/read/write primitives (TUN/TCP open + `epoll` + bounded reads/full writes)
+- `protocol`: framing, typed messages, and secure message encode/decode (including crypto envelope)
+- `daemon`: runtime policy and session behavior (message routing, heartbeat, client/server lifecycle)

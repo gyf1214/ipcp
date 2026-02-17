@@ -11,14 +11,14 @@ void cryptGlobalInit() {
   }
 }
 
-int cryptInitFromFile(cryptCtx_t *ctx, const char *filePath) {
+int cryptLoadKeyFromFile(unsigned char key[ProtocolPskSize], const char *filePath) {
   FILE *fin = fopen(filePath, "rb");
   if (fin == NULL) {
     return -1;
   }
 
-  size_t nread = fread(ctx->key, 1, sizeof(ctx->key), fin);
-  if (nread != sizeof(ctx->key)) {
+  size_t nread = fread(key, 1, ProtocolPskSize, fin);
+  if (nread != ProtocolPskSize) {
     fclose(fin);
     return -1;
   }
