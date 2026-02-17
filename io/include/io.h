@@ -23,6 +23,10 @@ typedef struct {
 
 bool ioWriteAll(int fd, const void *data, long nbytes);
 ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes);
+int ioTunOpen(const char *ifName);
+int ioTcpListen(const char *listenIP, int port);
+int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort);
+int ioTcpConnect(const char *remoteIP, int port);
 
 int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd);
 void ioPollerClose(ioPoller_t *poller);

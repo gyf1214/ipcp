@@ -1,5 +1,13 @@
+#include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <linux/if.h>
+#include <linux/if_tun.h>
 
 #include "io.h"
 
@@ -42,6 +50,118 @@ ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes) {
     return ioStatusClosed;
   }
   return ioStatusError;
+}
+
+int ioTunOpen(const char *ifName) {
+  struct ifreq ifr;
+  int fd;
+
+  if (ifName == NULL || ifName[0] == '\0') {
+    return -1;
+  }
+
+  fd = open("/dev/net/tun", O_RDWR);
+  if (fd < 0) {
+    return -1;
+  }
+
+  memset(&ifr, 0, sizeof(ifr));
+  ifr.ifr_flags = IFF_TUN;
+  strncpy(ifr.ifr_name, ifName, IFNAMSIZ - 1);
+  ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+  if (ioctl(fd, TUNSETIFF, (void *)&ifr) < 0) {
+    close(fd);
+    return -1;
+  }
+
+  return fd;
+}
+
+static int ioPortValid(int port) {
+  return port > 0 && port <= 65535;
+}
+
+int ioTcpListen(const char *listenIP, int port) {
+  int listenFd;
+  struct sockaddr_in serverAddr;
+
+  if (listenIP == NULL || !ioPortValid(port)) {
+    return -1;
+  }
+
+  listenFd = socket(AF_INET, SOCK_STREAM, 0);
+  if (listenFd < 0) {
+    return -1;
+  }
+
+  memset(&serverAddr, 0, sizeof(serverAddr));
+  serverAddr.sin_family = AF_INET;
+  if (inet_pton(AF_INET, listenIP, &serverAddr.sin_addr) != 1) {
+    close(listenFd);
+    return -1;
+  }
+  serverAddr.sin_port = htons((unsigned short)port);
+
+  if (bind(listenFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0 || listen(listenFd, 1) < 0) {
+    close(listenFd);
+    return -1;
+  }
+
+  return listenFd;
+}
+
+int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort) {
+  struct sockaddr_in clientAddr;
+  socklen_t addrLen = sizeof(clientAddr);
+  int connFd = accept(listenFd, (struct sockaddr *)&clientAddr, &addrLen);
+  if (connFd < 0) {
+    return -1;
+  }
+
+  if (peerIp != NULL) {
+    if (peerIpSize <= 0) {
+      close(connFd);
+      return -1;
+    }
+    if (inet_ntop(AF_INET, &clientAddr.sin_addr, peerIp, (socklen_t)peerIpSize) == NULL) {
+      close(connFd);
+      return -1;
+    }
+  }
+  if (peerPort != NULL) {
+    *peerPort = (int)ntohs(clientAddr.sin_port);
+  }
+
+  return connFd;
+}
+
+int ioTcpConnect(const char *remoteIP, int port) {
+  int connFd;
+  struct sockaddr_in remoteAddr;
+
+  if (remoteIP == NULL || !ioPortValid(port)) {
+    return -1;
+  }
+
+  connFd = socket(AF_INET, SOCK_STREAM, 0);
+  if (connFd < 0) {
+    return -1;
+  }
+
+  memset(&remoteAddr, 0, sizeof(remoteAddr));
+  remoteAddr.sin_family = AF_INET;
+  if (inet_pton(AF_INET, remoteIP, &remoteAddr.sin_addr) != 1) {
+    close(connFd);
+    return -1;
+  }
+  remoteAddr.sin_port = htons((unsigned short)port);
+
+  if (connect(connFd, (struct sockaddr *)&remoteAddr, sizeof(remoteAddr)) < 0) {
+    close(connFd);
+    return -1;
+  }
+
+  return connFd;
 }
 
 int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd) {

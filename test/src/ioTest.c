@@ -118,6 +118,18 @@ static void testIoPollerError(void) {
   close(tcpPipe[1]);
 }
 
+static void testIoTunOpenRejectNullName(void) {
+  testAssertTrue(ioTunOpen(NULL) < 0, "ioTunOpen should reject NULL interface name");
+}
+
+static void testIoTcpListenRejectInvalidIp(void) {
+  testAssertTrue(ioTcpListen("not-an-ip", 5000) < 0, "ioTcpListen should reject invalid listen IP");
+}
+
+static void testIoTcpConnectRejectInvalidIp(void) {
+  testAssertTrue(ioTcpConnect("not-an-ip", 5000) < 0, "ioTcpConnect should reject invalid remote IP");
+}
+
 void runIoTests(void) {
   testIoWriteAllAndReadSomeOk();
   testIoReadSomeClosed();
@@ -125,4 +137,7 @@ void runIoTests(void) {
   testIoPollerTimeout();
   testIoPollerSourceReadable();
   testIoPollerError();
+  testIoTunOpenRejectNullName();
+  testIoTcpListenRejectInvalidIp();
+  testIoTcpConnectRejectInvalidIp();
 }
