@@ -8,10 +8,10 @@ METAFLAGS+=--debug
 else
 METAFLAGS+=--no-debug
 endif
-ifeq ($(TEST), 1)
-METAFLAGS+=--test
-else
+ifeq ($(TEST), 0)
 METAFLAGS+=--no-test
+else
+METAFLAGS+=--test
 endif
 
 default : all
