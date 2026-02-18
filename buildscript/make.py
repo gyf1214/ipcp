@@ -29,7 +29,7 @@ def main(args):
             'daemon',
             output_name='ipcpd', output_type=CProject.OutputType.BINARY,
             depends=['protocol', 'generic', 'io', 'session'],
-            libs=[':libsodium.a']
+            libs=[':libsodium.a', ':libcjson.a']
         ),
         'test': TestProject(
             'test',

@@ -1,11 +1,10 @@
 #include <stdbool.h>
-#include <errno.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sodium.h>
 
+#include "config.h"
 #include "crypt.h"
 #include "io.h"
 #include "log.h"
@@ -13,30 +12,6 @@
 #include "session.h"
 
 #define EPOLL_WAIT_MS 200
-
-static bool parseIntStrict(const char *s, long min, long max, int *out) {
-  char *end = NULL;
-  long value = 0;
-
-  if (s == NULL || out == NULL || *s == '\0') {
-    return false;
-  }
-
-  errno = 0;
-  value = strtol(s, &end, 10);
-  if (errno != 0 || end == s || *end != '\0') {
-    return false;
-  }
-  if (value < min || value > max) {
-    return false;
-  }
-  if (value < INT_MIN || value > INT_MAX) {
-    return false;
-  }
-
-  *out = (int)value;
-  return true;
-}
 
 static int serveTcp(
     const char *ifName,
@@ -144,40 +119,40 @@ static int connTcp(
 }
 
 int main(int argc, char **argv) {
-  const char *ifName;
-  const char *ip;
-  int port;
-  int server;
-  const char *secretFile;
+  daemonConfig_t cfg;
   unsigned char key[ProtocolPskSize];
   int exitCode = 1;
+  bool configLoaded = false;
   bool keyLoaded = false;
 
-  if (argc != 6) {
-    panicf("invalid arguments: <ifName> <ip> <port> <serverFlag> <secretFile>");
+  configZero(&cfg);
+
+  if (argc != 2) {
+    panicf("invalid arguments: <configFile>");
   }
-  ifName = argv[1];
-  ip = argv[2];
-  if (!parseIntStrict(argv[3], 1, 65535, &port)
-      || !parseIntStrict(argv[4], 0, 1, &server)) {
-    panicf("invalid arguments: <ifName> <ip> <port> <serverFlag> <secretFile>");
-  }
-  secretFile = argv[5];
 
   cryptGlobalInit();
-  if (cryptLoadKeyFromFile(key, secretFile) != 0) {
+  if (configLoadFromFile(&cfg, argv[1]) != 0) {
+    panicf("invalid config file");
+  }
+  configLoaded = true;
+
+  if (cryptLoadKeyFromFile(key, cfg.keyFile) != 0) {
     panicf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
   }
   keyLoaded = true;
 
-  if (server) {
-    exitCode = listenTcp(ifName, ip, port, key) == 0 ? 0 : 1;
+  if (cfg.mode == configModeServer) {
+    exitCode = listenTcp(cfg.ifName, cfg.listenIP, cfg.listenPort, key) == 0 ? 0 : 1;
   } else {
-    exitCode = connTcp(ifName, ip, port, key) == 0 ? 0 : 1;
+    exitCode = connTcp(cfg.ifName, cfg.serverIP, cfg.serverPort, key) == 0 ? 0 : 1;
   }
 
   if (keyLoaded) {
     sodium_memzero(key, sizeof(key));
+  }
+  if (configLoaded) {
+    configZero(&cfg);
   }
 
   return exitCode;
