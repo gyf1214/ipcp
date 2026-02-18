@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -11,11 +12,113 @@
 
 #include "io.h"
 
-static int pollerAdd(int epollFd, int fd) {
+typedef struct {
+  int fd;
+  unsigned int *events;
+  long *outOffset;
+  long *outNbytes;
+  unsigned char *outBuf;
+} ioQueueState_t;
+
+static ioQueueState_t queueState(ioPoller_t *poller, ioSource_t source) {
+  if (source == ioSourceTun) {
+    ioQueueState_t state = {
+      .fd = poller->tunFd,
+      .events = &poller->tunEvents,
+      .outOffset = &poller->tunOutOffset,
+      .outNbytes = &poller->tunOutNbytes,
+      .outBuf = poller->tunOutBuf,
+    };
+    return state;
+  }
+
+  ioQueueState_t state = {
+    .fd = poller->tcpFd,
+    .events = &poller->tcpEvents,
+    .outOffset = &poller->tcpOutOffset,
+    .outNbytes = &poller->tcpOutNbytes,
+    .outBuf = poller->tcpOutBuf,
+  };
+  return state;
+}
+
+static int pollerSetNonBlocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    return -1;
+  }
+  if ((flags & O_NONBLOCK) != 0) {
+    return 0;
+  }
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static int pollerCtl(int epollFd, int op, int fd, unsigned int events) {
   struct epoll_event event;
-  event.events = EPOLLIN | EPOLLRDHUP;
+  event.events = events;
   event.data.fd = fd;
-  return epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &event);
+  return epoll_ctl(epollFd, op, fd, &event);
+}
+
+static int pollerAdd(int epollFd, int fd, unsigned int events) {
+  return pollerCtl(epollFd, EPOLL_CTL_ADD, fd, events);
+}
+
+static int pollerMod(ioPoller_t *poller, ioSource_t source, unsigned int events) {
+  ioQueueState_t state = queueState(poller, source);
+  if (pollerCtl(poller->epollFd, EPOLL_CTL_MOD, state.fd, events) < 0) {
+    return -1;
+  }
+  *state.events = events;
+  return 0;
+}
+
+static int pollerEnsureWriteInterest(ioPoller_t *poller, ioSource_t source) {
+  ioQueueState_t state = queueState(poller, source);
+  if ((*state.events & EPOLLOUT) != 0) {
+    return 0;
+  }
+  return pollerMod(poller, source, *state.events | EPOLLOUT);
+}
+
+static int pollerDisableWriteInterest(ioPoller_t *poller, ioSource_t source) {
+  ioQueueState_t state = queueState(poller, source);
+  if ((*state.events & EPOLLOUT) == 0) {
+    return 0;
+  }
+  return pollerMod(poller, source, *state.events & ~EPOLLOUT);
+}
+
+static int pollerFlushQueue(ioPoller_t *poller, ioSource_t source) {
+  ioQueueState_t state = queueState(poller, source);
+
+  while (*state.outNbytes > 0) {
+    long wrote = (long)write(state.fd, state.outBuf + *state.outOffset, (size_t)*state.outNbytes);
+    if (wrote > 0) {
+      *state.outOffset += wrote;
+      *state.outNbytes -= wrote;
+      continue;
+    }
+
+    if (wrote == 0) {
+      return -1;
+    }
+
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return 0;
+    }
+    return -1;
+  }
+
+  *state.outOffset = 0;
+  if (pollerDisableWriteInterest(poller, source) < 0) {
+    return -1;
+  }
+
+  return 0;
 }
 
 bool ioWriteAll(int fd, const void *data, long nbytes) {
@@ -48,6 +151,9 @@ ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes) {
   *outNbytes = 0;
   if (nbytes == 0) {
     return ioStatusClosed;
+  }
+  if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    return ioStatusWouldBlock;
   }
   return ioStatusError;
 }
@@ -171,6 +277,10 @@ int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd) {
     return -1;
   }
 
+  if (pollerSetNonBlocking(tunFd) < 0 || pollerSetNonBlocking(tcpFd) < 0) {
+    return -1;
+  }
+
   epollFd = epoll_create1(0);
   if (epollFd < 0) {
     return -1;
@@ -179,8 +289,14 @@ int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd) {
   poller->epollFd = epollFd;
   poller->tunFd = tunFd;
   poller->tcpFd = tcpFd;
+  poller->tunEvents = EPOLLIN | EPOLLRDHUP;
+  poller->tcpEvents = EPOLLIN | EPOLLRDHUP;
+  poller->tunOutOffset = 0;
+  poller->tunOutNbytes = 0;
+  poller->tcpOutOffset = 0;
+  poller->tcpOutNbytes = 0;
 
-  if (pollerAdd(epollFd, tunFd) < 0 || pollerAdd(epollFd, tcpFd) < 0) {
+  if (pollerAdd(epollFd, tunFd, poller->tunEvents) < 0 || pollerAdd(epollFd, tcpFd, poller->tcpEvents) < 0) {
     ioPollerClose(poller);
     return -1;
   }
@@ -196,6 +312,37 @@ void ioPollerClose(ioPoller_t *poller) {
     close(poller->epollFd);
     poller->epollFd = -1;
   }
+}
+
+bool ioPollerQueueWrite(ioPoller_t *poller, ioSource_t source, const void *data, long nbytes) {
+  ioQueueState_t state;
+  long used;
+
+  if (poller == NULL || data == NULL || nbytes <= 0 || nbytes > IoPollerQueueCapacity) {
+    return false;
+  }
+
+  state = queueState(poller, source);
+  used = *state.outOffset + *state.outNbytes;
+
+  if (used + nbytes > IoPollerQueueCapacity && *state.outOffset > 0) {
+    memmove(state.outBuf, state.outBuf + *state.outOffset, (size_t)*state.outNbytes);
+    *state.outOffset = 0;
+    used = *state.outNbytes;
+  }
+
+  if (used + nbytes > IoPollerQueueCapacity) {
+    return false;
+  }
+
+  memcpy(state.outBuf + used, data, (size_t)nbytes);
+  *state.outNbytes += nbytes;
+
+  if (pollerEnsureWriteInterest(poller, source) < 0) {
+    return false;
+  }
+
+  return true;
 }
 
 ioEvent_t ioPollerWait(ioPoller_t *poller, int timeoutMs) {
@@ -217,12 +364,29 @@ ioEvent_t ioPollerWait(ioPoller_t *poller, int timeoutMs) {
   if (event.events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP)) {
     return ioEventError;
   }
-  if (event.events & EPOLLIN) {
+
+  if (event.events & EPOLLOUT) {
     if (event.data.fd == poller->tunFd) {
-      return ioEventTun;
+      if (pollerFlushQueue(poller, ioSourceTun) < 0) {
+        return ioEventError;
+      }
+      return ioEventTunWrite;
     }
     if (event.data.fd == poller->tcpFd) {
-      return ioEventTcp;
+      if (pollerFlushQueue(poller, ioSourceTcp) < 0) {
+        return ioEventError;
+      }
+      return ioEventTcpWrite;
+    }
+    return ioEventError;
+  }
+
+  if (event.events & EPOLLIN) {
+    if (event.data.fd == poller->tunFd) {
+      return ioEventTunRead;
+    }
+    if (event.data.fd == poller->tcpFd) {
+      return ioEventTcpRead;
     }
   }
 

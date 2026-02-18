@@ -83,12 +83,12 @@ static void testIoPollerSourceReadable(void) {
 
   testAssertTrue(write(tunPipe[1], "a", 1) == 1, "write tun pipe should succeed");
   event = ioPollerWait(&poller, 100);
-  testAssertTrue(event == ioEventTun, "ioPollerWait should tag tun source");
+  testAssertTrue(event == ioEventTunRead, "ioPollerWait should tag tun source");
   testAssertTrue(read(tunPipe[0], (char[2]){0}, 1) == 1, "tun byte should drain");
 
   testAssertTrue(write(tcpPipe[1], "b", 1) == 1, "write tcp pipe should succeed");
   event = ioPollerWait(&poller, 100);
-  testAssertTrue(event == ioEventTcp, "ioPollerWait should tag tcp source");
+  testAssertTrue(event == ioEventTcpRead, "ioPollerWait should tag tcp source");
   testAssertTrue(read(tcpPipe[0], (char[2]){0}, 1) == 1, "tcp byte should drain");
 
   ioPollerClose(&poller);
@@ -118,6 +118,63 @@ static void testIoPollerError(void) {
   close(tcpPipe[1]);
 }
 
+static void testIoPollerQueueWriteFlushesOnWritable(void) {
+  int tunPair[2];
+  int tcpPair[2];
+  ioPoller_t poller;
+  ioEvent_t event;
+  char buf[128];
+  const char *payload = "queued-nonblocking-write";
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
+  testAssertTrue(ioPollerInit(&poller, tunPair[0], tcpPair[0]) == 0, "ioPollerInit should succeed");
+
+  testAssertTrue(
+      ioPollerQueueWrite(&poller, ioSourceTcp, payload, (long)strlen(payload)),
+      "queue write should succeed when space is available");
+
+  event = ioPollerWait(&poller, 100);
+  testAssertTrue(event == ioEventTcpWrite, "poller should surface writable tcp event");
+
+  testAssertTrue(read(tcpPair[1], buf, sizeof(buf)) == (long)strlen(payload), "peer should read queued payload");
+  testAssertTrue(memcmp(buf, payload, strlen(payload)) == 0, "queued payload should match");
+
+  event = ioPollerWait(&poller, 20);
+  testAssertTrue(event == ioEventTimeout, "epollout should be disabled after queue drain");
+
+  ioPollerClose(&poller);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
+static void testIoPollerQueueWriteRejectsOverflow(void) {
+  int tunPair[2];
+  int tcpPair[2];
+  ioPoller_t poller;
+  static char payload[IoPollerQueueCapacity];
+
+  memset(payload, 'x', sizeof(payload));
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
+  testAssertTrue(ioPollerInit(&poller, tunPair[0], tcpPair[0]) == 0, "ioPollerInit should succeed");
+
+  testAssertTrue(
+      ioPollerQueueWrite(&poller, ioSourceTcp, payload, IoPollerQueueCapacity - 8),
+      "first queue write should fill almost all capacity");
+  testAssertTrue(
+      !ioPollerQueueWrite(&poller, ioSourceTcp, payload, 16),
+      "second queue write should fail when full frame does not fit");
+
+  ioPollerClose(&poller);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
 static void testIoTunOpenRejectNullName(void) {
   testAssertTrue(ioTunOpen(NULL) < 0, "ioTunOpen should reject NULL interface name");
 }
@@ -137,6 +194,8 @@ void runIoTests(void) {
   testIoPollerTimeout();
   testIoPollerSourceReadable();
   testIoPollerError();
+  testIoPollerQueueWriteFlushesOnWritable();
+  testIoPollerQueueWriteRejectsOverflow();
   testIoTunOpenRejectNullName();
   testIoTcpListenRejectInvalidIp();
   testIoTcpConnectRejectInvalidIp();

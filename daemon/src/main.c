@@ -44,15 +44,19 @@ static long messageHeaderSize() {
 }
 
 static bool sendMessage(
-    int connFd, const unsigned char key[ProtocolPskSize], const protocolMessage_t *msg) {
+    ioPoller_t *poller, const unsigned char key[ProtocolPskSize], const protocolMessage_t *msg) {
   protocolFrame_t frame;
+  char wireBuf[ProtocolWireLengthSize + ProtocolFrameSize];
+  long wireNbytes;
   if (protocolSecureEncodeMessage(msg, key, &frame) != protocolStatusOk) {
     return false;
   }
 
   uint32_t wireLength = htonl((uint32_t)frame.nbytes);
-  return ioWriteAll(connFd, &wireLength, ProtocolWireLengthSize)
-      && ioWriteAll(connFd, frame.buf, frame.nbytes);
+  memcpy(wireBuf, &wireLength, ProtocolWireLengthSize);
+  memcpy(wireBuf + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
+  wireNbytes = ProtocolWireLengthSize + frame.nbytes;
+  return ioPollerQueueWrite(poller, ioSourceTcp, wireBuf, wireNbytes);
 }
 
 static void sessionStateInit(sessionState_t *state, bool isServer) {
@@ -68,7 +72,7 @@ static void sessionStateInit(sessionState_t *state, bool isServer) {
 
 static bool pipeTun(
     int tunFd,
-    int connFd,
+    ioPoller_t *poller,
     const unsigned char key[ProtocolPskSize],
     sessionState_t *state) {
   char payload[ProtocolFrameSize];
@@ -79,7 +83,11 @@ static bool pipeTun(
     return false;
   }
 
-  if (ioReadSome(tunFd, payload, maxPayload, &nbytes) != ioStatusOk) {
+  ioStatus_t status = ioReadSome(tunFd, payload, maxPayload, &nbytes);
+  if (status == ioStatusWouldBlock) {
+    return true;
+  }
+  if (status != ioStatusOk) {
     return false;
   }
 
@@ -88,7 +96,7 @@ static bool pipeTun(
       .nbytes = nbytes,
       .buf = payload,
   };
-  if (!sendMessage(connFd, key, &msg)) {
+  if (!sendMessage(poller, key, &msg)) {
     return false;
   }
 
@@ -101,8 +109,7 @@ static bool pipeTun(
 }
 
 static bool handleInboundMessage(
-    int tunFd,
-    int connFd,
+    ioPoller_t *poller,
     const unsigned char key[ProtocolPskSize],
     sessionState_t *state,
     const protocolMessage_t *msg) {
@@ -110,7 +117,7 @@ static bool handleInboundMessage(
   state->lastValidInboundMs = now;
 
   if (msg->type == protocolMsgData) {
-    if (!ioWriteAll(tunFd, msg->buf, msg->nbytes)) {
+    if (!ioPollerQueueWrite(poller, ioSourceTun, msg->buf, msg->nbytes)) {
       return false;
     }
     if (!state->isServer) {
@@ -131,7 +138,7 @@ static bool handleInboundMessage(
         .nbytes = 0,
         .buf = NULL,
     };
-    if (!sendMessage(connFd, key, &ack)) {
+    if (!sendMessage(poller, key, &ack)) {
       return false;
     }
     dbgf("heartbeat request received, sent ack");
@@ -153,15 +160,18 @@ static bool handleInboundMessage(
 }
 
 static bool pipeTcp(
-    int tunFd,
-    int connFd,
+    ioPoller_t *poller,
     const unsigned char key[ProtocolPskSize],
     sessionState_t *state) {
   long nbytes = 0;
   int offset = 0;
   int k;
 
-  if (ioReadSome(connFd, state->tcpBuf, sizeof(state->tcpBuf), &nbytes) != ioStatusOk) {
+  ioStatus_t readStatus = ioReadSome(poller->tcpFd, state->tcpBuf, sizeof(state->tcpBuf), &nbytes);
+  if (readStatus == ioStatusWouldBlock) {
+    return true;
+  }
+  if (readStatus != ioStatusOk) {
     return false;
   }
   k = (int)nbytes;
@@ -194,7 +204,7 @@ static bool pipeTcp(
       return false;
     }
 
-    if (!handleInboundMessage(tunFd, connFd, key, state, &msg)) {
+    if (!handleInboundMessage(poller, key, state, &msg)) {
       return false;
     }
   }
@@ -203,7 +213,7 @@ static bool pipeTcp(
 }
 
 static bool heartbeatTick(
-    int connFd, const unsigned char key[ProtocolPskSize], sessionState_t *state) {
+    ioPoller_t *poller, const unsigned char key[ProtocolPskSize], sessionState_t *state) {
   long long now = nowMs();
   long long timeoutMs = heartbeatTimeoutMs();
 
@@ -225,7 +235,7 @@ static bool heartbeatTick(
           .nbytes = 0,
           .buf = NULL,
       };
-      if (!sendMessage(connFd, key, &req)) {
+      if (!sendMessage(poller, key, &req)) {
         return false;
       }
 
@@ -270,12 +280,16 @@ void serveTcp(
     if (event == ioEventError) {
       logf("connection error or closed");
       stop = true;
-    } else if (event == ioEventTun || event == ioEventTcp) {
+    } else if (
+        event == ioEventTunRead || event == ioEventTcpRead
+        || event == ioEventTunWrite || event == ioEventTcpWrite) {
       bool result;
-      if (event == ioEventTun) {
-        result = pipeTun(tunFd, connFd, key, &state);
+      if (event == ioEventTunRead) {
+        result = pipeTun(tunFd, &poller, key, &state);
+      } else if (event == ioEventTcpRead) {
+        result = pipeTcp(&poller, key, &state);
       } else {
-        result = pipeTcp(tunFd, connFd, key, &state);
+        result = true;
       }
       if (!result) {
         logf("connection closed");
@@ -283,7 +297,7 @@ void serveTcp(
       }
     }
 
-    if (!stop && !heartbeatTick(connFd, key, &state)) {
+    if (!stop && !heartbeatTick(&poller, key, &state)) {
       logf("heartbeat failure");
       stop = true;
     }
