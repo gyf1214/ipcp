@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sodium.h>
 
 #include "crypt.h"
 #include "io.h"
@@ -37,28 +38,35 @@ static bool parseIntStrict(const char *s, long min, long max, int *out) {
   return true;
 }
 
-static void serveTcp(
+static int serveTcp(
     const char *ifName,
     int connFd,
     const unsigned char key[ProtocolPskSize],
     bool isServer) {
   ioPoller_t poller;
   ioEvent_t event;
+  session_t *session = NULL;
+  int tunFd = -1;
+  int result = -1;
 
   logf("opening tun device %s", ifName);
-  int tunFd = ioTunOpen(ifName);
+  tunFd = ioTunOpen(ifName);
   if (tunFd < 0) {
-    perrf("failed to open tun device %s", ifName);
+    errf("failed to open tun device %s: %s", ifName, strerror(errno));
+    goto cleanup;
   }
   logf("successfully opened tun device %s", ifName);
 
   if (ioPollerInit(&poller, tunFd, connFd) != 0) {
-    perrf("setup epoll failed");
+    errf("setup epoll failed: %s", strerror(errno));
+    goto cleanup;
   }
 
-  session_t *session = sessionCreate(isServer, NULL, NULL);
+  session = sessionCreate(isServer, NULL, NULL);
   if (session == NULL) {
-    panicf("session setup failed");
+    errf("session setup failed");
+    ioPollerClose(&poller);
+    goto cleanup;
   }
 
   while (1) {
@@ -68,21 +76,34 @@ static void serveTcp(
     }
   }
 
+  result = 0;
   sessionDestroy(session);
   ioPollerClose(&poller);
-  close(connFd);
-  close(tunFd);
   logf("connection stopped");
+
+cleanup:
+  if (session != NULL && result != 0) {
+    sessionDestroy(session);
+  }
+  if (connFd >= 0) {
+    close(connFd);
+  }
+  if (tunFd >= 0) {
+    close(tunFd);
+  }
+
+  return result;
 }
 
-static void listenTcp(
+static int listenTcp(
     const char *ifName,
     const char *listenIP,
     int port,
     const unsigned char key[ProtocolPskSize]) {
   int listenFd = ioTcpListen(listenIP, port);
   if (listenFd < 0) {
-    perrf("listen setup failed");
+    errf("listen setup failed: %s", strerror(errno));
+    return -1;
   }
   logf("listening on %s:%d", listenIP, port);
 
@@ -91,28 +112,35 @@ static void listenTcp(
     int clientPort = 0;
     int connFd = ioTcpAccept(listenFd, clientIP, sizeof(clientIP), &clientPort);
     if (connFd < 0) {
-      perrf("accept failed");
+      errf("accept failed: %s", strerror(errno));
+      close(listenFd);
+      return -1;
     }
     logf("connected with %s:%d", clientIP, clientPort);
 
-    serveTcp(ifName, connFd, key, true);
+    if (serveTcp(ifName, connFd, key, true) != 0) {
+      close(listenFd);
+      return -1;
+    }
   }
 
   close(listenFd);
+  return 0;
 }
 
-static void connTcp(
+static int connTcp(
     const char *ifName,
     const char *remoteIP,
     int port,
     const unsigned char key[ProtocolPskSize]) {
   int connFd = ioTcpConnect(remoteIP, port);
   if (connFd < 0) {
-    perrf("connect to %s:%d failed", remoteIP, port);
+    errf("connect to %s:%d failed: %s", remoteIP, port, strerror(errno));
+    return -1;
   }
   logf("connected to %s:%d", remoteIP, port);
 
-  serveTcp(ifName, connFd, key, false);
+  return serveTcp(ifName, connFd, key, false);
 }
 
 int main(int argc, char **argv) {
@@ -122,6 +150,8 @@ int main(int argc, char **argv) {
   int server;
   const char *secretFile;
   unsigned char key[ProtocolPskSize];
+  int exitCode = 1;
+  bool keyLoaded = false;
 
   if (argc != 6) {
     panicf("invalid arguments: <ifName> <ip> <port> <serverFlag> <secretFile>");
@@ -138,12 +168,17 @@ int main(int argc, char **argv) {
   if (cryptLoadKeyFromFile(key, secretFile) != 0) {
     panicf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
   }
+  keyLoaded = true;
 
   if (server) {
-    listenTcp(ifName, ip, port, key);
+    exitCode = listenTcp(ifName, ip, port, key) == 0 ? 0 : 1;
   } else {
-    connTcp(ifName, ip, port, key);
+    exitCode = connTcp(ifName, ip, port, key) == 0 ? 0 : 1;
   }
 
-  return 0;
+  if (keyLoaded) {
+    sodium_memzero(key, sizeof(key));
+  }
+
+  return exitCode;
 }
