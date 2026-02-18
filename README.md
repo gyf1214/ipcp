@@ -49,6 +49,15 @@ make all
 make test
 ```
 
+### Unit tests in container
+
+Use this route when the host is missing local build/test prerequisites (for example `mkmake` setup):
+
+```bash
+podman build -t ipcp-dev:local -f Dockerfile .
+podman run --rm -v "$PWD:/work" -w /work ipcp-dev:local bash -lc "make test"
+```
+
 ## Integration Test
 
 Single-session end-to-end integration is available through a direct `ipcpd` test harness.

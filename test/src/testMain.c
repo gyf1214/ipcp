@@ -22,6 +22,7 @@ static int runNamedSuite(const char *name) {
   for (i = 0; i < sizeof(suites) / sizeof(suites[0]); i++) {
     if (strcmp(suites[i].name, name) == 0) {
       suites[i].run();
+      fprintf(stderr, "PASS %s tests\n", suites[i].name);
       return 0;
     }
   }
@@ -37,6 +38,7 @@ int main(int argc, char **argv) {
   if (argc == 1) {
     for (i = 0; i < sizeof(suites) / sizeof(suites[0]); i++) {
       suites[i].run();
+      fprintf(stderr, "PASS %s tests\n", suites[i].name);
     }
     return EXIT_SUCCESS;
   }

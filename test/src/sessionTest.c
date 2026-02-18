@@ -1,9 +1,11 @@
 #include "sessionTest.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include "io.h"
 #include "protocol.h"
@@ -50,6 +52,30 @@ static void teardownPoller(ioPoller_t *poller, int tunPair[2], int tcpPair[2]) {
   close(tunPair[1]);
   close(tcpPair[0]);
   close(tcpPair[1]);
+}
+
+static sessionStepResult_t runSessionStepWithSuppressedStderr(
+    session_t *session,
+    ioPoller_t *poller,
+    ioEvent_t event,
+    const unsigned char key[ProtocolPskSize]) {
+  int savedStderr = dup(STDERR_FILENO);
+  int nullFd = -1;
+  sessionStepResult_t result;
+  testAssertTrue(savedStderr >= 0, "dup stderr should succeed");
+
+  fflush(stderr);
+  nullFd = open("/dev/null", O_WRONLY);
+  testAssertTrue(nullFd >= 0, "open /dev/null should succeed");
+  testAssertTrue(dup2(nullFd, STDERR_FILENO) >= 0, "redirect stderr should succeed");
+  close(nullFd);
+
+  result = sessionStep(session, poller, event, key);
+
+  fflush(stderr);
+  testAssertTrue(dup2(savedStderr, STDERR_FILENO) >= 0, "restore stderr should succeed");
+  close(savedStderr);
+  return result;
 }
 
 static void testSessionApiSmoke(void) {
@@ -126,7 +152,7 @@ static void testServerHeartbeatTimeoutStopsSession(void) {
 
   fakeNowMs = 15000;
   testAssertTrue(
-      sessionStep(session, &poller, ioEventTimeout, key) == sessionStepStop,
+      runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key) == sessionStepStop,
       "server should stop after heartbeat timeout");
 
   sessionDestroy(session);
@@ -186,7 +212,7 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatReq, NULL, 0, wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(
-      sessionStep(session, &poller, ioEventTcpRead, key) == sessionStepStop,
+      runSessionStepWithSuppressedStderr(session, &poller, ioEventTcpRead, key) == sessionStepStop,
       "client should stop on inbound heartbeat request");
 
   sessionDestroy(session);

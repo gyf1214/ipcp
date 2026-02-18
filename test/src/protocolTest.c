@@ -469,5 +469,4 @@ void runProtocolTests(void) {
   testMessageRejectInvalidSizeTypeCombo();
   testMessageEncodeUsesFixedBigEndianLengthHeader();
   testMessageDecodeUsesFixedBigEndianLengthHeader();
-  fprintf(stderr, "PASS protocol tests\n");
 }
