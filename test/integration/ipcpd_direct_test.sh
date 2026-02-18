@@ -11,6 +11,8 @@ tmpDir=""
 serverLog=""
 clientLog=""
 keyFile=""
+serverConfig=""
+clientConfig=""
 
 require_cmd() {
   local cmd="$1"
@@ -104,7 +106,29 @@ tmpDir="$(mktemp -d)"
 serverLog="$tmpDir/server.log"
 clientLog="$tmpDir/client.log"
 keyFile="$tmpDir/secret.key"
+serverConfig="$tmpDir/server.json"
+clientConfig="$tmpDir/client.json"
 head -c 32 /dev/urandom > "$keyFile"
+
+cat > "$serverConfig" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "listen_ip": "10.200.1.1",
+  "listen_port": 46000,
+  "key_file": "$keyFile"
+}
+JSON
+
+cat > "$clientConfig" <<JSON
+{
+  "mode": "client",
+  "if_name": "tun0",
+  "server_ip": "10.200.1.1",
+  "server_port": 46000,
+  "key_file": "$keyFile"
+}
+JSON
 
 ip netns add "$serverNs"
 ip netns add "$clientNs"
@@ -121,12 +145,12 @@ ns_exec "$clientNs" ip addr add 10.200.1.2/24 dev "$clientVeth"
 ns_exec "$serverNs" ip link set "$serverVeth" up
 ns_exec "$clientNs" ip link set "$clientVeth" up
 
-ns_exec "$serverNs" ./daemon/target/ipcpd tun0 10.200.1.1 46000 1 "$keyFile" >"$serverLog" 2>&1 &
+ns_exec "$serverNs" ./daemon/target/ipcpd "$serverConfig" >"$serverLog" 2>&1 &
 serverPid="$!"
 
 sleep 1
 
-ns_exec "$clientNs" ./daemon/target/ipcpd tun0 10.200.1.1 46000 0 "$keyFile" >"$clientLog" 2>&1 &
+ns_exec "$clientNs" ./daemon/target/ipcpd "$clientConfig" >"$clientLog" 2>&1 &
 clientPid="$!"
 
 wait_for_tun "$serverNs"

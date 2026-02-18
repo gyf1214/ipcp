@@ -108,6 +108,8 @@ Manual subset examples:
 
 ## `ipcpd` Usage
 
+Note: startup is migrating to JSON config-file invocation in current development; positional examples below are being replaced.
+
 CLI:
 
 ```text
