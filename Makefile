@@ -44,9 +44,6 @@ test : all
 	$(MAKE) test-test
 
 integration-test : all
-	bash test/integration/ipcpd_direct_test.sh
+	bash test/integration/run_all_tests.sh
 
-integration-config-test : all
-	bash test/integration/ipcpd_config_validation_test.sh
-
-.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test integration-test integration-config-test
+.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test integration-test
