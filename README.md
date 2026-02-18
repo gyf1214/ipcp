@@ -108,19 +108,21 @@ Manual subset examples:
 
 ## `ipcpd` Usage
 
-Note: startup is migrating to JSON config-file invocation in current development; positional examples below are being replaced.
-
 CLI:
 
 ```text
-ipcpd <ifName> <ip> <port> <serverFlag> <secretFile>
+ipcpd <config.json>
 ```
 
-- `ifName`: TUN interface name (example: `tun0`)
-- `ip`: bind IP (server) or remote IP (client)
-- `port`: TCP port
-- `serverFlag`: `1` for server, `0` for client
-- `secretFile`: path to file containing exactly 32 raw bytes (no extra bytes)
+- `config.json`: JSON config file for either `server` or `client` mode
+
+Supported v1 schema:
+
+- Single mode per file
+- Unknown JSON fields are ignored
+- Key material is loaded only from `key_file` path
+- Config is loaded once at startup (no reload)
+- Runtime behavior remains single-session in this task
 
 ### Secret file
 
@@ -130,18 +132,40 @@ Generate a 32-byte raw key:
 head -c 32 /dev/urandom > secret.key
 ```
 
-### Example
+### Server Config Example
 
-Server:
-
-```bash
-./daemon/target/ipcpd tun0 0.0.0.0 5000 1 secret.key
+```json
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 5000,
+  "key_file": "secret.key"
+}
 ```
 
-Client:
+Run:
 
 ```bash
-./daemon/target/ipcpd tun0 203.0.113.10 5000 0 secret.key
+./daemon/target/ipcpd server.json
+```
+
+### Client Config Example
+
+```json
+{
+  "mode": "client",
+  "if_name": "tun0",
+  "server_ip": "203.0.113.10",
+  "server_port": 5000,
+  "key_file": "secret.key"
+}
+```
+
+Run:
+
+```bash
+./daemon/target/ipcpd client.json
 ```
 
 ## Runtime Notes
