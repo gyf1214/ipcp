@@ -8,8 +8,8 @@
 
 #include "log.h"
 
-#define HEARTBEAT_INTERVAL_MS 5000
-#define HEARTBEAT_MISS_LIMIT  3
+#define HEARTBEAT_DEFAULT_INTERVAL_MS 5000
+#define HEARTBEAT_DEFAULT_TIMEOUT_MS  15000
 
 struct session_t {
   bool isServer;
@@ -22,6 +22,8 @@ struct session_t {
   long long lastValidInboundMs;
   long long lastDataSentMs;
   long long lastDataRecvMs;
+  int heartbeatIntervalMs;
+  int heartbeatTimeoutMs;
   bool heartbeatPending;
   long long heartbeatSentMs;
   long long lastHeartbeatReqMs;
@@ -50,8 +52,8 @@ static long long sessionNowMs(const session_t *session) {
   return session->nowFn(session->nowCtx);
 }
 
-static long long heartbeatTimeoutMs(void) {
-  return (long long)HEARTBEAT_INTERVAL_MS * HEARTBEAT_MISS_LIMIT;
+static long long heartbeatTimeoutMs(const session_t *session) {
+  return session->heartbeatTimeoutMs;
 }
 
 static long messageHeaderSize(void) {
@@ -371,7 +373,7 @@ static bool pipeTcp(
 
 static bool heartbeatTick(ioPoller_t *poller, const unsigned char key[ProtocolPskSize], session_t *session) {
   long long now = sessionNowMs(session);
-  long long timeoutMs = heartbeatTimeoutMs();
+  long long timeoutMs = heartbeatTimeoutMs(session);
 
   if (session->isServer) {
     if (now - session->lastValidInboundMs >= timeoutMs) {
@@ -382,9 +384,9 @@ static bool heartbeatTick(ioPoller_t *poller, const unsigned char key[ProtocolPs
   }
 
   if (!session->heartbeatPending) {
-    bool idleSend = now - session->lastDataSentMs >= HEARTBEAT_INTERVAL_MS;
-    bool idleRecv = now - session->lastDataRecvMs >= HEARTBEAT_INTERVAL_MS;
-    bool intervalElapsed = now - session->lastHeartbeatReqMs >= HEARTBEAT_INTERVAL_MS;
+    bool idleSend = now - session->lastDataSentMs >= session->heartbeatIntervalMs;
+    bool idleRecv = now - session->lastDataRecvMs >= session->heartbeatIntervalMs;
+    bool intervalElapsed = now - session->lastHeartbeatReqMs >= session->heartbeatIntervalMs;
     if (idleSend && idleRecv && intervalElapsed) {
       protocolMessage_t req;
       queueResult_t result;
@@ -414,14 +416,23 @@ static bool heartbeatTick(ioPoller_t *poller, const unsigned char key[ProtocolPs
   return true;
 }
 
-session_t *sessionCreate(bool isServer, sessionNowMsFn_t nowFn, void *nowCtx) {
+session_t *sessionCreate(
+    bool isServer, const sessionHeartbeatConfig_t *heartbeatCfg, sessionNowMsFn_t nowFn, void *nowCtx) {
   session_t *session = calloc(1, sizeof(*session));
+  int intervalMs = HEARTBEAT_DEFAULT_INTERVAL_MS;
+  int timeoutMs = HEARTBEAT_DEFAULT_TIMEOUT_MS;
   if (session == NULL) {
     return NULL;
+  }
+  if (heartbeatCfg != NULL) {
+    intervalMs = heartbeatCfg->intervalMs;
+    timeoutMs = heartbeatCfg->timeoutMs;
   }
   session->isServer = isServer;
   session->nowFn = nowFn == NULL ? defaultNowMs : nowFn;
   session->nowCtx = nowCtx;
+  session->heartbeatIntervalMs = intervalMs;
+  session->heartbeatTimeoutMs = timeoutMs;
   sessionReset(session);
   return session;
 }
@@ -437,6 +448,8 @@ void sessionReset(session_t *session) {
   bool isServer;
   sessionNowMsFn_t nowFn;
   void *nowCtx;
+  int heartbeatIntervalMs;
+  int heartbeatTimeoutMs;
   if (session == NULL) {
     return;
   }
@@ -444,10 +457,14 @@ void sessionReset(session_t *session) {
   isServer = session->isServer;
   nowFn = session->nowFn;
   nowCtx = session->nowCtx;
+  heartbeatIntervalMs = session->heartbeatIntervalMs;
+  heartbeatTimeoutMs = session->heartbeatTimeoutMs;
   memset(session, 0, sizeof(*session));
   session->isServer = isServer;
   session->nowFn = nowFn;
   session->nowCtx = nowCtx;
+  session->heartbeatIntervalMs = heartbeatIntervalMs;
+  session->heartbeatTimeoutMs = heartbeatTimeoutMs;
   now = sessionNowMs(session);
   protocolDecoderInit(&session->tcpDecoder);
   session->lastValidInboundMs = now;

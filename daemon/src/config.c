@@ -51,6 +51,31 @@ static int copyRequiredPort(const cJSON *root, const char *name, int *out) {
   return 0;
 }
 
+static int copyOptionalPositiveInt(const cJSON *root, const char *name, int *out) {
+  const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, name);
+  if (value == NULL) {
+    return 0;
+  }
+  if (!cJSON_IsNumber(value) || value->valuedouble != (double)value->valueint || value->valueint <= 0) {
+    return -1;
+  }
+  *out = value->valueint;
+  return 0;
+}
+
+static int parseHeartbeatConfig(const cJSON *root, daemonConfig_t *cfg) {
+  if (copyOptionalPositiveInt(root, "heartbeat_interval_ms", &cfg->heartbeatIntervalMs) != 0) {
+    return -1;
+  }
+  if (copyOptionalPositiveInt(root, "heartbeat_timeout_ms", &cfg->heartbeatTimeoutMs) != 0) {
+    return -1;
+  }
+  if (cfg->heartbeatTimeoutMs <= cfg->heartbeatIntervalMs) {
+    return -1;
+  }
+  return 0;
+}
+
 static int parseServerConfig(const cJSON *root, daemonConfig_t *cfg) {
   if (copyRequiredString(root, "if_name", cfg->ifName) != 0) {
     return -1;
@@ -88,6 +113,8 @@ void configZero(daemonConfig_t *cfg) {
     return;
   }
   sodium_memzero(cfg, sizeof(*cfg));
+  cfg->heartbeatIntervalMs = ConfigDefaultHeartbeatIntervalMs;
+  cfg->heartbeatTimeoutMs = ConfigDefaultHeartbeatTimeoutMs;
 }
 
 int configLoadFromFile(daemonConfig_t *out, const char *path) {
@@ -144,6 +171,9 @@ int configLoadFromFile(daemonConfig_t *out, const char *path) {
       goto cleanup;
     }
   } else {
+    goto cleanup;
+  }
+  if (parseHeartbeatConfig(root, out) != 0) {
     goto cleanup;
   }
 

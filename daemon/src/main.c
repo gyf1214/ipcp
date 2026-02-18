@@ -17,7 +17,8 @@ static int serveTcp(
     const char *ifName,
     int connFd,
     const unsigned char key[ProtocolPskSize],
-    bool isServer) {
+    bool isServer,
+    const sessionHeartbeatConfig_t *heartbeatCfg) {
   ioPoller_t poller;
   ioEvent_t event;
   session_t *session = NULL;
@@ -37,7 +38,7 @@ static int serveTcp(
     goto cleanup;
   }
 
-  session = sessionCreate(isServer, NULL, NULL);
+  session = sessionCreate(isServer, heartbeatCfg, NULL, NULL);
   if (session == NULL) {
     errf("session setup failed");
     ioPollerClose(&poller);
@@ -74,7 +75,8 @@ static int listenTcp(
     const char *ifName,
     const char *listenIP,
     int port,
-    const unsigned char key[ProtocolPskSize]) {
+    const unsigned char key[ProtocolPskSize],
+    const sessionHeartbeatConfig_t *heartbeatCfg) {
   int listenFd = ioTcpListen(listenIP, port);
   if (listenFd < 0) {
     errf("listen setup failed: %s", strerror(errno));
@@ -93,7 +95,7 @@ static int listenTcp(
     }
     logf("connected with %s:%d", clientIP, clientPort);
 
-    if (serveTcp(ifName, connFd, key, true) != 0) {
+    if (serveTcp(ifName, connFd, key, true, heartbeatCfg) != 0) {
       close(listenFd);
       return -1;
     }
@@ -107,7 +109,8 @@ static int connTcp(
     const char *ifName,
     const char *remoteIP,
     int port,
-    const unsigned char key[ProtocolPskSize]) {
+    const unsigned char key[ProtocolPskSize],
+    const sessionHeartbeatConfig_t *heartbeatCfg) {
   int connFd = ioTcpConnect(remoteIP, port);
   if (connFd < 0) {
     errf("connect to %s:%d failed: %s", remoteIP, port, strerror(errno));
@@ -115,11 +118,12 @@ static int connTcp(
   }
   logf("connected to %s:%d", remoteIP, port);
 
-  return serveTcp(ifName, connFd, key, false);
+  return serveTcp(ifName, connFd, key, false, heartbeatCfg);
 }
 
 int main(int argc, char **argv) {
   daemonConfig_t cfg;
+  sessionHeartbeatConfig_t heartbeatCfg;
   unsigned char key[ProtocolPskSize];
   int exitCode = EXIT_FAILURE;
   bool configLoaded = false;
@@ -144,11 +148,15 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   keyLoaded = true;
+  heartbeatCfg.intervalMs = cfg.heartbeatIntervalMs;
+  heartbeatCfg.timeoutMs = cfg.heartbeatTimeoutMs;
 
   if (cfg.mode == configModeServer) {
-    exitCode = listenTcp(cfg.ifName, cfg.listenIP, cfg.listenPort, key) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    exitCode =
+        listenTcp(cfg.ifName, cfg.listenIP, cfg.listenPort, key, &heartbeatCfg) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
   } else {
-    exitCode = connTcp(cfg.ifName, cfg.serverIP, cfg.serverPort, key) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    exitCode =
+        connTcp(cfg.ifName, cfg.serverIP, cfg.serverPort, key, &heartbeatCfg) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
   }
 
 cleanup:

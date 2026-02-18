@@ -9,6 +9,11 @@ typedef struct session_t session_t;
 
 typedef long long (*sessionNowMsFn_t)(void *ctx);
 
+typedef struct {
+  int intervalMs;
+  int timeoutMs;
+} sessionHeartbeatConfig_t;
+
 typedef enum {
   sessionStepContinue = 0,
   sessionStepStop,
@@ -29,7 +34,8 @@ typedef struct {
   long tcpBufferedNbytes;
 } sessionStats_t;
 
-session_t *sessionCreate(bool isServer, sessionNowMsFn_t nowFn, void *nowCtx);
+session_t *sessionCreate(
+    bool isServer, const sessionHeartbeatConfig_t *heartbeatCfg, sessionNowMsFn_t nowFn, void *nowCtx);
 void sessionDestroy(session_t *session);
 void sessionReset(session_t *session);
 bool sessionGetStats(const session_t *session, sessionStats_t *outStats);

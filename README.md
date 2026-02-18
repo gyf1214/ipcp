@@ -123,6 +123,9 @@ Supported v1 schema:
 - Single mode per file
 - Unknown JSON fields are ignored
 - Key material is loaded only from `key_file` path
+- `heartbeat_interval_ms` is optional (default `5000`)
+- `heartbeat_timeout_ms` is optional (default `15000`)
+- Both heartbeat fields must be positive integers, and `heartbeat_timeout_ms` must be greater than `heartbeat_interval_ms`
 - Config is loaded once at startup (no reload)
 - Runtime behavior remains single-session in this task
 
@@ -142,7 +145,9 @@ head -c 32 /dev/urandom > secret.key
   "if_name": "tun0",
   "listen_ip": "0.0.0.0",
   "listen_port": 5000,
-  "key_file": "secret.key"
+  "key_file": "secret.key",
+  "heartbeat_interval_ms": 5000,
+  "heartbeat_timeout_ms": 15000
 }
 ```
 
@@ -160,7 +165,9 @@ Run:
   "if_name": "tun0",
   "server_ip": "203.0.113.10",
   "server_port": 5000,
-  "key_file": "secret.key"
+  "key_file": "secret.key",
+  "heartbeat_interval_ms": 5000,
+  "heartbeat_timeout_ms": 15000
 }
 ```
 

@@ -3,6 +3,8 @@
 #include "protocol.h"
 
 #define ConfigTextSize 512
+#define ConfigDefaultHeartbeatIntervalMs 5000
+#define ConfigDefaultHeartbeatTimeoutMs  15000
 
 typedef enum {
   configModeServer = 0,
@@ -17,6 +19,8 @@ typedef struct {
   int listenPort;
   char serverIP[ConfigTextSize];
   int serverPort;
+  int heartbeatIntervalMs;
+  int heartbeatTimeoutMs;
 } daemonConfig_t;
 
 void configZero(daemonConfig_t *cfg);
