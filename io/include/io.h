@@ -40,7 +40,6 @@ typedef struct {
   unsigned char tcpOutBuf[IoPollerQueueCapacity];
 } ioPoller_t;
 
-bool ioWriteAll(int fd, const void *data, long nbytes);
 ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes);
 int ioTunOpen(const char *ifName);
 int ioTcpListen(const char *listenIP, int port);

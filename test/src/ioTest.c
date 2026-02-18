@@ -8,7 +8,7 @@
 #include "io.h"
 #include "testAssert.h"
 
-static void testIoWriteAllAndReadSomeOk(void) {
+static void testIoReadSomeOk(void) {
   int fds[2];
   char buf[64];
   long outNbytes = -1;
@@ -16,7 +16,7 @@ static void testIoWriteAllAndReadSomeOk(void) {
   ioStatus_t status;
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair should succeed");
-  testAssertTrue(ioWriteAll(fds[0], payload, (long)strlen(payload)), "ioWriteAll should succeed");
+  testAssertTrue(write(fds[0], payload, strlen(payload)) == (long)strlen(payload), "test setup write should succeed");
 
   status = ioReadSome(fds[1], buf, sizeof(buf), &outNbytes);
   testAssertTrue(status == ioStatusOk, "ioReadSome should report ioStatusOk");
@@ -230,7 +230,7 @@ static void testIoTcpConnectRejectInvalidIp(void) {
 }
 
 void runIoTests(void) {
-  testIoWriteAllAndReadSomeOk();
+  testIoReadSomeOk();
   testIoReadSomeClosed();
   testIoReadSomeError();
   testIoPollerTimeout();

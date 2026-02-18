@@ -125,20 +125,6 @@ static int pollerFlushQueue(ioPoller_t *poller, ioSource_t source) {
   return 0;
 }
 
-bool ioWriteAll(int fd, const void *data, long nbytes) {
-  long i = 0;
-  const char *buf = (const char *)data;
-
-  while (i < nbytes) {
-    long wrote = (long)write(fd, buf + i, (size_t)(nbytes - i));
-    if (wrote <= 0) {
-      return false;
-    }
-    i += wrote;
-  }
-  return true;
-}
-
 ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes) {
   long nbytes;
 
