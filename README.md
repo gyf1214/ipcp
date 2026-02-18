@@ -49,6 +49,33 @@ make all
 make test
 ```
 
+## Integration Test
+
+Single-session end-to-end integration is available through a direct `ipcpd` test harness.
+
+Native route:
+
+```bash
+make integration-test
+```
+
+Container route:
+
+```bash
+./scripts/build_integration_container.sh
+./scripts/run_in_container.sh
+```
+
+Prerequisites:
+
+- Linux with `/dev/net/tun`
+- Podman able to run `--privileged` containers
+
+Notes:
+
+- The container route keeps namespace/TUN setup isolated from host networking by using the container runtime's default network namespace behavior.
+- Integration scope is single-session only; multi-session/routing assertions are deferred.
+
 ## What Is Produced
 
 After `make all`:

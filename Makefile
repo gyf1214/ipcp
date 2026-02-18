@@ -43,4 +43,7 @@ rebuild : clean all
 test : all
 	$(MAKE) test-test
 
-.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test
+integration-test : all
+	bash test/integration/ipcpd_direct_test.sh
+
+.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test integration-test
