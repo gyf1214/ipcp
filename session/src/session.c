@@ -8,9 +8,6 @@
 
 #include "log.h"
 
-#define HEARTBEAT_DEFAULT_INTERVAL_MS 5000
-#define HEARTBEAT_DEFAULT_TIMEOUT_MS  15000
-
 struct session_t {
   bool isServer;
   sessionNowMsFn_t nowFn;
@@ -419,20 +416,18 @@ static bool heartbeatTick(ioPoller_t *poller, const unsigned char key[ProtocolPs
 session_t *sessionCreate(
     bool isServer, const sessionHeartbeatConfig_t *heartbeatCfg, sessionNowMsFn_t nowFn, void *nowCtx) {
   session_t *session = calloc(1, sizeof(*session));
-  int intervalMs = HEARTBEAT_DEFAULT_INTERVAL_MS;
-  int timeoutMs = HEARTBEAT_DEFAULT_TIMEOUT_MS;
   if (session == NULL) {
     return NULL;
   }
-  if (heartbeatCfg != NULL) {
-    intervalMs = heartbeatCfg->intervalMs;
-    timeoutMs = heartbeatCfg->timeoutMs;
+  if (heartbeatCfg == NULL || heartbeatCfg->intervalMs <= 0 || heartbeatCfg->timeoutMs <= heartbeatCfg->intervalMs) {
+    free(session);
+    return NULL;
   }
   session->isServer = isServer;
   session->nowFn = nowFn == NULL ? defaultNowMs : nowFn;
   session->nowCtx = nowCtx;
-  session->heartbeatIntervalMs = intervalMs;
-  session->heartbeatTimeoutMs = timeoutMs;
+  session->heartbeatIntervalMs = heartbeatCfg->intervalMs;
+  session->heartbeatTimeoutMs = heartbeatCfg->timeoutMs;
   sessionReset(session);
   return session;
 }

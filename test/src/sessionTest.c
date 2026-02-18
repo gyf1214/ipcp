@@ -13,6 +13,10 @@
 #include "testAssert.h"
 
 static long long fakeNowMs = 0;
+static const sessionHeartbeatConfig_t defaultHeartbeatCfg = {
+    .intervalMs = 5000,
+    .timeoutMs = 15000,
+};
 
 static long long fakeNow(void *ctx) {
   (void)ctx;
@@ -79,7 +83,7 @@ static sessionStepResult_t runSessionStepWithSuppressedStderr(
 }
 
 static void testSessionApiSmoke(void) {
-  const session_t *session = sessionCreate(true, NULL, fakeNow, NULL);
+  const session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   testAssertTrue(sessionApiSmoke(), "session smoke api should return true");
   sessionDestroy((session_t *)session);
@@ -89,7 +93,7 @@ static void testSessionInitSeedsModeAndTimestamps(void) {
   sessionStats_t stats;
 
   fakeNowMs = 12345;
-  session_t *session = sessionCreate(false, NULL, fakeNow, NULL);
+  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
   testAssertTrue(!stats.isServer, "session should keep client mode");
@@ -115,7 +119,7 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   fakeNowMs = 5000;
 
   setupPoller(&poller, tunPair, tcpPair);
-  session_t *session = sessionCreate(false, NULL, fakeNow, NULL);
+  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
   testAssertTrue(
@@ -148,7 +152,8 @@ static void testServerHeartbeatTimeoutStopsSession(void) {
   memset(key, 0x11, sizeof(key));
   setupPoller(&poller, tunPair, tcpPair);
   fakeNowMs = 0;
-  session_t *session = sessionCreate(true, NULL, fakeNow, NULL);
+  session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
 
   fakeNowMs = 15000;
   testAssertTrue(
@@ -273,7 +278,8 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   memset(key, 0x22, sizeof(key));
   setupPoller(&poller, tunPair, tcpPair);
   fakeNowMs = 0;
-  session_t *session = sessionCreate(false, NULL, fakeNow, NULL);
+  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
 
   testAssertTrue(
       sessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
@@ -310,7 +316,8 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
 
   memset(key, 0x23, sizeof(key));
   setupPoller(&poller, tunPair, tcpPair);
-  session_t *session = sessionCreate(false, NULL, fakeNow, NULL);
+  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatReq, NULL, 0, wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(
@@ -335,7 +342,8 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
 
   memset(key, 0x44, sizeof(key));
   setupPoller(&poller, tunPair, tcpPair);
-  session_t *session = sessionCreate(false, NULL, fakeNow, NULL);
+  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
 
   testAssertTrue(write(tunPair[1], payload, strlen(payload)) == (long)strlen(payload), "tun write should succeed");
   testAssertTrue(
@@ -373,7 +381,8 @@ static void testSessionTcpReadQueuesTunWrite(void) {
 
   memset(key, 0x45, sizeof(key));
   setupPoller(&poller, tunPair, tcpPair);
-  session_t *session = sessionCreate(true, NULL, fakeNow, NULL);
+  session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
 
   wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)strlen(payload), wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
@@ -406,7 +415,8 @@ static void testBackpressurePauseAndResumeFlow(void) {
   memset(fill, 'x', sizeof(fill));
   memset(tunPayload, 'y', sizeof(tunPayload));
   setupPoller(&poller, tunPair, tcpPair);
-  session_t *session = sessionCreate(false, NULL, fakeNow, NULL);
+  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
 
   testAssertTrue(
       ioPollerQueueWrite(&poller, ioSourceTcp, fill, IoPollerQueueCapacity - 16),
@@ -432,7 +442,29 @@ static void testBackpressurePauseAndResumeFlow(void) {
   teardownPoller(&poller, tunPair, tcpPair);
 }
 
+static void testSessionCreateRejectsNullHeartbeatConfig(void) {
+  session_t *session = sessionCreate(false, NULL, fakeNow, NULL);
+  testAssertTrue(session == NULL, "session create should fail with null heartbeat config");
+}
+
+static void testSessionCreateRejectsInvalidHeartbeatConfig(void) {
+  sessionHeartbeatConfig_t invalid;
+  session_t *session;
+
+  invalid.intervalMs = 0;
+  invalid.timeoutMs = 15000;
+  session = sessionCreate(false, &invalid, fakeNow, NULL);
+  testAssertTrue(session == NULL, "session create should fail when interval is not positive");
+
+  invalid.intervalMs = 5000;
+  invalid.timeoutMs = 5000;
+  session = sessionCreate(false, &invalid, fakeNow, NULL);
+  testAssertTrue(session == NULL, "session create should fail when timeout is not greater than interval");
+}
+
 void runSessionTests(void) {
+  testSessionCreateRejectsNullHeartbeatConfig();
+  testSessionCreateRejectsInvalidHeartbeatConfig();
   testSessionApiSmoke();
   testSessionInitSeedsModeAndTimestamps();
   testSessionResetClearsPendingAndPauseFlags();
