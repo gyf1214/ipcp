@@ -121,33 +121,37 @@ static int connTcp(
 int main(int argc, char **argv) {
   daemonConfig_t cfg;
   unsigned char key[ProtocolPskSize];
-  int exitCode = 1;
+  int exitCode = EXIT_FAILURE;
   bool configLoaded = false;
   bool keyLoaded = false;
 
   configZero(&cfg);
 
   if (argc != 2) {
-    panicf("invalid arguments: <configFile>");
+    errf("invalid arguments: <configFile>");
+    goto cleanup;
   }
 
   cryptGlobalInit();
   if (configLoadFromFile(&cfg, argv[1]) != 0) {
-    panicf("invalid config file");
+    errf("invalid config file");
+    goto cleanup;
   }
   configLoaded = true;
 
   if (cryptLoadKeyFromFile(key, cfg.keyFile) != 0) {
-    panicf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
+    errf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
+    goto cleanup;
   }
   keyLoaded = true;
 
   if (cfg.mode == configModeServer) {
-    exitCode = listenTcp(cfg.ifName, cfg.listenIP, cfg.listenPort, key) == 0 ? 0 : 1;
+    exitCode = listenTcp(cfg.ifName, cfg.listenIP, cfg.listenPort, key) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
   } else {
-    exitCode = connTcp(cfg.ifName, cfg.serverIP, cfg.serverPort, key) == 0 ? 0 : 1;
+    exitCode = connTcp(cfg.ifName, cfg.serverIP, cfg.serverPort, key) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
   }
 
+cleanup:
   if (keyLoaded) {
     sodium_memzero(key, sizeof(key));
   }

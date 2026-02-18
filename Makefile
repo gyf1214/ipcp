@@ -46,4 +46,7 @@ test : all
 integration-test : all
 	bash test/integration/ipcpd_direct_test.sh
 
-.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test integration-test
+integration-config-test : all
+	bash test/integration/ipcpd_config_validation_test.sh
+
+.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test integration-test integration-config-test
