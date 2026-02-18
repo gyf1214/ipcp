@@ -1,4 +1,6 @@
 #include <stdbool.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -10,6 +12,30 @@
 #include "session.h"
 
 #define EPOLL_WAIT_MS 200
+
+static bool parseIntStrict(const char *s, long min, long max, int *out) {
+  char *end = NULL;
+  long value = 0;
+
+  if (s == NULL || out == NULL || *s == '\0') {
+    return false;
+  }
+
+  errno = 0;
+  value = strtol(s, &end, 10);
+  if (errno != 0 || end == s || *end != '\0') {
+    return false;
+  }
+  if (value < min || value > max) {
+    return false;
+  }
+  if (value < INT_MIN || value > INT_MAX) {
+    return false;
+  }
+
+  *out = (int)value;
+  return true;
+}
 
 static void serveTcp(
     const char *ifName,
@@ -102,8 +128,10 @@ int main(int argc, char **argv) {
   }
   ifName = argv[1];
   ip = argv[2];
-  port = atoi(argv[3]);
-  server = atoi(argv[4]);
+  if (!parseIntStrict(argv[3], 1, 65535, &port)
+      || !parseIntStrict(argv[4], 0, 1, &server)) {
+    panicf("invalid arguments: <ifName> <ip> <port> <serverFlag> <secretFile>");
+  }
   secretFile = argv[5];
 
   cryptGlobalInit();
