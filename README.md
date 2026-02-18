@@ -30,6 +30,7 @@ If you prefer containerized builds, this repository includes a `Dockerfile`.
 - `python3`
 - Python package: `mkmake`
 - `libsodium` headers and static library (`libsodium.a`)
+- `cJSON` headers and static library (`libcjson.a`)
 
 Install `mkmake`:
 
@@ -41,6 +42,7 @@ Example package hints:
 
 - RHEL/CentOS/Alma/Rocky: `libsodium`, `libsodium-devel`, `libsodium-static`
 - Debian/Ubuntu: `libsodium-dev` (verify static archive availability for your distro)
+- `cJSON`: package `cjson-devel` often provides only shared library; ensure `libcjson.a` exists or build cJSON from source
 
 ### Build commands
 
