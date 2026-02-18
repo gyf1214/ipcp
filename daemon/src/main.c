@@ -21,13 +21,27 @@ typedef struct {
   bool isServer;
   protocolDecoder_t tcpDecoder;
   char tcpBuf[ProtocolFrameSize];
+  char tcpBufferedBuf[ProtocolFrameSize];
+  long tcpBufferedNbytes;
   long long lastValidInboundMs;
   long long lastDataSentMs;
   long long lastDataRecvMs;
   bool heartbeatPending;
   long long heartbeatSentMs;
   long long lastHeartbeatReqMs;
+  bool tunReadPaused;
+  bool tcpReadPaused;
+  long pendingTcpNbytes;
+  char pendingTcpBuf[ProtocolWireLengthSize + ProtocolFrameSize];
+  long pendingTunNbytes;
+  char pendingTunBuf[ProtocolFrameSize];
 } sessionState_t;
+
+typedef enum {
+  queueResultQueued = 0,
+  queueResultBlocked,
+  queueResultError,
+} queueResult_t;
 
 static long long nowMs() {
   struct timespec ts;
@@ -43,20 +57,134 @@ static long messageHeaderSize() {
   return (long)sizeof(unsigned char) + ProtocolWireLengthSize;
 }
 
-static bool sendMessage(
-    ioPoller_t *poller, const unsigned char key[ProtocolPskSize], const protocolMessage_t *msg) {
+static bool pauseReadSource(ioPoller_t *poller, ioSource_t source, bool *paused) {
+  if (*paused) {
+    return true;
+  }
+  if (!ioPollerSetReadEnabled(poller, source, false)) {
+    return false;
+  }
+  *paused = true;
+  return true;
+}
+
+static bool maybeResumeReadSource(
+    ioPoller_t *poller, ioSource_t source, ioSource_t destination, bool *paused, long pendingNbytes) {
+  long queued;
+  if (!*paused || pendingNbytes > 0) {
+    return true;
+  }
+
+  queued = ioPollerQueuedBytes(poller, destination);
+  if (queued < 0) {
+    return false;
+  }
+  if (queued > IoPollerLowWatermark) {
+    return true;
+  }
+  if (!ioPollerSetReadEnabled(poller, source, true)) {
+    return false;
+  }
+  *paused = false;
+  return true;
+}
+
+static queueResult_t queueTcpWithBackpressure(ioPoller_t *poller, sessionState_t *state, const void *data, long nbytes) {
+  long queued;
+
+  if (state->pendingTcpNbytes > 0) {
+    return queueResultBlocked;
+  }
+  if (ioPollerQueueWrite(poller, ioSourceTcp, data, nbytes)) {
+    return queueResultQueued;
+  }
+
+  queued = ioPollerQueuedBytes(poller, ioSourceTcp);
+  if (queued < 0) {
+    return queueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    memcpy(state->pendingTcpBuf, data, (size_t)nbytes);
+    state->pendingTcpNbytes = nbytes;
+    if (!pauseReadSource(poller, ioSourceTun, &state->tunReadPaused)) {
+      return queueResultError;
+    }
+    return queueResultBlocked;
+  }
+  return queueResultError;
+}
+
+static queueResult_t queueTunWithBackpressure(ioPoller_t *poller, sessionState_t *state, const void *data, long nbytes) {
+  long queued;
+
+  if (state->pendingTunNbytes > 0) {
+    return queueResultBlocked;
+  }
+  if (ioPollerQueueWrite(poller, ioSourceTun, data, nbytes)) {
+    return queueResultQueued;
+  }
+
+  queued = ioPollerQueuedBytes(poller, ioSourceTun);
+  if (queued < 0) {
+    return queueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    memcpy(state->pendingTunBuf, data, (size_t)nbytes);
+    state->pendingTunNbytes = nbytes;
+    if (!pauseReadSource(poller, ioSourceTcp, &state->tcpReadPaused)) {
+      return queueResultError;
+    }
+    return queueResultBlocked;
+  }
+  return queueResultError;
+}
+
+static bool serviceBackpressure(ioPoller_t *poller, sessionState_t *state) {
+  long queued;
+
+  if (state->pendingTcpNbytes > 0) {
+    if (ioPollerQueueWrite(poller, ioSourceTcp, state->pendingTcpBuf, state->pendingTcpNbytes)) {
+      state->pendingTcpNbytes = 0;
+    } else {
+      queued = ioPollerQueuedBytes(poller, ioSourceTcp);
+      if (queued < 0 || queued + state->pendingTcpNbytes <= IoPollerQueueCapacity) {
+        return false;
+      }
+    }
+  }
+
+  if (state->pendingTunNbytes > 0) {
+    if (ioPollerQueueWrite(poller, ioSourceTun, state->pendingTunBuf, state->pendingTunNbytes)) {
+      state->pendingTunNbytes = 0;
+    } else {
+      queued = ioPollerQueuedBytes(poller, ioSourceTun);
+      if (queued < 0 || queued + state->pendingTunNbytes <= IoPollerQueueCapacity) {
+        return false;
+      }
+    }
+  }
+
+  return maybeResumeReadSource(
+             poller, ioSourceTun, ioSourceTcp, &state->tunReadPaused, state->pendingTcpNbytes)
+      && maybeResumeReadSource(
+             poller, ioSourceTcp, ioSourceTun, &state->tcpReadPaused, state->pendingTunNbytes);
+}
+
+static queueResult_t sendMessage(
+    ioPoller_t *poller, const unsigned char key[ProtocolPskSize], sessionState_t *state, const protocolMessage_t *msg) {
   protocolFrame_t frame;
   char wireBuf[ProtocolWireLengthSize + ProtocolFrameSize];
   long wireNbytes;
+
   if (protocolSecureEncodeMessage(msg, key, &frame) != protocolStatusOk) {
-    return false;
+    return queueResultError;
   }
 
   uint32_t wireLength = htonl((uint32_t)frame.nbytes);
   memcpy(wireBuf, &wireLength, ProtocolWireLengthSize);
   memcpy(wireBuf + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
   wireNbytes = ProtocolWireLengthSize + frame.nbytes;
-  return ioPollerQueueWrite(poller, ioSourceTcp, wireBuf, wireNbytes);
+  return queueTcpWithBackpressure(poller, state, wireBuf, wireNbytes);
 }
 
 static void sessionStateInit(sessionState_t *state, bool isServer) {
@@ -96,8 +224,12 @@ static bool pipeTun(
       .nbytes = nbytes,
       .buf = payload,
   };
-  if (!sendMessage(poller, key, &msg)) {
+  queueResult_t result = sendMessage(poller, key, state, &msg);
+  if (result == queueResultError) {
     return false;
+  }
+  if (result == queueResultBlocked) {
+    return true;
   }
 
   if (!state->isServer) {
@@ -108,7 +240,7 @@ static bool pipeTun(
   return true;
 }
 
-static bool handleInboundMessage(
+static queueResult_t handleInboundMessage(
     ioPoller_t *poller,
     const unsigned char key[ProtocolPskSize],
     sessionState_t *state,
@@ -117,20 +249,21 @@ static bool handleInboundMessage(
   state->lastValidInboundMs = now;
 
   if (msg->type == protocolMsgData) {
-    if (!ioPollerQueueWrite(poller, ioSourceTun, msg->buf, msg->nbytes)) {
-      return false;
+    queueResult_t result = queueTunWithBackpressure(poller, state, msg->buf, msg->nbytes);
+    if (result != queueResultQueued) {
+      return result;
     }
     if (!state->isServer) {
       state->lastDataRecvMs = now;
     }
     dbgf("received %ld bytes of data", msg->nbytes);
-    return true;
+    return queueResultQueued;
   }
 
   if (msg->type == protocolMsgHeartbeatReq) {
     if (!state->isServer) {
       logf("unexpected heartbeat request on client");
-      return false;
+      return queueResultError;
     }
 
     protocolMessage_t ack = {
@@ -138,48 +271,40 @@ static bool handleInboundMessage(
         .nbytes = 0,
         .buf = NULL,
     };
-    if (!sendMessage(poller, key, &ack)) {
-      return false;
+    queueResult_t result = sendMessage(poller, key, state, &ack);
+    if (result != queueResultQueued) {
+      return result;
     }
     dbgf("heartbeat request received, sent ack");
-    return true;
+    return queueResultQueued;
   }
 
   if (msg->type == protocolMsgHeartbeatAck) {
     if (state->isServer || !state->heartbeatPending) {
       logf("unexpected heartbeat ack");
-      return false;
+      return queueResultError;
     }
 
     state->heartbeatPending = false;
     dbgf("heartbeat ack received");
-    return true;
+    return queueResultQueued;
   }
 
-  return false;
+  return queueResultError;
 }
 
-static bool pipeTcp(
+static bool pipeTcpBytes(
     ioPoller_t *poller,
     const unsigned char key[ProtocolPskSize],
-    sessionState_t *state) {
-  long nbytes = 0;
+    sessionState_t *state,
+    const char *buf,
+    int k,
+    int *outConsumed) {
   int offset = 0;
-  int k;
-
-  ioStatus_t readStatus = ioReadSome(poller->tcpFd, state->tcpBuf, sizeof(state->tcpBuf), &nbytes);
-  if (readStatus == ioStatusWouldBlock) {
-    return true;
-  }
-  if (readStatus != ioStatusOk) {
-    return false;
-  }
-  k = (int)nbytes;
-
   while (offset < k) {
     long consumed = 0;
     protocolStatus_t status =
-        protocolDecodeFeed(&state->tcpDecoder, state->tcpBuf + offset, k - offset, &consumed);
+        protocolDecodeFeed(&state->tcpDecoder, buf + offset, k - offset, &consumed);
     if (status == protocolStatusBadFrame) {
       logf("bad frame");
       return false;
@@ -204,9 +329,55 @@ static bool pipeTcp(
       return false;
     }
 
-    if (!handleInboundMessage(poller, key, state, &msg)) {
+    queueResult_t result = handleInboundMessage(poller, key, state, &msg);
+    if (result == queueResultError) {
       return false;
     }
+    if (result == queueResultBlocked) {
+      break;
+    }
+  }
+
+  *outConsumed = offset;
+  return true;
+}
+
+static bool pipeTcp(
+    ioPoller_t *poller,
+    const unsigned char key[ProtocolPskSize],
+    sessionState_t *state) {
+  long nbytes = 0;
+  int consumed = 0;
+  int k;
+
+  if (state->tcpBufferedNbytes > 0) {
+    if (!pipeTcpBytes(poller, key, state, state->tcpBufferedBuf, (int)state->tcpBufferedNbytes, &consumed)) {
+      return false;
+    }
+    if (consumed < state->tcpBufferedNbytes) {
+      long rem = state->tcpBufferedNbytes - consumed;
+      memmove(state->tcpBufferedBuf, state->tcpBufferedBuf + consumed, (size_t)rem);
+      state->tcpBufferedNbytes = rem;
+      return true;
+    }
+    state->tcpBufferedNbytes = 0;
+  }
+
+  ioStatus_t readStatus = ioReadSome(poller->tcpFd, state->tcpBuf, sizeof(state->tcpBuf), &nbytes);
+  if (readStatus == ioStatusWouldBlock) {
+    return true;
+  }
+  if (readStatus != ioStatusOk) {
+    return false;
+  }
+  k = (int)nbytes;
+  if (!pipeTcpBytes(poller, key, state, state->tcpBuf, k, &consumed)) {
+    return false;
+  }
+  if (consumed < k) {
+    long rem = (long)(k - consumed);
+    memcpy(state->tcpBufferedBuf, state->tcpBuf + consumed, (size_t)rem);
+    state->tcpBufferedNbytes = rem;
   }
 
   return true;
@@ -235,8 +406,12 @@ static bool heartbeatTick(
           .nbytes = 0,
           .buf = NULL,
       };
-      if (!sendMessage(poller, key, &req)) {
+      queueResult_t result = sendMessage(poller, key, state, &req);
+      if (result == queueResultError) {
         return false;
+      }
+      if (result == queueResultBlocked) {
+        return true;
       }
 
       state->heartbeatPending = true;
@@ -295,6 +470,11 @@ void serveTcp(
         logf("connection closed");
         stop = true;
       }
+    }
+
+    if (!stop && !serviceBackpressure(&poller, &state)) {
+      logf("backpressure handling failure");
+      stop = true;
     }
 
     if (!stop && !heartbeatTick(&poller, key, &state)) {

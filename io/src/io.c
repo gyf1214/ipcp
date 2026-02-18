@@ -42,6 +42,10 @@ static ioQueueState_t queueState(ioPoller_t *poller, ioSource_t source) {
   return state;
 }
 
+static int sourceValid(ioSource_t source) {
+  return source == ioSourceTun || source == ioSourceTcp;
+}
+
 static int pollerSetNonBlocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0) {
@@ -343,6 +347,35 @@ bool ioPollerQueueWrite(ioPoller_t *poller, ioSource_t source, const void *data,
   }
 
   return true;
+}
+
+bool ioPollerSetReadEnabled(ioPoller_t *poller, ioSource_t source, bool enabled) {
+  ioQueueState_t state;
+  unsigned int nextEvents;
+
+  if (poller == NULL || poller->epollFd < 0 || !sourceValid(source)) {
+    return false;
+  }
+
+  state = queueState(poller, source);
+  nextEvents = *state.events;
+  if (enabled) {
+    nextEvents |= EPOLLIN;
+  } else {
+    nextEvents &= ~EPOLLIN;
+  }
+
+  return pollerMod(poller, source, nextEvents) == 0;
+}
+
+long ioPollerQueuedBytes(const ioPoller_t *poller, ioSource_t source) {
+  if (poller == NULL || !sourceValid(source)) {
+    return -1;
+  }
+  if (source == ioSourceTun) {
+    return poller->tunOutNbytes;
+  }
+  return poller->tcpOutNbytes;
 }
 
 ioEvent_t ioPollerWait(ioPoller_t *poller, int timeoutMs) {

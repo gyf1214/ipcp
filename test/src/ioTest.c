@@ -175,6 +175,48 @@ static void testIoPollerQueueWriteRejectsOverflow(void) {
   close(tcpPair[1]);
 }
 
+static void testIoPollerReadMaskAndQueueBytes(void) {
+  int tunPipe[2];
+  int tcpPair[2];
+  ioPoller_t poller;
+  ioEvent_t event;
+  char buf[32];
+  const char *payload = "queued";
+
+  testAssertTrue(IoPollerLowWatermark == 49152, "low watermark should be 75% of queue capacity");
+  testAssertTrue(pipe(tunPipe) == 0, "tun pipe should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
+  testAssertTrue(ioPollerInit(&poller, tunPipe[0], tcpPair[0]) == 0, "ioPollerInit should succeed");
+
+  testAssertTrue(ioPollerSetReadEnabled(&poller, ioSourceTun, false), "should disable tun read interest");
+  testAssertTrue(write(tunPipe[1], "z", 1) == 1, "tun producer write should succeed");
+  event = ioPollerWait(&poller, 20);
+  testAssertTrue(event == ioEventTimeout, "masked tun read should not trigger event");
+
+  testAssertTrue(ioPollerSetReadEnabled(&poller, ioSourceTun, true), "should re-enable tun read interest");
+  event = ioPollerWait(&poller, 100);
+  testAssertTrue(event == ioEventTunRead, "unmasked tun read should trigger event");
+  testAssertTrue(read(tunPipe[0], (char[2]){0}, 1) == 1, "tun byte should drain");
+
+  testAssertTrue(ioPollerQueuedBytes(&poller, ioSourceTcp) == 0, "tcp queue should start empty");
+  testAssertTrue(
+      ioPollerQueueWrite(&poller, ioSourceTcp, payload, (long)strlen(payload)),
+      "queue write should succeed");
+  testAssertTrue(
+      ioPollerQueuedBytes(&poller, ioSourceTcp) == (long)strlen(payload),
+      "queue bytes should reflect enqueued payload");
+  event = ioPollerWait(&poller, 100);
+  testAssertTrue(event == ioEventTcpWrite, "queue flush should surface tcp write event");
+  testAssertTrue(read(tcpPair[1], buf, sizeof(buf)) == (long)strlen(payload), "peer should read queued payload");
+  testAssertTrue(ioPollerQueuedBytes(&poller, ioSourceTcp) == 0, "queue bytes should be zero after flush");
+
+  ioPollerClose(&poller);
+  close(tunPipe[0]);
+  close(tunPipe[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
 static void testIoTunOpenRejectNullName(void) {
   testAssertTrue(ioTunOpen(NULL) < 0, "ioTunOpen should reject NULL interface name");
 }
@@ -196,6 +238,7 @@ void runIoTests(void) {
   testIoPollerError();
   testIoPollerQueueWriteFlushesOnWritable();
   testIoPollerQueueWriteRejectsOverflow();
+  testIoPollerReadMaskAndQueueBytes();
   testIoTunOpenRejectNullName();
   testIoTcpListenRejectInvalidIp();
   testIoTcpConnectRejectInvalidIp();

@@ -19,6 +19,7 @@ typedef enum {
 } ioEvent_t;
 
 #define IoPollerQueueCapacity 65536
+#define IoPollerLowWatermark 49152
 
 typedef enum {
   ioSourceTun = 0,
@@ -50,3 +51,5 @@ int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd);
 void ioPollerClose(ioPoller_t *poller);
 ioEvent_t ioPollerWait(ioPoller_t *poller, int timeoutMs);
 bool ioPollerQueueWrite(ioPoller_t *poller, ioSource_t source, const void *data, long nbytes);
+bool ioPollerSetReadEnabled(ioPoller_t *poller, ioSource_t source, bool enabled);
+long ioPollerQueuedBytes(const ioPoller_t *poller, ioSource_t source);
