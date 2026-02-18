@@ -4,6 +4,7 @@
 #include <sodium.h>
 
 #include "protocol.h"
+#include "protocolInternal.h"
 
 static long protocolMessageHeaderSize() {
   return (long)sizeof(unsigned char) + ProtocolWireLengthSize;

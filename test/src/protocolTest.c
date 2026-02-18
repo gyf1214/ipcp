@@ -5,6 +5,7 @@
 
 #include "log.h"
 #include "protocol.h"
+#include "protocolInternal.h"
 #include "testAssert.h"
 
 void testEncode() {

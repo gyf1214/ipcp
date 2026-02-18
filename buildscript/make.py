@@ -29,6 +29,7 @@ def main(args):
         'test': TestProject(
             'test',
             depends=['protocol', 'generic', 'io'],
+            private_depends=['protocol'],
             test_command='./target/test',
             libs=[':libsodium.a']
         ),

@@ -42,14 +42,9 @@ protocolStatus_t protocolDecodeFeed(
     protocolDecoder_t *decoder, const void *data, long nbytes, long *consumed);
 int protocolDecoderHasFrame(const protocolDecoder_t *decoder);
 protocolStatus_t protocolDecoderTake(protocolDecoder_t *decoder, protocolFrame_t *frame);
-long protocolMessageMaxPayloadSize();
-protocolStatus_t protocolMessageEncodeFrame(const protocolMessage_t *msg, protocolFrame_t *frame);
-protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protocolMessage_t *msg);
 protocolStatus_t protocolSecureEncodeMessage(
     const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize], protocolFrame_t *frame);
 protocolStatus_t protocolSecureDecodeFrame(
     protocolFrame_t *frame, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg);
 
 long protocolMaxPlaintextSize();
-protocolStatus_t protocolFrameEncrypt(protocolFrame_t *frame, const unsigned char key[ProtocolPskSize]);
-protocolStatus_t protocolFrameDecrypt(protocolFrame_t *frame, const unsigned char key[ProtocolPskSize]);
