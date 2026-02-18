@@ -23,6 +23,16 @@ static long protocolExpectedSize(const protocolDecoder_t *decoder) {
   return ProtocolWireLengthSize + decoder->frame.nbytes;
 }
 
+static protocolStatus_t protocolDecoderTakeFrame(protocolDecoder_t *decoder, protocolFrame_t *frame) {
+  if (!decoder->hasFrame) {
+    return protocolStatusNeedMore;
+  }
+
+  memcpy(frame, &decoder->frame, (size_t)sizeof(frame->nbytes) + (size_t)decoder->frame.nbytes);
+  protocolDecoderInit(decoder);
+  return protocolStatusOk;
+}
+
 static int protocolLengthToWire(long nbytes, unsigned char out[ProtocolWireLengthSize]) {
   if (nbytes < 0 || nbytes > ProtocolFrameSize) {
     return 0;
@@ -126,18 +136,19 @@ protocolStatus_t protocolDecodeFeed(
   return decoder->hasFrame ? protocolStatusOk : protocolStatusNeedMore;
 }
 
-int protocolDecoderHasFrame(const protocolDecoder_t *decoder) {
-  return decoder->hasFrame;
-}
+protocolStatus_t protocolDecoderTakeMessage(protocolDecoder_t *decoder, protocolMessage_t *msg) {
+  protocolFrame_t frame;
+  protocolStatus_t status;
 
-protocolStatus_t protocolDecoderTake(protocolDecoder_t *decoder, protocolFrame_t *frame) {
-  if (!decoder->hasFrame) {
-    return protocolStatusNeedMore;
+  if (decoder == NULL || msg == NULL) {
+    return protocolStatusBadFrame;
   }
 
-  memcpy(frame, &decoder->frame, (size_t)sizeof(frame->nbytes) + (size_t)decoder->frame.nbytes);
-  protocolDecoderInit(decoder);
-  return protocolStatusOk;
+  status = protocolDecoderTakeFrame(decoder, &frame);
+  if (status != protocolStatusOk) {
+    return status;
+  }
+  return protocolMessageDecodeFrame(&frame, msg);
 }
 
 long protocolMessageMaxPayloadSize() {
@@ -226,6 +237,35 @@ protocolStatus_t protocolSecureDecodeFrame(
     return status;
   }
   return protocolMessageDecodeFrame(frame, msg);
+}
+
+protocolStatus_t protocolSecureDecoderReadMessage(
+    protocolDecoder_t *decoder,
+    const unsigned char key[ProtocolPskSize],
+    const void *data,
+    long nbytes,
+    long *consumed,
+    protocolMessage_t *msg) {
+  protocolStatus_t status;
+  protocolFrame_t frame;
+
+  if (decoder == NULL || key == NULL || msg == NULL || (data == NULL && nbytes > 0)) {
+    if (consumed != NULL) {
+      *consumed = 0;
+    }
+    return protocolStatusBadFrame;
+  }
+
+  status = protocolDecodeFeed(decoder, data, nbytes, consumed);
+  if (status != protocolStatusOk) {
+    return status;
+  }
+
+  status = protocolDecoderTakeFrame(decoder, &frame);
+  if (status != protocolStatusOk) {
+    return status;
+  }
+  return protocolSecureDecodeFrame(&frame, key, msg);
 }
 
 long protocolMaxPlaintextSize() {

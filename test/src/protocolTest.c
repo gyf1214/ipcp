@@ -8,6 +8,16 @@
 #include "protocolInternal.h"
 #include "testAssert.h"
 
+static long writeWireFrame(const protocolFrame_t *frame, unsigned char *wire) {
+  unsigned long nbytes = (unsigned long)frame->nbytes;
+  wire[0] = (unsigned char)((nbytes >> 24) & 0xff);
+  wire[1] = (unsigned char)((nbytes >> 16) & 0xff);
+  wire[2] = (unsigned char)((nbytes >> 8) & 0xff);
+  wire[3] = (unsigned char)(nbytes & 0xff);
+  memcpy(wire + ProtocolWireLengthSize, frame->buf, (size_t)frame->nbytes);
+  return ProtocolWireLengthSize + frame->nbytes;
+}
+
 void testEncode() {
   const char *payload = "abc";
   protocolFrame_t frame;
@@ -24,34 +34,35 @@ void testEncodeRejectNullPayloadWithPositiveLength() {
   testAssertTrue(status == protocolStatusBadFrame, "encode should reject NULL payload with positive length");
 }
 
-void testDecodeSplitFrame() {
-  const char *payload = "hello";
+void testSecureDecoderReadMessageSplitFrame() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x44, sizeof(key));
+  protocolMessage_t in = {
+      .type = protocolMsgData,
+      .nbytes = 5,
+      .buf = "hello",
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolSecureEncodeMessage(&in, key, &frame);
+  testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
+
+  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  long wireNbytes = writeWireFrame(&frame, wire);
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
 
-  const unsigned char raw[] = {
-      0x00, 0x00, 0x00, 0x05,
-      'h', 'e', 'l', 'l', 'o',
-  };
-  long rawLen = (long)sizeof(raw);
+  protocolMessage_t out;
   long consumed = 0;
-  protocolStatus_t status;
-
-  status = protocolDecodeFeed(&decoder, raw, 2, &consumed);
+  status = protocolSecureDecoderReadMessage(&decoder, key, wire, 3, &consumed, &out);
   testAssertTrue(status == protocolStatusNeedMore, "partial header should require more");
-  testAssertTrue(consumed == 2, "should consume provided bytes");
-  testAssertTrue(!protocolDecoderHasFrame(&decoder), "frame should not be ready");
+  testAssertTrue(consumed == 3, "should consume provided bytes");
 
-  status = protocolDecodeFeed(&decoder, raw + 2, rawLen - 2, &consumed);
+  status = protocolSecureDecoderReadMessage(&decoder, key, wire + 3, wireNbytes - 3, &consumed, &out);
   testAssertTrue(status == protocolStatusOk, "rest of frame should decode");
-  testAssertTrue(consumed == rawLen - 2, "should consume remaining bytes");
-  testAssertTrue(protocolDecoderHasFrame(&decoder), "frame should be ready");
-
-  protocolFrame_t decoded;
-  status = protocolDecoderTake(&decoder, &decoded);
-  testAssertTrue(status == protocolStatusOk, "take should succeed");
-  testAssertTrue(decoded.nbytes == 5, "decoded length should match");
-  testAssertTrue(memcmp(decoded.buf, payload, 5) == 0, "decoded payload should match");
+  testAssertTrue(consumed == wireNbytes - 3, "should consume remaining bytes");
+  testAssertTrue(out.type == protocolMsgData, "decoded message type should match");
+  testAssertTrue(out.nbytes == 5, "decoded payload length should match");
+  testAssertTrue(memcmp(out.buf, "hello", 5) == 0, "decoded payload should match");
 }
 
 void testDecodeRejectBadLength() {
@@ -67,25 +78,147 @@ void testDecodeRejectBadLength() {
   testAssertTrue(status == protocolStatusBadFrame, "invalid size should fail");
 }
 
-void testDecodeUsesFixedBigEndianLengthHeader() {
+void testDecoderTakeMessageNeedsFrame() {
+  protocolDecoder_t decoder;
+  protocolDecoderInit(&decoder);
+  protocolMessage_t out;
+  protocolStatus_t status = protocolDecoderTakeMessage(&decoder, &out);
+  testAssertTrue(status == protocolStatusNeedMore, "take message should need a complete frame");
+}
+
+void testDecoderTakeMessageResetsDecoder() {
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
 
   const unsigned char raw[] = {
+      0x00, 0x00, 0x00, 0x08,
+      (unsigned char)protocolMsgData,
       0x00, 0x00, 0x00, 0x03,
       'a', 'b', 'c',
   };
   long consumed = 0;
   protocolStatus_t status = protocolDecodeFeed(&decoder, raw, (long)sizeof(raw), &consumed);
-  testAssertTrue(status == protocolStatusOk, "decoder should accept fixed 32-bit length header");
-  testAssertTrue(consumed == (long)sizeof(raw), "decoder should consume full frame bytes");
-  testAssertTrue(protocolDecoderHasFrame(&decoder), "decoder should expose a frame");
+  testAssertTrue(status == protocolStatusOk, "decoder should accept complete message frame");
+  testAssertTrue(consumed == (long)sizeof(raw), "decoder should consume entire frame");
 
+  protocolMessage_t out;
+  status = protocolDecoderTakeMessage(&decoder, &out);
+  testAssertTrue(status == protocolStatusOk, "take message should succeed");
+  testAssertTrue(out.type == protocolMsgData, "message type should match");
+  testAssertTrue(out.nbytes == 3, "message payload size should match");
+  testAssertTrue(memcmp(out.buf, "abc", 3) == 0, "message payload should match");
+
+  status = protocolDecoderTakeMessage(&decoder, &out);
+  testAssertTrue(status == protocolStatusNeedMore, "decoder should be reset after successful take");
+}
+
+void testDecoderTakeMessageRejectsInvalidMessage() {
+  protocolDecoder_t decoder;
+  protocolDecoderInit(&decoder);
+
+  const unsigned char raw[] = {
+      0x00, 0x00, 0x00, 0x01,
+      0x7f,
+  };
+  long consumed = 0;
+  protocolStatus_t status = protocolDecodeFeed(&decoder, raw, (long)sizeof(raw), &consumed);
+  testAssertTrue(status == protocolStatusOk, "decoder should accept frame bytes");
+
+  protocolMessage_t out;
+  status = protocolDecoderTakeMessage(&decoder, &out);
+  testAssertTrue(status == protocolStatusBadFrame, "take message should reject invalid typed payload");
+}
+
+void testDecodeUsesFixedBigEndianLengthHeader() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x31, sizeof(key));
+  protocolMessage_t in = {
+      .type = protocolMsgData,
+      .nbytes = 3,
+      .buf = "abc",
+  };
+  protocolFrame_t secureFrame;
+  protocolStatus_t status = protocolSecureEncodeMessage(&in, key, &secureFrame);
+  testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
+
+  unsigned char raw[ProtocolWireLengthSize + ProtocolFrameSize];
+  long rawNbytes = writeWireFrame(&secureFrame, raw);
+  protocolDecoder_t decoder;
+  protocolDecoderInit(&decoder);
+  long consumed = 0;
+  protocolMessage_t out;
+  status = protocolSecureDecoderReadMessage(&decoder, key, raw, rawNbytes, &consumed, &out);
+  testAssertTrue(status == protocolStatusOk, "decoder should accept fixed 32-bit length header");
+  testAssertTrue(consumed == rawNbytes, "decoder should consume full frame bytes");
+  testAssertTrue(out.type == protocolMsgData, "decoded message type should match");
+  testAssertTrue(out.nbytes == 3, "decoded payload length should match");
+  testAssertTrue(memcmp(out.buf, "abc", 3) == 0, "decoded payload should match");
+}
+
+void testSecureDecoderReadMessageRejectsTamper() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x52, sizeof(key));
+  protocolMessage_t in = {
+      .type = protocolMsgHeartbeatReq,
+      .nbytes = 0,
+      .buf = NULL,
+  };
   protocolFrame_t frame;
-  status = protocolDecoderTake(&decoder, &frame);
-  testAssertTrue(status == protocolStatusOk, "taking decoded frame should succeed");
-  testAssertTrue(frame.nbytes == 3, "decoded frame length should match header");
-  testAssertTrue(memcmp(frame.buf, "abc", 3) == 0, "decoded frame payload should match");
+  protocolStatus_t status = protocolSecureEncodeMessage(&in, key, &frame);
+  testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
+  frame.buf[frame.nbytes - 1] ^= 0x1;
+
+  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  long wireNbytes = writeWireFrame(&frame, wire);
+  protocolDecoder_t decoder;
+  protocolDecoderInit(&decoder);
+
+  protocolMessage_t out;
+  long consumed = 0;
+  status = protocolSecureDecoderReadMessage(&decoder, key, wire, wireNbytes, &consumed, &out);
+  testAssertTrue(status == protocolStatusBadFrame, "tampered secure frame should fail");
+}
+
+void testSecureDecoderReadMessageNeedMore() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x08, sizeof(key));
+  protocolDecoder_t decoder;
+  protocolDecoderInit(&decoder);
+  protocolMessage_t out;
+  long consumed = 0;
+  protocolStatus_t status =
+      protocolSecureDecoderReadMessage(&decoder, key, "\x00\x00", 2, &consumed, &out);
+  testAssertTrue(status == protocolStatusNeedMore, "incomplete wire header should need more bytes");
+  testAssertTrue(consumed == 2, "decoder should consume provided bytes");
+}
+
+void testSecureDecoderReadMessageRejectBadArgs() {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x18, sizeof(key));
+  protocolDecoder_t decoder;
+  protocolDecoderInit(&decoder);
+  protocolMessage_t out;
+  long consumed = -1;
+
+  protocolStatus_t status =
+      protocolSecureDecoderReadMessage(NULL, key, "\x00", 1, &consumed, &out);
+  testAssertTrue(status == protocolStatusBadFrame, "NULL decoder should fail");
+  testAssertTrue(consumed == 0, "NULL decoder should zero consumed");
+
+  consumed = -1;
+  status = protocolSecureDecoderReadMessage(&decoder, NULL, "\x00", 1, &consumed, &out);
+  testAssertTrue(status == protocolStatusBadFrame, "NULL key should fail");
+  testAssertTrue(consumed == 0, "NULL key should zero consumed");
+
+  consumed = -1;
+  status = protocolSecureDecoderReadMessage(&decoder, key, "\x00", 1, &consumed, NULL);
+  testAssertTrue(status == protocolStatusBadFrame, "NULL message should fail");
+  testAssertTrue(consumed == 0, "NULL message should zero consumed");
+
+  consumed = -1;
+  status = protocolSecureDecoderReadMessage(&decoder, key, NULL, 1, &consumed, &out);
+  testAssertTrue(status == protocolStatusBadFrame, "NULL data with positive length should fail");
+  testAssertTrue(consumed == 0, "NULL data should zero consumed");
 }
 
 void testGenericLoggingAvailable() {
@@ -294,9 +427,15 @@ void runProtocolTests(void) {
   testAssertTrue(sodium_init() >= 0, "sodium init should succeed");
   testEncode();
   testEncodeRejectNullPayloadWithPositiveLength();
-  testDecodeSplitFrame();
+  testSecureDecoderReadMessageSplitFrame();
   testDecodeRejectBadLength();
+  testDecoderTakeMessageNeedsFrame();
+  testDecoderTakeMessageResetsDecoder();
+  testDecoderTakeMessageRejectsInvalidMessage();
   testDecodeUsesFixedBigEndianLengthHeader();
+  testSecureDecoderReadMessageRejectsTamper();
+  testSecureDecoderReadMessageNeedMore();
+  testSecureDecoderReadMessageRejectBadArgs();
   testGenericLoggingAvailable();
   testEncryptDecryptRoundTrip();
   testDecryptRejectTamper();

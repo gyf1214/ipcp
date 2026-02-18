@@ -303,8 +303,9 @@ static bool pipeTcpBytes(
   int offset = 0;
   while (offset < k) {
     long consumed = 0;
-    protocolStatus_t status =
-        protocolDecodeFeed(&state->tcpDecoder, buf + offset, k - offset, &consumed);
+    protocolMessage_t msg;
+    protocolStatus_t status = protocolSecureDecoderReadMessage(
+        &state->tcpDecoder, key, buf + offset, k - offset, &consumed, &msg);
     if (status == protocolStatusBadFrame) {
       logf("bad frame");
       return false;
@@ -314,19 +315,8 @@ static bool pipeTcpBytes(
     }
     offset += (int)consumed;
 
-    if (!protocolDecoderHasFrame(&state->tcpDecoder)) {
+    if (status == protocolStatusNeedMore) {
       continue;
-    }
-
-    protocolFrame_t frame;
-    status = protocolDecoderTake(&state->tcpDecoder, &frame);
-    if (status != protocolStatusOk) {
-      return false;
-    }
-    protocolMessage_t msg;
-    if (protocolSecureDecodeFrame(&frame, key, &msg) != protocolStatusOk) {
-      logf("failed to decrypt/decode message");
-      return false;
     }
 
     queueResult_t result = handleInboundMessage(poller, key, state, &msg);

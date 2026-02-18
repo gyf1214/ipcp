@@ -40,10 +40,16 @@ protocolStatus_t protocolEncode(const void *payload, long nbytes, protocolFrame_
 void protocolDecoderInit(protocolDecoder_t *decoder);
 protocolStatus_t protocolDecodeFeed(
     protocolDecoder_t *decoder, const void *data, long nbytes, long *consumed);
-int protocolDecoderHasFrame(const protocolDecoder_t *decoder);
-protocolStatus_t protocolDecoderTake(protocolDecoder_t *decoder, protocolFrame_t *frame);
+protocolStatus_t protocolDecoderTakeMessage(protocolDecoder_t *decoder, protocolMessage_t *msg);
 protocolStatus_t protocolSecureEncodeMessage(
     const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize], protocolFrame_t *frame);
+protocolStatus_t protocolSecureDecoderReadMessage(
+    protocolDecoder_t *decoder,
+    const unsigned char key[ProtocolPskSize],
+    const void *data,
+    long nbytes,
+    long *consumed,
+    protocolMessage_t *msg);
 protocolStatus_t protocolSecureDecodeFrame(
     protocolFrame_t *frame, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg);
 
