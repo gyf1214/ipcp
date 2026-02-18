@@ -43,11 +43,7 @@ rebuild : clean all
 test : all
 	$(MAKE) test-test
 
-container-test :
-	podman build -t ipcp-dev:local -f Dockerfile .
-	podman run --rm -v "$$PWD:/work" -w /work ipcp-dev:local bash -lc "make test"
-
 integration-test : all
 	bash test/integration/ipcpd_direct_test.sh
 
-.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test container-test integration-test
+.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test integration-test
