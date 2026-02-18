@@ -78,6 +78,26 @@ void testDecodeRejectBadLength() {
   testAssertTrue(status == protocolStatusBadFrame, "invalid size should fail");
 }
 
+void testDecodeFeedRejectBadArgs() {
+  protocolDecoder_t decoder;
+  protocolDecoderInit(&decoder);
+  long consumed = -1;
+
+  protocolStatus_t status = protocolDecodeFeed(NULL, "\x00", 1, &consumed);
+  testAssertTrue(status == protocolStatusBadFrame, "NULL decoder should fail");
+  testAssertTrue(consumed == 0, "NULL decoder should zero consumed");
+
+  consumed = -1;
+  status = protocolDecodeFeed(&decoder, NULL, 1, &consumed);
+  testAssertTrue(status == protocolStatusBadFrame, "NULL data with positive length should fail");
+  testAssertTrue(consumed == 0, "NULL data should zero consumed");
+
+  consumed = -1;
+  status = protocolDecodeFeed(&decoder, NULL, 0, &consumed);
+  testAssertTrue(status == protocolStatusNeedMore, "NULL data with zero length should need more");
+  testAssertTrue(consumed == 0, "zero-byte feed should zero consumed");
+}
+
 void testDecoderTakeMessageNeedsFrame() {
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
@@ -429,6 +449,7 @@ void runProtocolTests(void) {
   testEncodeRejectNullPayloadWithPositiveLength();
   testSecureDecoderReadMessageSplitFrame();
   testDecodeRejectBadLength();
+  testDecodeFeedRejectBadArgs();
   testDecoderTakeMessageNeedsFrame();
   testDecoderTakeMessageResetsDecoder();
   testDecoderTakeMessageRejectsInvalidMessage();

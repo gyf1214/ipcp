@@ -70,6 +70,13 @@ void protocolDecoderInit(protocolDecoder_t *decoder) {
 protocolStatus_t protocolDecodeFeed(
     protocolDecoder_t *decoder, const void *data, long nbytes, long *consumed) {
   long totalConsumed = 0;
+  if (decoder == NULL || (data == NULL && nbytes > 0)) {
+    if (consumed != NULL) {
+      *consumed = 0;
+    }
+    return protocolStatusBadFrame;
+  }
+
   if (nbytes <= 0) {
     if (consumed != NULL) {
       *consumed = 0;
