@@ -20,6 +20,17 @@ require_cmd() {
   fi
 }
 
+ns_path() {
+  local ns="$1"
+  echo "/run/netns/$ns"
+}
+
+ns_exec() {
+  local ns="$1"
+  shift
+  nsenter --net="$(ns_path "$ns")" -- "$@"
+}
+
 dump_logs() {
   if [[ -f "$serverLog" ]]; then
     echo "--- server log ---" >&2
@@ -63,7 +74,7 @@ wait_for_tun() {
   local deadline=$((SECONDS + 15))
 
   while (( SECONDS < deadline )); do
-    if ip netns exec "$ns" ip link show dev tun0 >/dev/null 2>&1; then
+    if ns_exec "$ns" ip link show dev tun0 >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.2
@@ -78,6 +89,7 @@ trap 'cleanup $?' EXIT
 require_cmd ip
 require_cmd ping
 require_cmd timeout
+require_cmd nsenter
 
 if [[ ! -c /dev/net/tun ]]; then
   echo "missing /dev/net/tun" >&2
@@ -101,30 +113,30 @@ ip link add "$serverVeth" type veth peer name "$clientVeth"
 ip link set "$serverVeth" netns "$serverNs"
 ip link set "$clientVeth" netns "$clientNs"
 
-ip netns exec "$serverNs" ip link set lo up
-ip netns exec "$clientNs" ip link set lo up
+ns_exec "$serverNs" ip link set lo up
+ns_exec "$clientNs" ip link set lo up
 
-ip netns exec "$serverNs" ip addr add 10.200.1.1/24 dev "$serverVeth"
-ip netns exec "$clientNs" ip addr add 10.200.1.2/24 dev "$clientVeth"
-ip netns exec "$serverNs" ip link set "$serverVeth" up
-ip netns exec "$clientNs" ip link set "$clientVeth" up
+ns_exec "$serverNs" ip addr add 10.200.1.1/24 dev "$serverVeth"
+ns_exec "$clientNs" ip addr add 10.200.1.2/24 dev "$clientVeth"
+ns_exec "$serverNs" ip link set "$serverVeth" up
+ns_exec "$clientNs" ip link set "$clientVeth" up
 
-ip netns exec "$serverNs" ./daemon/target/ipcpd tun0 10.200.1.1 46000 1 "$keyFile" >"$serverLog" 2>&1 &
+ns_exec "$serverNs" ./daemon/target/ipcpd tun0 10.200.1.1 46000 1 "$keyFile" >"$serverLog" 2>&1 &
 serverPid="$!"
 
 sleep 1
 
-ip netns exec "$clientNs" ./daemon/target/ipcpd tun0 10.200.1.1 46000 0 "$keyFile" >"$clientLog" 2>&1 &
+ns_exec "$clientNs" ./daemon/target/ipcpd tun0 10.200.1.1 46000 0 "$keyFile" >"$clientLog" 2>&1 &
 clientPid="$!"
 
 wait_for_tun "$serverNs"
 wait_for_tun "$clientNs"
 
-ip netns exec "$serverNs" ip addr add 10.250.0.1/30 dev tun0
-ip netns exec "$clientNs" ip addr add 10.250.0.2/30 dev tun0
-ip netns exec "$serverNs" ip link set tun0 up
-ip netns exec "$clientNs" ip link set tun0 up
+ns_exec "$serverNs" ip addr add 10.250.0.1/30 dev tun0
+ns_exec "$clientNs" ip addr add 10.250.0.2/30 dev tun0
+ns_exec "$serverNs" ip link set tun0 up
+ns_exec "$clientNs" ip link set tun0 up
 
-timeout 10 ip netns exec "$clientNs" ping -c 3 -W 1 10.250.0.1
+ns_exec "$clientNs" timeout 10 ping -c 3 -W 1 10.250.0.1
 
 echo "ipcpd direct integration test passed"
