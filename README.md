@@ -57,6 +57,7 @@ After `make all`:
 - `generic/target/libgeneric.a` - generic utility static library
 - `protocol/target/libprotocol.a` - protocol static library
 - `io/target/libio.a` - fd-level I/O and poller static library
+- `session/target/libsession.a` - per-connection runtime policy and bridge logic
 
 After `make test`:
 
@@ -66,6 +67,7 @@ Manual subset examples:
 
 - `./test/target/test protocol` - run protocol suite only
 - `./test/target/test io` - run IO suite only
+- `./test/target/test session` - run session suite only
 - unknown suite names return a non-zero exit and usage message
 
 ## `ipcpd` Usage
@@ -114,4 +116,5 @@ Client:
 
 - `io`: fd-level setup/poll/read/write primitives (TUN/TCP open + `epoll` + bounded reads/full writes)
 - `protocol`: framing, typed messages, and secure message encode/decode (including crypto envelope)
-- `daemon`: runtime policy and session behavior (message routing, heartbeat, client/server lifecycle)
+- `session`: per-connection runtime policy and bridge logic (message routing, heartbeat, backpressure)
+- `daemon`: process bootstrap and client/server orchestration

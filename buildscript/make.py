@@ -20,15 +20,20 @@ def main(args):
             'io',
             output_name='libio.a', output_type=CProject.OutputType.STATIC,
         ),
+        'session': CProject(
+            'session',
+            output_name='libsession.a', output_type=CProject.OutputType.STATIC,
+            depends=['protocol', 'generic', 'io'],
+        ),
         'daemon': CProject(
             'daemon',
             output_name='ipcpd', output_type=CProject.OutputType.BINARY,
-            depends=['protocol', 'generic', 'io'],
+            depends=['protocol', 'generic', 'io', 'session'],
             libs=[':libsodium.a']
         ),
         'test': TestProject(
             'test',
-            depends=['protocol', 'generic', 'io'],
+            depends=['protocol', 'generic', 'io', 'session'],
             private_depends=['protocol'],
             test_command='./target/test',
             libs=[':libsodium.a']
