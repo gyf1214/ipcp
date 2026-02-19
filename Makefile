@@ -3,10 +3,10 @@ PYTHON=python3
 PRELUDE=target/Projects.mk
 
 METAFLAGS=
-ifeq ($(DEBUG), 1)
-METAFLAGS+=--debug
-else
+ifeq ($(DEBUG), 0)
 METAFLAGS+=--no-debug
+else
+METAFLAGS+=--debug
 endif
 ifeq ($(TEST), 0)
 METAFLAGS+=--no-test
