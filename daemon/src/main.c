@@ -13,8 +13,16 @@
 
 #define EPOLL_WAIT_MS 200
 
+static ioIfMode_t toIoIfMode(configIfMode_t mode) {
+  if (mode == configIfModeTap) {
+    return ioIfModeTap;
+  }
+  return ioIfModeTun;
+}
+
 static int serveTcp(
     const char *ifName,
+    configIfMode_t ifMode,
     int connFd,
     const unsigned char key[ProtocolPskSize],
     bool isServer,
@@ -26,7 +34,7 @@ static int serveTcp(
   int result = -1;
 
   logf("opening tun device %s", ifName);
-  tunFd = ioTunOpen(ifName);
+  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
   if (tunFd < 0) {
     errf("failed to open tun device %s: %s", ifName, strerror(errno));
     goto cleanup;
@@ -73,6 +81,7 @@ cleanup:
 
 static int listenTcp(
     const char *ifName,
+    configIfMode_t ifMode,
     const char *listenIP,
     int port,
     const unsigned char key[ProtocolPskSize],
@@ -95,7 +104,7 @@ static int listenTcp(
     }
     logf("connected with %s:%d", clientIP, clientPort);
 
-    if (serveTcp(ifName, connFd, key, true, heartbeatCfg) != 0) {
+    if (serveTcp(ifName, ifMode, connFd, key, true, heartbeatCfg) != 0) {
       close(listenFd);
       return -1;
     }
@@ -107,6 +116,7 @@ static int listenTcp(
 
 static int connTcp(
     const char *ifName,
+    configIfMode_t ifMode,
     const char *remoteIP,
     int port,
     const unsigned char key[ProtocolPskSize],
@@ -118,7 +128,7 @@ static int connTcp(
   }
   logf("connected to %s:%d", remoteIP, port);
 
-  return serveTcp(ifName, connFd, key, false, heartbeatCfg);
+  return serveTcp(ifName, ifMode, connFd, key, false, heartbeatCfg);
 }
 
 int main(int argc, char **argv) {
@@ -153,10 +163,14 @@ int main(int argc, char **argv) {
 
   if (cfg.mode == configModeServer) {
     exitCode =
-        listenTcp(cfg.ifName, cfg.listenIP, cfg.listenPort, key, &heartbeatCfg) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+        listenTcp(cfg.ifName, cfg.ifMode, cfg.listenIP, cfg.listenPort, key, &heartbeatCfg) == 0
+            ? EXIT_SUCCESS
+            : EXIT_FAILURE;
   } else {
     exitCode =
-        connTcp(cfg.ifName, cfg.serverIP, cfg.serverPort, key, &heartbeatCfg) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+        connTcp(cfg.ifName, cfg.ifMode, cfg.serverIP, cfg.serverPort, key, &heartbeatCfg) == 0
+            ? EXIT_SUCCESS
+            : EXIT_FAILURE;
   }
 
 cleanup:
