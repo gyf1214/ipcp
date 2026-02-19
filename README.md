@@ -4,7 +4,7 @@
 
 ## Features
 
-- Linux TUN integration for IP-layer tunneling
+- Linux TUN/TAP integration for IP- or Ethernet-layer tunneling
 - Client and server modes in the same daemon (`ipcpd`)
 - Moves IP packets between TUN and a TCP connection
 - Wraps traffic in protocol frames with typed messages
@@ -123,6 +123,7 @@ Supported v1 schema:
 - Single mode per file
 - Unknown JSON fields are ignored
 - Key material is loaded only from `key_file` path
+- `if_mode` is optional (`"tun"` or `"tap"`, default `"tun"`)
 - `heartbeat_interval_ms` is optional (default `5000`)
 - `heartbeat_timeout_ms` is optional (default `15000`)
 - Both heartbeat fields must be positive integers, and `heartbeat_timeout_ms` must be greater than `heartbeat_interval_ms`
@@ -143,6 +144,7 @@ head -c 32 /dev/urandom > secret.key
 {
   "mode": "server",
   "if_name": "tun0",
+  "if_mode": "tun",
   "listen_ip": "0.0.0.0",
   "listen_port": 5000,
   "key_file": "secret.key",
@@ -163,6 +165,7 @@ Run:
 {
   "mode": "client",
   "if_name": "tun0",
+  "if_mode": "tun",
   "server_ip": "203.0.113.10",
   "server_port": 5000,
   "key_file": "secret.key",
@@ -181,6 +184,8 @@ Run:
 
 - Requires Linux with `/dev/net/tun`
 - `ipcpd` does not inherently require root; TUN create/manage operations require appropriate privileges (typically `CAP_NET_ADMIN`, often via root or pre-provisioned device ownership)
+- `if_mode: "tun"` uses L3 packets (`IFF_TUN`); `if_mode: "tap"` uses Ethernet frames (`IFF_TAP`)
+- TAP mode requires assigning/linking the TAP interface according to your L2/L3 topology; default MTU (`1500`) is usually a safe starting point for both modes
 - Interface IP assignment and routing are environment-specific and should be configured separately with `ip` tooling
 
 ## Component Roles
