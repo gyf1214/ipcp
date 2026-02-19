@@ -44,6 +44,25 @@ is_running() {
   kill -0 "$pid" >/dev/null 2>&1
 }
 
+assert_clients_running_for() {
+  local seconds="$1"
+  local pidA="$2"
+  local pidB="$3"
+  local logA="$4"
+  local logB="$5"
+  local logC="$6"
+  local until=$((SECONDS + seconds))
+
+  while (( SECONDS < until )); do
+    if ! is_running "$pidA" || ! is_running "$pidB"; then
+      echo "expected both client processes to remain connected" >&2
+      dump_logs "$serverLog" "$logA" "$logB" "$logC"
+      exit 1
+    fi
+    sleep 1
+  done
+}
+
 dump_logs() {
   local serverLog="$1"
   local clientLogA="$2"
@@ -238,16 +257,14 @@ if ! wait_for_interface "$clientNsB" tun0; then
 fi
 
 sleep 16
-if ! is_running "$clientPidA" || ! is_running "$clientPidB"; then
-  echo "expected both client processes to remain connected" >&2
-  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
-  exit 1
-fi
+assert_clients_running_for 8 "$clientPidA" "$clientPidB" "$clientLogA" "$clientLogB" "$clientLogC"
 if [[ "$(grep -c 'connected with' "$serverLog" || true)" -lt 2 ]]; then
   echo "expected server to accept at least two clients" >&2
   dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
   exit 1
 fi
+
+assert_clients_running_for 8 "$clientPidA" "$clientPidB" "$clientLogA" "$clientLogB" "$clientLogC"
 
 kill_wait "$clientPidA"
 clientPidA=""

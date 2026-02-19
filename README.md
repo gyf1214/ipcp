@@ -189,6 +189,10 @@ Run:
 - TAP mode requires assigning/linking the TAP interface according to your L2/L3 topology; default MTU (`1500`) is usually a safe starting point for both modes
 - Interface IP assignment and routing are environment-specific and should be configured separately with `ip` tooling
 - Server runtime uses one shared epoll loop for listen fd, shared TUN/TAP fd, and all active client TCP fds
+- In multi-session server mode, TUN egress queue ownership is runtime-global (not per-session)
+- Shared TUN `EPOLLOUT` interest is enabled while any runtime TUN backlog remains and disabled only after full drain
+- On shared TUN backpressure, each session retains at most one pending overflow frame and pauses only that session's TCP read
+- When TUN backlog drains to low watermark, blocked-session retries run in round-robin order from a rotating cursor
 - Job-1 TUN egress may select any currently connected client (routing-table selection is deferred)
 - Job-1 keying model is one shared PSK (`key_file`) for all clients; per-client identity/key selection is deferred
 

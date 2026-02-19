@@ -14,6 +14,7 @@
 
 struct session_t {
   bool isServer;
+  serverRuntime_t *runtime;
   sessionNowMsFn_t nowFn;
   void *nowCtx;
   protocolDecoder_t tcpDecoder;
@@ -72,18 +73,47 @@ static bool pauseReadSource(ioPoller_t *poller, ioSource_t source, bool *paused)
   return true;
 }
 
+static bool canToggleReadInterest(const session_t *session, ioSource_t source) {
+  if (session != NULL && session->isServer && session->runtime != NULL && source == ioSourceTun) {
+    return false;
+  }
+  return true;
+}
+
+static bool pauseReadSourceForSession(session_t *session, ioPoller_t *poller, ioSource_t source, bool *paused) {
+  if (*paused) {
+    return true;
+  }
+  if (!canToggleReadInterest(session, source)) {
+    *paused = true;
+    return true;
+  }
+  return pauseReadSource(poller, source, paused);
+}
+
+static long queuedBytesForDestination(const session_t *session, ioPoller_t *poller, ioSource_t destination) {
+  if (session != NULL && session->isServer && session->runtime != NULL && destination == ioSourceTun) {
+    return serverRuntimeQueuedTunBytes(session->runtime);
+  }
+  return ioPollerQueuedBytes(poller, destination);
+}
+
 static bool maybeResumeReadSource(
-    ioPoller_t *poller, ioSource_t source, ioSource_t destination, bool *paused, long pendingNbytes) {
+    session_t *session, ioPoller_t *poller, ioSource_t source, ioSource_t destination, bool *paused, long pendingNbytes) {
   long queued;
   if (!*paused || pendingNbytes > 0) {
     return true;
   }
 
-  queued = ioPollerQueuedBytes(poller, destination);
+  queued = queuedBytesForDestination(session, poller, destination);
   if (queued < 0) {
     return false;
   }
   if (queued > IoPollerLowWatermark) {
+    return true;
+  }
+  if (!canToggleReadInterest(session, source)) {
+    *paused = false;
     return true;
   }
   if (!ioPollerSetReadEnabled(poller, source, true)) {
@@ -110,7 +140,7 @@ static queueResult_t queueTcpWithBackpressure(ioPoller_t *poller, session_t *ses
   if (queued + nbytes > IoPollerQueueCapacity) {
     memcpy(session->pendingTcpBuf, data, (size_t)nbytes);
     session->pendingTcpNbytes = nbytes;
-    if (!pauseReadSource(poller, ioSourceTun, &session->tunReadPaused)) {
+    if (!pauseReadSourceForSession(session, poller, ioSourceTun, &session->tunReadPaused)) {
       return queueResultError;
     }
     return queueResultBlocked;
@@ -124,18 +154,23 @@ static queueResult_t queueTunWithBackpressure(ioPoller_t *poller, session_t *ses
   if (session->pendingTunNbytes > 0) {
     return queueResultBlocked;
   }
-  if (ioPollerQueueWrite(poller, ioSourceTun, data, nbytes)) {
+  if (session->isServer && session->runtime != NULL) {
+    if (serverRuntimeQueueTunWrite(session->runtime, data, nbytes)) {
+      return queueResultQueued;
+    }
+    queued = serverRuntimeQueuedTunBytes(session->runtime);
+  } else if (ioPollerQueueWrite(poller, ioSourceTun, data, nbytes)) {
     return queueResultQueued;
+  } else {
+    queued = ioPollerQueuedBytes(poller, ioSourceTun);
   }
-
-  queued = ioPollerQueuedBytes(poller, ioSourceTun);
   if (queued < 0) {
     return queueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
     memcpy(session->pendingTunBuf, data, (size_t)nbytes);
     session->pendingTunNbytes = nbytes;
-    if (!pauseReadSource(poller, ioSourceTcp, &session->tcpReadPaused)) {
+    if (!pauseReadSourceForSession(session, poller, ioSourceTcp, &session->tcpReadPaused)) {
       return queueResultError;
     }
     return queueResultBlocked;
@@ -158,10 +193,16 @@ static bool serviceBackpressure(ioPoller_t *poller, session_t *session) {
   }
 
   if (session->pendingTunNbytes > 0) {
-    if (ioPollerQueueWrite(poller, ioSourceTun, session->pendingTunBuf, session->pendingTunNbytes)) {
+    bool queuedTun = false;
+    if (session->isServer && session->runtime != NULL) {
+      queuedTun = serverRuntimeQueueTunWrite(session->runtime, session->pendingTunBuf, session->pendingTunNbytes);
+    } else {
+      queuedTun = ioPollerQueueWrite(poller, ioSourceTun, session->pendingTunBuf, session->pendingTunNbytes);
+    }
+    if (queuedTun) {
       session->pendingTunNbytes = 0;
     } else {
-      queued = ioPollerQueuedBytes(poller, ioSourceTun);
+      queued = queuedBytesForDestination(session, poller, ioSourceTun);
       if (queued < 0 || queued + session->pendingTunNbytes <= IoPollerQueueCapacity) {
         return false;
       }
@@ -169,9 +210,9 @@ static bool serviceBackpressure(ioPoller_t *poller, session_t *session) {
   }
 
   return maybeResumeReadSource(
-             poller, ioSourceTun, ioSourceTcp, &session->tunReadPaused, session->pendingTcpNbytes)
+             session, poller, ioSourceTun, ioSourceTcp, &session->tunReadPaused, session->pendingTcpNbytes)
       && maybeResumeReadSource(
-             poller, ioSourceTcp, ioSourceTun, &session->tcpReadPaused, session->pendingTunNbytes);
+             session, poller, ioSourceTcp, ioSourceTun, &session->tcpReadPaused, session->pendingTunNbytes);
 }
 
 static queueResult_t sendMessage(
@@ -445,6 +486,7 @@ void sessionDestroy(session_t *session) {
 void sessionReset(session_t *session) {
   long long now;
   bool isServer;
+  serverRuntime_t *runtime;
   sessionNowMsFn_t nowFn;
   void *nowCtx;
   int heartbeatIntervalMs;
@@ -454,12 +496,14 @@ void sessionReset(session_t *session) {
   }
 
   isServer = session->isServer;
+  runtime = session->runtime;
   nowFn = session->nowFn;
   nowCtx = session->nowCtx;
   heartbeatIntervalMs = session->heartbeatIntervalMs;
   heartbeatTimeoutMs = session->heartbeatTimeoutMs;
   memset(session, 0, sizeof(*session));
   session->isServer = isServer;
+  session->runtime = runtime;
   session->nowFn = nowFn;
   session->nowCtx = nowCtx;
   session->heartbeatIntervalMs = heartbeatIntervalMs;
@@ -491,6 +535,27 @@ bool sessionGetStats(const session_t *session, sessionStats_t *outStats) {
   outStats->pendingTunNbytes = session->pendingTunNbytes;
   outStats->tcpBufferedNbytes = session->tcpBufferedNbytes;
   return true;
+}
+
+void sessionSetServerRuntime(session_t *session, serverRuntime_t *runtime) {
+  if (session == NULL) {
+    return;
+  }
+  session->runtime = runtime;
+}
+
+bool sessionHasPendingTunEgress(const session_t *session) {
+  if (session == NULL) {
+    return false;
+  }
+  return session->pendingTunNbytes > 0;
+}
+
+bool sessionServiceBackpressure(session_t *session, ioPoller_t *poller) {
+  if (session == NULL || poller == NULL) {
+    return false;
+  }
+  return serviceBackpressure(poller, session);
 }
 
 sessionStepResult_t sessionStep(
@@ -588,7 +653,7 @@ int sessionServeMultiClient(
   runtime.epollFd = epollFd;
 
   if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, listenFd, EPOLLIN | EPOLLRDHUP)
-      || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, EPOLLIN | EPOLLRDHUP)) {
+      || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, runtime.tunEvents)) {
     goto cleanup;
   }
 
@@ -643,15 +708,14 @@ int sessionServeMultiClient(
           }
         }
         if ((ev & EPOLLOUT) != 0) {
-          int slot;
-          for (slot = 0; slot < runtime.maxSessions; slot++) {
-            if (!runtime.slots[slot].active) {
-              continue;
-            }
-            if (!ioPollerServiceWriteEvent(&runtime.slots[slot].poller, ioSourceTun)) {
+          if (!serverRuntimeServiceTunWriteEvent(&runtime)) {
+            goto cleanup;
+          }
+          if (runtime.tunOutNbytes <= IoPollerLowWatermark) {
+            if (serverRuntimeRetryBlockedTunRoundRobin(&runtime) < 0) {
               goto cleanup;
             }
-            if (!serverDispatchClient(&runtime, slot, ioEventTunWrite, key)) {
+            if (!serverRuntimeSyncTunWriteInterest(&runtime)) {
               goto cleanup;
             }
           }

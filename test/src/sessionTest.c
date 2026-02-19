@@ -4,11 +4,13 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "io.h"
 #include "protocol.h"
+#include "serverRuntime.h"
 #include "session.h"
 #include "testAssert.h"
 
@@ -480,6 +482,57 @@ static void testSessionServeMultiClientRejectsInvalidArgs(void) {
       "server runtime should reject non-positive max session count");
 }
 
+static void testSharedTunWriteInterestIsRuntimeOwned(void) {
+  serverRuntime_t runtime;
+  int tunPair[2];
+  int epollFd;
+  int tcpPairA[2];
+  int tcpPairB[2];
+  char payloadA[] = "payload-a";
+  char payloadB[] = "payload-b";
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp pair A should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
+  testAssertTrue(serverRuntimeInit(&runtime, tunPair[0], 70, 2, &defaultHeartbeatCfg), "runtime init should succeed");
+
+  epollFd = epoll_create1(0);
+  testAssertTrue(epollFd >= 0, "epoll_create1 should succeed");
+  runtime.epollFd = epollFd;
+  testAssertTrue(
+      epoll_ctl(
+          epollFd,
+          EPOLL_CTL_ADD,
+          runtime.tunFd,
+          &(struct epoll_event){.events = runtime.tunEvents, .data.fd = runtime.tunFd})
+          == 0,
+      "add tun fd should succeed");
+  testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "initial tun interest sync should succeed");
+
+  testAssertTrue(serverRuntimeAddClient(&runtime, tcpPairA[0]) == 0, "first client should be added");
+  testAssertTrue(serverRuntimeAddClient(&runtime, tcpPairB[0]) == 1, "second client should be added");
+
+  testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadA, (long)strlen(payloadA)), "queue payload A should succeed");
+  testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadB, (long)strlen(payloadB)), "queue payload B should succeed");
+  testAssertTrue((runtime.tunEvents & EPOLLOUT) != 0, "runtime should enable tun epollout with pending shared queue");
+  testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should keep epollout while queue has pending bytes");
+  testAssertTrue((runtime.tunEvents & EPOLLOUT) != 0, "runtime should keep epollout until shared queue drains");
+
+  runtime.tunOutOffset = 0;
+  runtime.tunOutNbytes = 0;
+  testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should disable epollout after queue drains");
+  testAssertTrue((runtime.tunEvents & EPOLLOUT) == 0, "runtime should disable epollout when shared queue drains");
+
+  close(epollFd);
+  serverRuntimeDeinit(&runtime);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPairA[0]);
+  close(tcpPairA[1]);
+  close(tcpPairB[0]);
+  close(tcpPairB[1]);
+}
+
 void runSessionTests(void) {
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
@@ -496,4 +549,5 @@ void runSessionTests(void) {
   testSessionTunReadQueuesEncryptedTcpFrame();
   testSessionTcpReadQueuesTunWrite();
   testBackpressurePauseAndResumeFlow();
+  testSharedTunWriteInterestIsRuntimeOwned();
 }

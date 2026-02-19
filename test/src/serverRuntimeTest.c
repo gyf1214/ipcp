@@ -1,5 +1,9 @@
 #include "serverRuntimeTest.h"
 
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <string.h>
 
 #include "serverRuntime.h"
@@ -66,8 +70,63 @@ static void testServerRuntimeFindSlotByFdAndPickEgress(void) {
   serverRuntimeDeinit(&runtime);
 }
 
+static void testServerRuntimeSharedTunInterestTracksGlobalQueue(void) {
+  serverRuntime_t runtime;
+  int tunPair[2];
+  int epollFd;
+  char payloadA[16];
+  char payloadB[16];
+
+  memset(payloadA, 'a', sizeof(payloadA));
+  memset(payloadB, 'b', sizeof(payloadB));
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(serverRuntimeInit(&runtime, tunPair[0], 40, 2, &testHeartbeatCfg), "runtime init should succeed");
+
+  epollFd = epoll_create1(0);
+  testAssertTrue(epollFd >= 0, "epoll_create1 should succeed");
+  runtime.epollFd = epollFd;
+  testAssertTrue(epoll_ctl(epollFd, EPOLL_CTL_ADD, runtime.tunFd, &(struct epoll_event){.events = runtime.tunEvents, .data.fd = runtime.tunFd}) == 0, "add tun fd should succeed");
+
+  testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadA, sizeof(payloadA)), "first shared tun queue write should succeed");
+  testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadB, sizeof(payloadB)), "second shared tun queue write should succeed");
+  testAssertTrue((runtime.tunEvents & EPOLLOUT) != 0, "shared tun epollout should stay enabled while queue has bytes");
+  testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should keep epollout enabled while queue is not empty");
+  testAssertTrue((runtime.tunEvents & EPOLLOUT) != 0, "sync should preserve epollout while backlog remains");
+
+  runtime.tunOutOffset = 0;
+  runtime.tunOutNbytes = 0;
+  testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should disable epollout when queue drains");
+  testAssertTrue((runtime.tunEvents & EPOLLOUT) == 0, "shared tun epollout should disable after global queue drains");
+
+  close(epollFd);
+  serverRuntimeDeinit(&runtime);
+  close(tunPair[0]);
+  close(tunPair[1]);
+}
+
+static void testServerRuntimeRoundRobinRetryCursorRotates(void) {
+  serverRuntime_t runtime;
+
+  testAssertTrue(serverRuntimeInit(&runtime, 50, 51, 4, &testHeartbeatCfg), "runtime init should succeed");
+  testAssertTrue(runtime.retryCursor == 0, "retry cursor should start at zero");
+  testAssertTrue(serverRuntimeAddClient(&runtime, 500) == 0, "first client should be added");
+  testAssertTrue(serverRuntimeAddClient(&runtime, 501) == 1, "second client should be added");
+  testAssertTrue(serverRuntimeAddClient(&runtime, 502) == 2, "third client should be added");
+
+  runtime.retryCursor = 1;
+  testAssertTrue(serverRuntimeRetryBlockedTunRoundRobin(&runtime) == 2, "retry pass should advance cursor to next slot");
+  testAssertTrue(runtime.retryCursor == 2, "retry cursor should rotate after retry pass");
+
+  testAssertTrue(serverRuntimeRetryBlockedTunRoundRobin(&runtime) == 0, "retry pass should wrap cursor");
+  testAssertTrue(runtime.retryCursor == 0, "retry cursor should wrap to zero");
+
+  serverRuntimeDeinit(&runtime);
+}
+
 void runServerRuntimeTests(void) {
   testServerRuntimeAddRemoveAndReuseSlots();
   testServerRuntimeRejectsBeyondMaxSessions();
   testServerRuntimeFindSlotByFdAndPickEgress();
+  testServerRuntimeSharedTunInterestTracksGlobalQueue();
+  testServerRuntimeRoundRobinRetryCursorRotates();
 }

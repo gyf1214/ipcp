@@ -6,6 +6,7 @@
 #include "protocol.h"
 
 typedef struct session_t session_t;
+struct serverRuntime_t;
 
 typedef long long (*sessionNowMsFn_t)(void *ctx);
 
@@ -39,6 +40,9 @@ session_t *sessionCreate(
 void sessionDestroy(session_t *session);
 void sessionReset(session_t *session);
 bool sessionGetStats(const session_t *session, sessionStats_t *outStats);
+void sessionSetServerRuntime(session_t *session, struct serverRuntime_t *runtime);
+bool sessionHasPendingTunEgress(const session_t *session);
+bool sessionServiceBackpressure(session_t *session, ioPoller_t *poller);
 sessionStepResult_t sessionStep(
     session_t *session, ioPoller_t *poller, ioEvent_t event, const unsigned char key[ProtocolPskSize]);
 int sessionServeMultiClient(
