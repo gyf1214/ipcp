@@ -218,7 +218,11 @@ static void testIoPollerReadMaskAndQueueBytes(void) {
 }
 
 static void testIoTunOpenRejectNullName(void) {
-  testAssertTrue(ioTunOpen(NULL) < 0, "ioTunOpen should reject NULL interface name");
+  testAssertTrue(ioTunOpen(NULL, ioIfModeTun) < 0, "ioTunOpen should reject NULL interface name");
+}
+
+static void testIoTunOpenRejectInvalidMode(void) {
+  testAssertTrue(ioTunOpen("tun0", (ioIfMode_t)99) < 0, "ioTunOpen should reject invalid interface mode");
 }
 
 static void testIoTcpListenRejectInvalidIp(void) {
@@ -240,6 +244,7 @@ void runIoTests(void) {
   testIoPollerQueueWriteRejectsOverflow();
   testIoPollerReadMaskAndQueueBytes();
   testIoTunOpenRejectNullName();
+  testIoTunOpenRejectInvalidMode();
   testIoTcpListenRejectInvalidIp();
   testIoTcpConnectRejectInvalidIp();
 }

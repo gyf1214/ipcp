@@ -148,11 +148,19 @@ ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes) {
   return ioStatusError;
 }
 
-int ioTunOpen(const char *ifName) {
+int ioTunOpen(const char *ifName, ioIfMode_t mode) {
   struct ifreq ifr;
   int fd;
+  short ifFlags = 0;
 
   if (ifName == NULL || ifName[0] == '\0') {
+    return -1;
+  }
+  if (mode == ioIfModeTun) {
+    ifFlags = IFF_TUN;
+  } else if (mode == ioIfModeTap) {
+    ifFlags = IFF_TAP;
+  } else {
     return -1;
   }
 
@@ -162,7 +170,7 @@ int ioTunOpen(const char *ifName) {
   }
 
   memset(&ifr, 0, sizeof(ifr));
-  ifr.ifr_flags = IFF_TUN;
+  ifr.ifr_flags = ifFlags;
   strncpy(ifr.ifr_name, ifName, IFNAMSIZ - 1);
   ifr.ifr_name[IFNAMSIZ - 1] = '\0';
   if (ioctl(fd, TUNSETIFF, (void *)&ifr) < 0) {

@@ -26,6 +26,11 @@ typedef enum {
   ioSourceTcp,
 } ioSource_t;
 
+typedef enum {
+  ioIfModeTun = 0,
+  ioIfModeTap,
+} ioIfMode_t;
+
 typedef struct {
   int epollFd;
   int tunFd;
@@ -41,7 +46,7 @@ typedef struct {
 } ioPoller_t;
 
 ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes);
-int ioTunOpen(const char *ifName);
+int ioTunOpen(const char *ifName, ioIfMode_t mode);
 int ioTcpListen(const char *listenIP, int port);
 int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort);
 int ioTcpConnect(const char *remoteIP, int port);
