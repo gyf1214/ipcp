@@ -24,6 +24,25 @@ static int parseMode(const cJSON *root, daemonConfig_t *cfg) {
   return -1;
 }
 
+static int parseIfMode(const cJSON *root, daemonConfig_t *cfg) {
+  const cJSON *ifMode = cJSON_GetObjectItemCaseSensitive(root, "if_mode");
+  if (ifMode == NULL) {
+    return 0;
+  }
+  if (!cJSON_IsString(ifMode) || ifMode->valuestring == NULL) {
+    return -1;
+  }
+  if (strcmp(ifMode->valuestring, "tun") == 0) {
+    cfg->ifMode = configIfModeTun;
+    return 0;
+  }
+  if (strcmp(ifMode->valuestring, "tap") == 0) {
+    cfg->ifMode = configIfModeTap;
+    return 0;
+  }
+  return -1;
+}
+
 static int copyRequiredString(const cJSON *root, const char *name, char out[ConfigTextSize]) {
   const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, name);
   size_t nbytes = 0;
@@ -113,6 +132,7 @@ void configZero(daemonConfig_t *cfg) {
     return;
   }
   sodium_memzero(cfg, sizeof(*cfg));
+  cfg->ifMode = configIfModeTun;
   cfg->heartbeatIntervalMs = ConfigDefaultHeartbeatIntervalMs;
   cfg->heartbeatTimeoutMs = ConfigDefaultHeartbeatTimeoutMs;
 }
@@ -160,6 +180,9 @@ int configLoadFromFile(daemonConfig_t *out, const char *path) {
     goto cleanup;
   }
   if (parseMode(root, out) != 0) {
+    goto cleanup;
+  }
+  if (parseIfMode(root, out) != 0) {
     goto cleanup;
   }
   if (out->mode == configModeServer) {

@@ -33,6 +33,25 @@ run_expect_invalid_config() {
   fi
 }
 
+run_expect_invalid_secret() {
+  local cfg="$1"
+  local rc=0
+  local errFile="$tmpDir/stderr.log"
+  set +e
+  ./daemon/target/ipcpd "$cfg" >/dev/null 2>"$errFile"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 1 ]]; then
+    echo "expected exit code 1, got $rc for $cfg" >&2
+    exit 1
+  fi
+  if ! grep -Fq "invalid secret file" "$errFile"; then
+    echo "expected 'invalid secret file' on stderr for $cfg" >&2
+    cat "$errFile" >&2
+    exit 1
+  fi
+}
+
 cat > "$tmpDir/missing-field.json" <<JSON
 {
   "mode": "server",
@@ -74,9 +93,44 @@ cat > "$tmpDir/bad-heartbeat-relationship.json" <<JSON
 }
 JSON
 
+cat > "$tmpDir/bad-if-mode-value.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "l2",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "key_file": "/tmp/none.key"
+}
+JSON
+
+cat > "$tmpDir/bad-if-mode-type.json" <<JSON
+{
+  "mode": "client",
+  "if_name": "tun0",
+  "if_mode": 123,
+  "server_ip": "127.0.0.1",
+  "server_port": 46000,
+  "key_file": "/tmp/none.key"
+}
+JSON
+
+cat > "$tmpDir/missing-if-mode-defaults-to-tun.json" <<JSON
+{
+  "mode": "client",
+  "if_name": "tun0",
+  "server_ip": "127.0.0.1",
+  "server_port": 46000,
+  "key_file": "/tmp/nonexistent.key"
+}
+JSON
+
 run_expect_invalid_config "$tmpDir/missing-field.json"
 run_expect_invalid_config "$tmpDir/bad-port-type.json"
 run_expect_invalid_config "$tmpDir/bad-mode.json"
 run_expect_invalid_config "$tmpDir/bad-heartbeat-relationship.json"
+run_expect_invalid_config "$tmpDir/bad-if-mode-value.json"
+run_expect_invalid_config "$tmpDir/bad-if-mode-type.json"
+run_expect_invalid_secret "$tmpDir/missing-if-mode-defaults-to-tun.json"
 
 echo "ipcpd config validation integration test passed"

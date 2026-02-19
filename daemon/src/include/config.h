@@ -11,8 +11,14 @@ typedef enum {
   configModeClient,
 } configMode_t;
 
+typedef enum {
+  configIfModeTun = 0,
+  configIfModeTap,
+} configIfMode_t;
+
 typedef struct {
   configMode_t mode;
+  configIfMode_t ifMode;
   char ifName[ConfigTextSize];
   char keyFile[ConfigTextSize];
   char listenIP[ConfigTextSize];
