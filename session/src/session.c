@@ -1,12 +1,16 @@
 #include "session.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "log.h"
+#include "serverRuntime.h"
 
 struct session_t {
   bool isServer;
@@ -519,6 +523,190 @@ sessionStepResult_t sessionStep(
   }
 
   return sessionStepContinue;
+}
+
+static bool serverEpollCtl(int epollFd, int op, int fd, unsigned int events) {
+  struct epoll_event event;
+  memset(&event, 0, sizeof(event));
+  event.events = events;
+  event.data.fd = fd;
+  return epoll_ctl(epollFd, op, fd, &event) == 0;
+}
+
+static bool serverDispatchClient(serverRuntime_t *runtime, int slot, ioEvent_t event, const unsigned char key[ProtocolPskSize]) {
+  session_t *session = serverRuntimeSessionAt(runtime, slot);
+  int connFd = serverRuntimeConnFdAt(runtime, slot);
+  if (session == NULL || connFd < 0) {
+    return false;
+  }
+
+  if (sessionStep(session, &runtime->slots[slot].poller, event, key) == sessionStepStop) {
+    (void)serverEpollCtl(runtime->epollFd, EPOLL_CTL_DEL, connFd, 0);
+    close(connFd);
+    return serverRuntimeRemoveClient(runtime, slot);
+  }
+  return true;
+}
+
+static bool serverTickAllClients(serverRuntime_t *runtime, const unsigned char key[ProtocolPskSize]) {
+  int slot;
+  for (slot = 0; slot < runtime->maxSessions; slot++) {
+    if (!runtime->slots[slot].active) {
+      continue;
+    }
+    if (!serverDispatchClient(runtime, slot, ioEventTimeout, key)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int sessionServeMultiClient(
+    int tunFd,
+    int listenFd,
+    const unsigned char key[ProtocolPskSize],
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    int maxSessions) {
+  serverRuntime_t runtime;
+  struct epoll_event events[16];
+  int epollFd = -1;
+  int rc = -1;
+  int i;
+
+  if (tunFd < 0 || listenFd < 0 || key == NULL || heartbeatCfg == NULL || maxSessions <= 0) {
+    return -1;
+  }
+  if (!serverRuntimeInit(&runtime, tunFd, listenFd, maxSessions, heartbeatCfg)) {
+    return -1;
+  }
+
+  epollFd = epoll_create1(0);
+  if (epollFd < 0) {
+    serverRuntimeDeinit(&runtime);
+    return -1;
+  }
+  runtime.epollFd = epollFd;
+
+  if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, listenFd, EPOLLIN | EPOLLRDHUP)
+      || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, EPOLLIN | EPOLLRDHUP)) {
+    goto cleanup;
+  }
+
+  while (1) {
+    int n = epoll_wait(epollFd, events, (int)(sizeof(events) / sizeof(events[0])), 200);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+
+    for (i = 0; i < n; i++) {
+      int fd = events[i].data.fd;
+      unsigned int ev = events[i].events;
+
+      if (fd == listenFd) {
+        while (1) {
+          int connFd = -1;
+          char clientIp[256];
+          int clientPort = 0;
+          ioStatus_t status = ioTcpAcceptNonBlocking(listenFd, &connFd, clientIp, sizeof(clientIp), &clientPort);
+          int slot;
+          if (status == ioStatusWouldBlock) {
+            break;
+          }
+          if (status != ioStatusOk) {
+            goto cleanup;
+          }
+          logf("connected with %s:%d", clientIp, clientPort);
+          slot = serverRuntimeAddClient(&runtime, connFd);
+          if (slot < 0) {
+            close(connFd);
+            continue;
+          }
+          runtime.slots[slot].poller.epollFd = epollFd;
+          if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, connFd, runtime.slots[slot].poller.tcpEvents)) {
+            close(connFd);
+            (void)serverRuntimeRemoveClient(&runtime, slot);
+            goto cleanup;
+          }
+        }
+        continue;
+      }
+
+      if (fd == tunFd) {
+        if ((ev & EPOLLIN) != 0) {
+          int connFd = serverRuntimePickEgressClient(&runtime);
+          int slot = serverRuntimeFindSlotByFd(&runtime, connFd);
+          if (slot >= 0 && !serverDispatchClient(&runtime, slot, ioEventTunRead, key)) {
+            goto cleanup;
+          }
+        }
+        if ((ev & EPOLLOUT) != 0) {
+          int slot;
+          for (slot = 0; slot < runtime.maxSessions; slot++) {
+            if (!runtime.slots[slot].active) {
+              continue;
+            }
+            if (!ioPollerServiceWriteEvent(&runtime.slots[slot].poller, ioSourceTun)) {
+              goto cleanup;
+            }
+            if (!serverDispatchClient(&runtime, slot, ioEventTunWrite, key)) {
+              goto cleanup;
+            }
+          }
+        }
+        if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+          goto cleanup;
+        }
+        continue;
+      }
+
+      {
+        int slot = serverRuntimeFindSlotByFd(&runtime, fd);
+        if (slot < 0) {
+          (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, fd, 0);
+          close(fd);
+          continue;
+        }
+        if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+          (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, fd, 0);
+          close(fd);
+          (void)serverRuntimeRemoveClient(&runtime, slot);
+          continue;
+        }
+        if ((ev & EPOLLIN) != 0 && !serverDispatchClient(&runtime, slot, ioEventTcpRead, key)) {
+          goto cleanup;
+        }
+        if ((ev & EPOLLOUT) != 0) {
+          if (!ioPollerServiceWriteEvent(&runtime.slots[slot].poller, ioSourceTcp)) {
+            goto cleanup;
+          }
+          if (!serverDispatchClient(&runtime, slot, ioEventTcpWrite, key)) {
+            goto cleanup;
+          }
+        }
+      }
+    }
+
+    if (!serverTickAllClients(&runtime, key)) {
+      goto cleanup;
+    }
+  }
+
+cleanup:
+  for (i = 0; i < runtime.maxSessions; i++) {
+    int connFd = serverRuntimeConnFdAt(&runtime, i);
+    if (connFd >= 0) {
+      (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, connFd, 0);
+      close(connFd);
+    }
+  }
+  serverRuntimeDeinit(&runtime);
+  if (epollFd >= 0) {
+    close(epollFd);
+  }
+  return rc;
 }
 
 bool sessionApiSmoke(void) {

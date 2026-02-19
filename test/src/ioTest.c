@@ -233,6 +233,23 @@ static void testIoTcpConnectRejectInvalidIp(void) {
   testAssertTrue(ioTcpConnect("not-an-ip", 5000) < 0, "ioTcpConnect should reject invalid remote IP");
 }
 
+static void testIoTcpListenBacklogIsGreaterThanOne(void) {
+  testAssertTrue(IoTcpListenBacklog > 1, "listen backlog should allow more than one pending client");
+}
+
+static void testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty(void) {
+  int listenFd = ioTcpListen("127.0.0.1", 46110);
+  int connFd = -1;
+  ioStatus_t status;
+
+  testAssertTrue(listenFd >= 0, "ioTcpListen should succeed");
+  status = ioTcpAcceptNonBlocking(listenFd, &connFd, NULL, 0, NULL);
+  testAssertTrue(status == ioStatusWouldBlock, "ioTcpAcceptNonBlocking should report empty queue");
+  testAssertTrue(connFd == -1, "ioTcpAcceptNonBlocking should leave conn fd unset on would-block");
+
+  close(listenFd);
+}
+
 void runIoTests(void) {
   testIoReadSomeOk();
   testIoReadSomeClosed();
@@ -247,4 +264,6 @@ void runIoTests(void) {
   testIoTunOpenRejectInvalidMode();
   testIoTcpListenRejectInvalidIp();
   testIoTcpConnectRejectInvalidIp();
+  testIoTcpListenBacklogIsGreaterThanOne();
+  testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty();
 }

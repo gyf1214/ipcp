@@ -20,6 +20,7 @@ typedef enum {
 
 #define IoPollerQueueCapacity 65536
 #define IoPollerLowWatermark 49152
+#define IoTcpListenBacklog 16
 
 typedef enum {
   ioSourceTun = 0,
@@ -49,11 +50,13 @@ ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes);
 int ioTunOpen(const char *ifName, ioIfMode_t mode);
 int ioTcpListen(const char *listenIP, int port);
 int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort);
+ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort);
 int ioTcpConnect(const char *remoteIP, int port);
 
 int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd);
 void ioPollerClose(ioPoller_t *poller);
 ioEvent_t ioPollerWait(ioPoller_t *poller, int timeoutMs);
 bool ioPollerQueueWrite(ioPoller_t *poller, ioSource_t source, const void *data, long nbytes);
+bool ioPollerServiceWriteEvent(ioPoller_t *poller, ioSource_t source);
 bool ioPollerSetReadEnabled(ioPoller_t *poller, ioSource_t source, bool enabled);
 long ioPollerQueuedBytes(const ioPoller_t *poller, ioSource_t source);

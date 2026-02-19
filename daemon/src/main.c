@@ -86,30 +86,29 @@ static int listenTcp(
     int port,
     const unsigned char key[ProtocolPskSize],
     const sessionHeartbeatConfig_t *heartbeatCfg) {
+  int tunFd = -1;
   int listenFd = ioTcpListen(listenIP, port);
   if (listenFd < 0) {
     errf("listen setup failed: %s", strerror(errno));
     return -1;
   }
   logf("listening on %s:%d", listenIP, port);
+  logf("opening tun device %s", ifName);
+  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
+  if (tunFd < 0) {
+    errf("failed to open tun device %s: %s", ifName, strerror(errno));
+    close(listenFd);
+    return -1;
+  }
+  logf("successfully opened tun device %s", ifName);
 
-  while (1) {
-    char clientIP[256];
-    int clientPort = 0;
-    int connFd = ioTcpAccept(listenFd, clientIP, sizeof(clientIP), &clientPort);
-    if (connFd < 0) {
-      errf("accept failed: %s", strerror(errno));
-      close(listenFd);
-      return -1;
-    }
-    logf("connected with %s:%d", clientIP, clientPort);
-
-    if (serveTcp(ifName, ifMode, connFd, key, true, heartbeatCfg) != 0) {
-      close(listenFd);
-      return -1;
-    }
+  if (sessionServeMultiClient(tunFd, listenFd, key, heartbeatCfg, 64) != 0) {
+    close(tunFd);
+    close(listenFd);
+    return -1;
   }
 
+  close(tunFd);
   close(listenFd);
   return 0;
 }

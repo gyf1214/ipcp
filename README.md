@@ -7,6 +7,7 @@
 - Linux TUN/TAP integration for IP- or Ethernet-layer tunneling
 - Client and server modes in the same daemon (`ipcpd`)
 - Moves IP packets between TUN and a TCP connection
+- Server mode supports concurrent client sessions in one process (shared epoll loop)
 - Wraps traffic in protocol frames with typed messages
 - Authenticated encryption on every frame (nonce + ciphertext + MAC)
 - Heartbeat-based liveness detection (request/ack)
@@ -62,7 +63,7 @@ podman run --rm -v "$PWD:/work" -w /work ipcp-dev:local bash -lc "make test"
 
 ## Integration Test
 
-Single-session end-to-end integration is available through a direct `ipcpd` test harness.
+Integration coverage includes direct single-session checks and multi-session server lifecycle checks.
 
 Native route:
 
@@ -85,7 +86,7 @@ Prerequisites:
 Notes:
 
 - The container route keeps namespace/TUN setup isolated from host networking by using the container runtime's default network namespace behavior.
-- Integration scope is single-session only; multi-session/routing assertions are deferred.
+- Job-1 multi-session tests are process-lifecycle focused (connectivity/liveness/re-accept) and remain routing-policy agnostic.
 
 ## What Is Produced
 
@@ -128,7 +129,7 @@ Supported v1 schema:
 - `heartbeat_timeout_ms` is optional (default `15000`)
 - Both heartbeat fields must be positive integers, and `heartbeat_timeout_ms` must be greater than `heartbeat_interval_ms`
 - Config is loaded once at startup (no reload)
-- Runtime behavior remains single-session in this task
+- Server runtime supports concurrent client sessions in one process (job 1)
 
 ### Secret file
 
@@ -187,10 +188,13 @@ Run:
 - `if_mode: "tun"` uses L3 packets (`IFF_TUN`); `if_mode: "tap"` uses Ethernet frames (`IFF_TAP`)
 - TAP mode requires assigning/linking the TAP interface according to your L2/L3 topology; default MTU (`1500`) is usually a safe starting point for both modes
 - Interface IP assignment and routing are environment-specific and should be configured separately with `ip` tooling
+- Server runtime uses one shared epoll loop for listen fd, shared TUN/TAP fd, and all active client TCP fds
+- Job-1 TUN egress may select any currently connected client (routing-table selection is deferred)
+- Job-1 keying model is one shared PSK (`key_file`) for all clients; per-client identity/key selection is deferred
 
 ## Component Roles
 
 - `io`: fd-level setup/poll/read/write primitives (TUN/TCP open + `epoll` + bounded reads/full writes)
 - `protocol`: framing, typed messages, and secure message encode/decode (including crypto envelope)
-- `session`: per-connection runtime policy and bridge logic (message routing, heartbeat, backpressure)
+- `session`: per-connection runtime policy plus server multi-session runtime ownership (shared epoll dispatch, heartbeat, backpressure)
 - `daemon`: process bootstrap and client/server orchestration

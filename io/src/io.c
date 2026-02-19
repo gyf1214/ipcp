@@ -185,6 +185,22 @@ static int ioPortValid(int port) {
   return port > 0 && port <= 65535;
 }
 
+static int fillPeerInfo(int connFd, const struct sockaddr_in *clientAddr, char *peerIp, long peerIpSize, int *peerPort) {
+  if (peerIp != NULL) {
+    if (peerIpSize <= 0) {
+      return -1;
+    }
+    if (inet_ntop(AF_INET, &clientAddr->sin_addr, peerIp, (socklen_t)peerIpSize) == NULL) {
+      return -1;
+    }
+  }
+  if (peerPort != NULL) {
+    *peerPort = (int)ntohs(clientAddr->sin_port);
+  }
+  (void)connFd;
+  return 0;
+}
+
 int ioTcpListen(const char *listenIP, int port) {
   int listenFd;
   struct sockaddr_in serverAddr;
@@ -206,7 +222,8 @@ int ioTcpListen(const char *listenIP, int port) {
   }
   serverAddr.sin_port = htons((unsigned short)port);
 
-  if (bind(listenFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0 || listen(listenFd, 1) < 0) {
+  if (bind(listenFd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0
+      || listen(listenFd, IoTcpListenBacklog) < 0) {
     close(listenFd);
     return -1;
   }
@@ -222,21 +239,59 @@ int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort) {
     return -1;
   }
 
-  if (peerIp != NULL) {
-    if (peerIpSize <= 0) {
-      close(connFd);
-      return -1;
-    }
-    if (inet_ntop(AF_INET, &clientAddr.sin_addr, peerIp, (socklen_t)peerIpSize) == NULL) {
-      close(connFd);
-      return -1;
-    }
-  }
-  if (peerPort != NULL) {
-    *peerPort = (int)ntohs(clientAddr.sin_port);
+  if (fillPeerInfo(connFd, &clientAddr, peerIp, peerIpSize, peerPort) != 0) {
+    close(connFd);
+    return -1;
   }
 
   return connFd;
+}
+
+ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort) {
+  struct sockaddr_in clientAddr;
+  socklen_t addrLen = sizeof(clientAddr);
+  int listenFlags;
+  bool restoreListenFlags = false;
+  int connFd;
+
+  if (outConnFd == NULL) {
+    return ioStatusError;
+  }
+  *outConnFd = -1;
+
+  listenFlags = fcntl(listenFd, F_GETFL, 0);
+  if (listenFlags < 0) {
+    return ioStatusError;
+  }
+  if ((listenFlags & O_NONBLOCK) == 0) {
+    if (fcntl(listenFd, F_SETFL, listenFlags | O_NONBLOCK) < 0) {
+      return ioStatusError;
+    }
+    restoreListenFlags = true;
+  }
+
+  connFd = accept(listenFd, (struct sockaddr *)&clientAddr, &addrLen);
+  if (restoreListenFlags) {
+    (void)fcntl(listenFd, F_SETFL, listenFlags);
+  }
+  if (connFd < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+      return ioStatusWouldBlock;
+    }
+    return ioStatusError;
+  }
+  if (pollerSetNonBlocking(connFd) < 0) {
+    close(connFd);
+    return ioStatusError;
+  }
+
+  if (fillPeerInfo(connFd, &clientAddr, peerIp, peerIpSize, peerPort) != 0) {
+    close(connFd);
+    return ioStatusError;
+  }
+
+  *outConnFd = connFd;
+  return ioStatusOk;
 }
 
 int ioTcpConnect(const char *remoteIP, int port) {
@@ -341,6 +396,13 @@ bool ioPollerQueueWrite(ioPoller_t *poller, ioSource_t source, const void *data,
   }
 
   return true;
+}
+
+bool ioPollerServiceWriteEvent(ioPoller_t *poller, ioSource_t source) {
+  if (poller == NULL || poller->epollFd < 0 || !sourceValid(source)) {
+    return false;
+  }
+  return pollerFlushQueue(poller, source) == 0;
 }
 
 bool ioPollerSetReadEnabled(ioPoller_t *poller, ioSource_t source, bool enabled) {

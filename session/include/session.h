@@ -41,5 +41,11 @@ void sessionReset(session_t *session);
 bool sessionGetStats(const session_t *session, sessionStats_t *outStats);
 sessionStepResult_t sessionStep(
     session_t *session, ioPoller_t *poller, ioEvent_t event, const unsigned char key[ProtocolPskSize]);
+int sessionServeMultiClient(
+    int tunFd,
+    int listenFd,
+    const unsigned char key[ProtocolPskSize],
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    int maxSessions);
 
 bool sessionApiSmoke(void);

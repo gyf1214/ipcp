@@ -462,9 +462,28 @@ static void testSessionCreateRejectsInvalidHeartbeatConfig(void) {
   testAssertTrue(session == NULL, "session create should fail when timeout is not greater than interval");
 }
 
+static void testSessionServeMultiClientRejectsInvalidArgs(void) {
+  unsigned char key[ProtocolPskSize];
+  memset(key, 0x47, sizeof(key));
+
+  testAssertTrue(
+      sessionServeMultiClient(-1, -1, key, &defaultHeartbeatCfg, 2) < 0,
+      "server runtime should reject invalid fds");
+  testAssertTrue(
+      sessionServeMultiClient(1, 2, NULL, &defaultHeartbeatCfg, 2) < 0,
+      "server runtime should reject null key");
+  testAssertTrue(
+      sessionServeMultiClient(1, 2, key, NULL, 2) < 0,
+      "server runtime should reject null heartbeat config");
+  testAssertTrue(
+      sessionServeMultiClient(1, 2, key, &defaultHeartbeatCfg, 0) < 0,
+      "server runtime should reject non-positive max session count");
+}
+
 void runSessionTests(void) {
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
+  testSessionServeMultiClientRejectsInvalidArgs();
   testSessionApiSmoke();
   testSessionInitSeedsModeAndTimestamps();
   testSessionResetClearsPendingAndPauseFlags();
