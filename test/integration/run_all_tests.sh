@@ -8,7 +8,7 @@ if ! compgen -G "$scriptDir/*_test.sh" >/dev/null; then
   exit 1
 fi
 
-for testScript in "$scriptDir"/*_test.sh; do
+for testScript in $(printf '%s\n' "$scriptDir"/*_test.sh | sort); do
   echo "running $(basename "$testScript")"
   bash "$testScript"
 done
