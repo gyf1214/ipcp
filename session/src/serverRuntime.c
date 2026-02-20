@@ -13,8 +13,12 @@ static bool slotIndexValid(const serverRuntime_t *runtime, int slot) {
 static bool runtimeTunEpollCtl(serverRuntime_t *runtime, unsigned int events) {
   struct epoll_event event;
 
-  if (runtime == NULL || runtime->epollFd < 0 || runtime->tunFd < 0) {
+  if (runtime == NULL || runtime->tunFd < 0) {
     return false;
+  }
+  if (runtime->epollFd < 0) {
+    runtime->tunEvents = events;
+    return true;
   }
 
   memset(&event, 0, sizeof(event));
@@ -49,6 +53,8 @@ bool serverRuntimeInit(
   runtime->tunEvents = EPOLLIN | EPOLLRDHUP;
   runtime->tunOutOffset = 0;
   runtime->tunOutNbytes = 0;
+  runtime->pendingOwnerSlot = -1;
+  runtime->pendingTunToTcpNbytes = 0;
   runtime->retryCursor = 0;
   runtime->maxSessions = maxSessions;
   runtime->heartbeatCfg = *heartbeatCfg;
@@ -118,6 +124,9 @@ bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot) {
     return false;
   }
 
+  if (!serverRuntimeDropPendingTunToTcpByOwner(runtime, slot)) {
+    return false;
+  }
   sessionDestroy(runtime->slots[slot].session);
   runtime->slots[slot].poller.tcpOutOffset = 0;
   runtime->slots[slot].poller.tcpOutNbytes = 0;
@@ -288,6 +297,93 @@ int serverRuntimeRetryBlockedTunRoundRobin(serverRuntime_t *runtime) {
   }
   runtime->retryCursor = nextCursor;
   return runtime->retryCursor;
+}
+
+bool serverRuntimeSetTunReadEnabled(serverRuntime_t *runtime, bool enabled) {
+  unsigned int nextEvents;
+
+  if (runtime == NULL) {
+    return false;
+  }
+
+  nextEvents = runtime->tunEvents;
+  if (enabled) {
+    nextEvents |= EPOLLIN;
+  } else {
+    nextEvents &= ~EPOLLIN;
+  }
+  if (nextEvents == runtime->tunEvents) {
+    return true;
+  }
+  return runtimeTunEpollCtl(runtime, nextEvents);
+}
+
+bool serverRuntimeHasPendingTunToTcp(const serverRuntime_t *runtime) {
+  return runtime != NULL && runtime->pendingTunToTcpNbytes > 0 && runtime->pendingOwnerSlot >= 0;
+}
+
+int serverRuntimePendingTunToTcpOwner(const serverRuntime_t *runtime) {
+  if (runtime == NULL) {
+    return -1;
+  }
+  return runtime->pendingOwnerSlot;
+}
+
+bool serverRuntimeStorePendingTunToTcp(serverRuntime_t *runtime, int ownerSlot, const void *data, long nbytes) {
+  if (runtime == NULL || data == NULL || nbytes <= 0 || nbytes > (long)sizeof(runtime->pendingTunToTcpBuf)) {
+    return false;
+  }
+  if (!slotIndexValid(runtime, ownerSlot) || !runtime->slots[ownerSlot].active) {
+    return false;
+  }
+  if (serverRuntimeHasPendingTunToTcp(runtime)) {
+    return false;
+  }
+
+  memcpy(runtime->pendingTunToTcpBuf, data, (size_t)nbytes);
+  runtime->pendingTunToTcpNbytes = nbytes;
+  runtime->pendingOwnerSlot = ownerSlot;
+  return serverRuntimeSetTunReadEnabled(runtime, false);
+}
+
+serverRuntimePendingRetry_t serverRuntimeRetryPendingTunToTcp(
+    serverRuntime_t *runtime, int ownerSlot, ioPoller_t *ownerPoller) {
+  long queued;
+
+  if (runtime == NULL || ownerPoller == NULL) {
+    return serverRuntimePendingRetryError;
+  }
+  if (!serverRuntimeHasPendingTunToTcp(runtime)) {
+    return serverRuntimePendingRetryQueued;
+  }
+  if (runtime->pendingOwnerSlot != ownerSlot) {
+    return serverRuntimePendingRetryBlocked;
+  }
+
+  if (ioPollerQueueWrite(ownerPoller, ioSourceTcp, runtime->pendingTunToTcpBuf, runtime->pendingTunToTcpNbytes)) {
+    runtime->pendingTunToTcpNbytes = 0;
+    runtime->pendingOwnerSlot = -1;
+    return serverRuntimePendingRetryQueued;
+  }
+
+  queued = ioPollerQueuedBytes(ownerPoller, ioSourceTcp);
+  if (queued < 0 || queued + runtime->pendingTunToTcpNbytes <= IoPollerQueueCapacity) {
+    return serverRuntimePendingRetryError;
+  }
+  return serverRuntimePendingRetryBlocked;
+}
+
+bool serverRuntimeDropPendingTunToTcpByOwner(serverRuntime_t *runtime, int ownerSlot) {
+  if (runtime == NULL) {
+    return false;
+  }
+  if (!serverRuntimeHasPendingTunToTcp(runtime) || runtime->pendingOwnerSlot != ownerSlot) {
+    return true;
+  }
+
+  runtime->pendingTunToTcpNbytes = 0;
+  runtime->pendingOwnerSlot = -1;
+  return serverRuntimeSetTunReadEnabled(runtime, true);
 }
 
 session_t *serverRuntimeSessionAt(serverRuntime_t *runtime, int slot) {

@@ -661,7 +661,6 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   int slotB;
   char fill[IoPollerQueueCapacity];
   char tunPayload[128];
-  char drain[16384];
   session_t *ownerSession;
   session_t *otherSession;
   ioPoller_t *ownerPoller;
@@ -696,7 +695,8 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       "non-owner tcp write path should continue");
   testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "non-owner should not consume runtime pending");
 
-  testAssertTrue(read(tcpPairA[1], drain, 10000) > 0, "first tcp drain should succeed");
+  ownerPoller->tcpOutOffset = 0;
+  ownerPoller->tcpOutNbytes = IoPollerLowWatermark + 100;
   testAssertTrue(
       sessionStep(ownerSession, ownerPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "owner tcp write path should continue after first drain");
@@ -704,7 +704,8 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(queued > IoPollerLowWatermark, "owner queue should remain above low watermark");
   testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
 
-  testAssertTrue(read(tcpPairA[1], drain, 12000) > 0, "second tcp drain should succeed");
+  ownerPoller->tcpOutOffset = 0;
+  ownerPoller->tcpOutNbytes = IoPollerLowWatermark;
   testAssertTrue(
       sessionStep(ownerSession, ownerPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "owner tcp write path should continue after second drain");

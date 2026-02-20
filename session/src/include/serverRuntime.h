@@ -6,6 +6,12 @@
 
 typedef struct serverRuntime_t serverRuntime_t;
 
+typedef enum {
+  serverRuntimePendingRetryQueued = 0,
+  serverRuntimePendingRetryBlocked,
+  serverRuntimePendingRetryError,
+} serverRuntimePendingRetry_t;
+
 typedef struct {
   int connFd;
   session_t *session;
@@ -21,6 +27,9 @@ struct serverRuntime_t {
   long tunOutOffset;
   long tunOutNbytes;
   unsigned char tunOutBuf[IoPollerQueueCapacity];
+  int pendingOwnerSlot;
+  long pendingTunToTcpNbytes;
+  unsigned char pendingTunToTcpBuf[ProtocolWireLengthSize + ProtocolFrameSize];
   int retryCursor;
   int maxSessions;
   int clientCount;
@@ -48,6 +57,13 @@ bool serverRuntimeSyncTunWriteInterest(serverRuntime_t *runtime);
 bool serverRuntimeQueueTunWrite(serverRuntime_t *runtime, const void *data, long nbytes);
 bool serverRuntimeServiceTunWriteEvent(serverRuntime_t *runtime);
 int serverRuntimeRetryBlockedTunRoundRobin(serverRuntime_t *runtime);
+bool serverRuntimeSetTunReadEnabled(serverRuntime_t *runtime, bool enabled);
+bool serverRuntimeHasPendingTunToTcp(const serverRuntime_t *runtime);
+int serverRuntimePendingTunToTcpOwner(const serverRuntime_t *runtime);
+bool serverRuntimeStorePendingTunToTcp(serverRuntime_t *runtime, int ownerSlot, const void *data, long nbytes);
+serverRuntimePendingRetry_t serverRuntimeRetryPendingTunToTcp(
+    serverRuntime_t *runtime, int ownerSlot, ioPoller_t *ownerPoller);
+bool serverRuntimeDropPendingTunToTcpByOwner(serverRuntime_t *runtime, int ownerSlot);
 
 session_t *serverRuntimeSessionAt(serverRuntime_t *runtime, int slot);
 int serverRuntimeConnFdAt(const serverRuntime_t *runtime, int slot);

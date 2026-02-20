@@ -125,8 +125,13 @@ static bool maybeResumeReadSource(
 
 static queueResult_t queueTcpWithBackpressure(ioPoller_t *poller, session_t *session, const void *data, long nbytes) {
   long queued;
+  int ownerSlot;
 
   if (session->pendingTcpNbytes > 0) {
+    return queueResultBlocked;
+  }
+  if (session->isServer && session->runtime != NULL && serverRuntimeHasPendingTunToTcp(session->runtime)) {
+    session->tunReadPaused = true;
     return queueResultBlocked;
   }
   if (ioPollerQueueWrite(poller, ioSourceTcp, data, nbytes)) {
@@ -138,6 +143,17 @@ static queueResult_t queueTcpWithBackpressure(ioPoller_t *poller, session_t *ses
     return queueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
+    if (session->isServer && session->runtime != NULL) {
+      ownerSlot = serverRuntimeFindSlotByFd(session->runtime, poller->tcpFd);
+      if (ownerSlot < 0) {
+        return queueResultError;
+      }
+      if (!serverRuntimeStorePendingTunToTcp(session->runtime, ownerSlot, data, nbytes)) {
+        return queueResultError;
+      }
+      session->tunReadPaused = true;
+      return queueResultBlocked;
+    }
     memcpy(session->pendingTcpBuf, data, (size_t)nbytes);
     session->pendingTcpNbytes = nbytes;
     if (!pauseReadSourceForSession(session, poller, ioSourceTun, &session->tunReadPaused)) {
@@ -178,10 +194,28 @@ static queueResult_t queueTunWithBackpressure(ioPoller_t *poller, session_t *ses
   return queueResultError;
 }
 
-static bool serviceBackpressure(ioPoller_t *poller, session_t *session) {
+static bool serviceBackpressure(ioPoller_t *poller, session_t *session, ioEvent_t event) {
   long queued;
+  bool serverMode;
 
-  if (session->pendingTcpNbytes > 0) {
+  serverMode = session->isServer && session->runtime != NULL;
+
+  if (serverMode && serverRuntimeHasPendingTunToTcp(session->runtime)) {
+    int ownerSlot = serverRuntimePendingTunToTcpOwner(session->runtime);
+    int slot = serverRuntimeFindSlotByFd(session->runtime, poller->tcpFd);
+    if (slot < 0) {
+      return false;
+    }
+    if (event == ioEventTcpWrite && slot == ownerSlot) {
+      serverRuntimePendingRetry_t retry =
+          serverRuntimeRetryPendingTunToTcp(session->runtime, ownerSlot, poller);
+      if (retry == serverRuntimePendingRetryError) {
+        return false;
+      }
+    }
+  }
+
+  if (!serverMode && session->pendingTcpNbytes > 0) {
     if (ioPollerQueueWrite(poller, ioSourceTcp, session->pendingTcpBuf, session->pendingTcpNbytes)) {
       session->pendingTcpNbytes = 0;
     } else {
@@ -209,10 +243,33 @@ static bool serviceBackpressure(ioPoller_t *poller, session_t *session) {
     }
   }
 
+  if (!maybeResumeReadSource(session, poller, ioSourceTcp, ioSourceTun, &session->tcpReadPaused, session->pendingTunNbytes)) {
+    return false;
+  }
+
+  if (serverMode) {
+    if (serverRuntimeHasPendingTunToTcp(session->runtime)) {
+      session->tunReadPaused = true;
+      return true;
+    }
+
+    queued = ioPollerQueuedBytes(poller, ioSourceTcp);
+    if (queued < 0) {
+      return false;
+    }
+    if (queued > IoPollerLowWatermark) {
+      session->tunReadPaused = true;
+      return true;
+    }
+    if (!serverRuntimeSetTunReadEnabled(session->runtime, true)) {
+      return false;
+    }
+    session->tunReadPaused = false;
+    return true;
+  }
+
   return maybeResumeReadSource(
-             session, poller, ioSourceTun, ioSourceTcp, &session->tunReadPaused, session->pendingTcpNbytes)
-      && maybeResumeReadSource(
-             session, poller, ioSourceTcp, ioSourceTun, &session->tcpReadPaused, session->pendingTunNbytes);
+      session, poller, ioSourceTun, ioSourceTcp, &session->tunReadPaused, session->pendingTcpNbytes);
 }
 
 static queueResult_t sendMessage(
@@ -555,7 +612,7 @@ bool sessionServiceBackpressure(session_t *session, ioPoller_t *poller) {
   if (session == NULL || poller == NULL) {
     return false;
   }
-  return serviceBackpressure(poller, session);
+  return serviceBackpressure(poller, session, ioEventTimeout);
 }
 
 sessionStepResult_t sessionStep(
@@ -577,7 +634,7 @@ sessionStepResult_t sessionStep(
     return sessionStepStop;
   }
 
-  if (!serviceBackpressure(poller, session)) {
+  if (!serviceBackpressure(poller, session, event)) {
     logf("backpressure handling failure");
     return sessionStepStop;
   }
