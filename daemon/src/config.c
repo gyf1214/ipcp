@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+#include <arpa/inet.h>
 #include <sodium.h>
 
 #include <cjson/cJSON.h>
@@ -95,17 +97,104 @@ static int parseHeartbeatConfig(const cJSON *root, daemonConfig_t *cfg) {
   return 0;
 }
 
+static int parseRequiredPositiveInt(const cJSON *root, const char *name, int *out) {
+  const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, name);
+  if (!cJSON_IsNumber(value) || value->valuedouble != (double)value->valueint || value->valueint <= 0) {
+    return -1;
+  }
+  *out = value->valueint;
+  return 0;
+}
+
+static int parseIPv4String(const char *s) {
+  struct in_addr addr;
+  if (s == NULL) {
+    return 0;
+  }
+  return inet_pton(AF_INET, s, &addr) == 1;
+}
+
+static int parseMacString(const char *s) {
+  int i;
+  if (s == NULL || strlen(s) != 17) {
+    return 0;
+  }
+  for (i = 0; i < 17; i++) {
+    if ((i % 3) == 2) {
+      if (s[i] != ':') {
+        return 0;
+      }
+      continue;
+    }
+    if (!isxdigit((unsigned char)s[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int parseServerCredentials(const cJSON *root, daemonConfig_t *cfg) {
+  const cJSON *list = cJSON_GetObjectItemCaseSensitive(root, "credentials");
+  int count = 0;
+  int i = 0;
+
+  if (!cJSON_IsArray(list)) {
+    return -1;
+  }
+  count = cJSON_GetArraySize(list);
+  if (count <= 0 || count > ConfigMaxServerCredentials) {
+    return -1;
+  }
+
+  for (i = 0; i < count; i++) {
+    const cJSON *entry = cJSON_GetArrayItem(list, i);
+    daemonServerCredential_t *cred = &cfg->serverCredentials[i];
+    if (!cJSON_IsObject(entry)) {
+      return -1;
+    }
+    if (copyRequiredString(entry, "key_file", cred->keyFile) != 0) {
+      return -1;
+    }
+    if (cfg->ifMode == configIfModeTun) {
+      if (copyRequiredString(entry, "tun_ip", cred->tunIP) != 0 || !parseIPv4String(cred->tunIP)) {
+        return -1;
+      }
+      if (cJSON_GetObjectItemCaseSensitive(entry, "tap_mac") != NULL) {
+        return -1;
+      }
+    } else if (cfg->ifMode == configIfModeTap) {
+      if (copyRequiredString(entry, "tap_mac", cred->tapMac) != 0 || !parseMacString(cred->tapMac)) {
+        return -1;
+      }
+      if (cJSON_GetObjectItemCaseSensitive(entry, "tun_ip") != NULL) {
+        return -1;
+      }
+    } else {
+      return -1;
+    }
+  }
+
+  cfg->serverCredentialCount = count;
+  return 0;
+}
+
 static int parseServerConfig(const cJSON *root, daemonConfig_t *cfg) {
   if (copyRequiredString(root, "if_name", cfg->ifName) != 0) {
     return -1;
   }
-  if (copyRequiredString(root, "key_file", cfg->keyFile) != 0) {
+  if (cJSON_GetObjectItemCaseSensitive(root, "key_file") != NULL) {
+    return -1;
+  }
+  if (parseRequiredPositiveInt(root, "auth_timeout_ms", &cfg->authTimeoutMs) != 0) {
     return -1;
   }
   if (copyRequiredString(root, "listen_ip", cfg->listenIP) != 0) {
     return -1;
   }
   if (copyRequiredPort(root, "listen_port", &cfg->listenPort) != 0) {
+    return -1;
+  }
+  if (parseServerCredentials(root, cfg) != 0) {
     return -1;
   }
   return 0;
@@ -122,6 +211,17 @@ static int parseClientConfig(const cJSON *root, daemonConfig_t *cfg) {
     return -1;
   }
   if (copyRequiredPort(root, "server_port", &cfg->serverPort) != 0) {
+    return -1;
+  }
+  if (cfg->ifMode == configIfModeTun) {
+    if (copyRequiredString(root, "tun_ip", cfg->tunIP) != 0 || !parseIPv4String(cfg->tunIP)) {
+      return -1;
+    }
+  } else if (cfg->ifMode == configIfModeTap) {
+    if (copyRequiredString(root, "tap_mac", cfg->tapMac) != 0 || !parseMacString(cfg->tapMac)) {
+      return -1;
+    }
+  } else {
     return -1;
   }
   return 0;

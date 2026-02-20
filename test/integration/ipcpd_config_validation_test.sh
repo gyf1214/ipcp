@@ -119,9 +119,77 @@ cat > "$tmpDir/missing-if-mode-defaults-to-tun.json" <<JSON
 {
   "mode": "client",
   "if_name": "tun0",
+  "tun_ip": "10.10.0.2",
   "server_ip": "127.0.0.1",
   "server_port": 46000,
   "key_file": "/tmp/nonexistent.key"
+}
+JSON
+
+cat > "$tmpDir/server-old-key-file-only-hard-break.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "tun",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "key_file": "/tmp/none.key",
+  "auth_timeout_ms": 5000
+}
+JSON
+
+cat > "$tmpDir/server-missing-auth-timeout.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "tun",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "credentials": [
+    { "tun_ip": "10.0.0.2", "key_file": "/tmp/none.key" }
+  ]
+}
+JSON
+
+cat > "$tmpDir/server-bad-auth-timeout.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "tap",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "auth_timeout_ms": 0,
+  "credentials": [
+    { "tap_mac": "02:11:22:33:44:55", "key_file": "/tmp/none.key" }
+  ]
+}
+JSON
+
+cat > "$tmpDir/server-tun-credentials-missing-ip.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "tun",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "auth_timeout_ms": 5000,
+  "credentials": [
+    { "tap_mac": "02:11:22:33:44:55", "key_file": "/tmp/none.key" }
+  ]
+}
+JSON
+
+cat > "$tmpDir/server-tap-credentials-missing-mac.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tap0",
+  "if_mode": "tap",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "auth_timeout_ms": 5000,
+  "credentials": [
+    { "tun_ip": "10.0.0.2", "key_file": "/tmp/none.key" }
+  ]
 }
 JSON
 
@@ -131,6 +199,11 @@ run_expect_invalid_config "$tmpDir/bad-mode.json"
 run_expect_invalid_config "$tmpDir/bad-heartbeat-relationship.json"
 run_expect_invalid_config "$tmpDir/bad-if-mode-value.json"
 run_expect_invalid_config "$tmpDir/bad-if-mode-type.json"
+run_expect_invalid_config "$tmpDir/server-old-key-file-only-hard-break.json"
+run_expect_invalid_config "$tmpDir/server-missing-auth-timeout.json"
+run_expect_invalid_config "$tmpDir/server-bad-auth-timeout.json"
+run_expect_invalid_config "$tmpDir/server-tun-credentials-missing-ip.json"
+run_expect_invalid_config "$tmpDir/server-tap-credentials-missing-mac.json"
 run_expect_invalid_secret "$tmpDir/missing-if-mode-defaults-to-tun.json"
 
 echo "ipcpd config validation integration test passed"
