@@ -533,6 +533,226 @@ static void testSharedTunWriteInterestIsRuntimeOwned(void) {
   close(tcpPairB[1]);
 }
 
+static void setupServerRuntimeForTest(
+    serverRuntime_t *runtime,
+    int maxSessions,
+    int *epollFd,
+    int tunPair[2],
+    int tcpPairA[2],
+    int tcpPairB[2],
+    int *slotA,
+    int *slotB) {
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp pair A should be created");
+  testAssertTrue(serverRuntimeInit(runtime, tunPair[0], 72, maxSessions, &defaultHeartbeatCfg), "runtime init should succeed");
+
+  *epollFd = epoll_create1(0);
+  testAssertTrue(*epollFd >= 0, "epoll_create1 should succeed");
+  runtime->epollFd = *epollFd;
+  testAssertTrue(
+      epoll_ctl(
+          *epollFd,
+          EPOLL_CTL_ADD,
+          runtime->tunFd,
+          &(struct epoll_event){.events = runtime->tunEvents, .data.fd = runtime->tunFd})
+          == 0,
+      "add tun fd should succeed");
+
+  *slotA = serverRuntimeAddClient(runtime, tcpPairA[0]);
+  testAssertTrue(*slotA == 0, "first client should be added");
+  testAssertTrue(
+      epoll_ctl(
+          *epollFd,
+          EPOLL_CTL_ADD,
+          tcpPairA[0],
+          &(struct epoll_event){.events = runtime->slots[*slotA].poller.tcpEvents, .data.fd = tcpPairA[0]})
+          == 0,
+      "add tcp A fd should succeed");
+
+  *slotB = -1;
+  if (maxSessions > 1) {
+    testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
+    *slotB = serverRuntimeAddClient(runtime, tcpPairB[0]);
+    testAssertTrue(*slotB == 1, "second client should be added");
+    testAssertTrue(
+        epoll_ctl(
+            *epollFd,
+            EPOLL_CTL_ADD,
+            tcpPairB[0],
+            &(struct epoll_event){.events = runtime->slots[*slotB].poller.tcpEvents, .data.fd = tcpPairB[0]})
+            == 0,
+        "add tcp B fd should succeed");
+  }
+}
+
+static void teardownServerRuntimeForTest(
+    serverRuntime_t *runtime,
+    int epollFd,
+    int tunPair[2],
+    int tcpPairA[2],
+    int tcpPairB[2],
+    int slotA,
+    int slotB) {
+  if (slotA >= 0) {
+    (void)serverRuntimeRemoveClient(runtime, slotA);
+  }
+  if (slotB >= 0) {
+    (void)serverRuntimeRemoveClient(runtime, slotB);
+  }
+  close(epollFd);
+  serverRuntimeDeinit(runtime);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPairA[0]);
+  close(tcpPairA[1]);
+  if (tcpPairB[0] >= 0) {
+    close(tcpPairB[0]);
+  }
+  if (tcpPairB[1] >= 0) {
+    close(tcpPairB[1]);
+  }
+}
+
+static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
+  unsigned char key[ProtocolPskSize];
+  serverRuntime_t runtime;
+  int epollFd;
+  int tunPair[2];
+  int tcpPairA[2];
+  int tcpPairB[2] = {-1, -1};
+  int slotA;
+  int slotB;
+  char fill[IoPollerQueueCapacity];
+  char tunPayload[128];
+  session_t *session;
+  ioPoller_t *poller;
+  sessionStats_t stats;
+
+  memset(key, 0x51, sizeof(key));
+  memset(fill, 'p', sizeof(fill));
+  memset(tunPayload, 'q', sizeof(tunPayload));
+  setupServerRuntimeForTest(&runtime, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  session = serverRuntimeSessionAt(&runtime, slotA);
+  testAssertTrue(session != NULL, "server session should exist");
+  poller = &runtime.slots[slotA].poller;
+
+  testAssertTrue(
+      ioPollerQueueWrite(poller, ioSourceTcp, fill, IoPollerQueueCapacity - 16),
+      "prefill tcp queue should succeed");
+  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
+  testAssertTrue(
+      sessionStep(session, poller, ioEventTunRead, key) == sessionStepContinue,
+      "session should continue on overflow");
+  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
+  testAssertTrue(stats.pendingTcpNbytes == 0, "server overflow should retain pending data in runtime, not session");
+  testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "runtime should disable tun epollin while pending exists");
+
+  teardownServerRuntimeForTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+}
+
+static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(void) {
+  unsigned char key[ProtocolPskSize];
+  serverRuntime_t runtime;
+  int epollFd;
+  int tunPair[2];
+  int tcpPairA[2];
+  int tcpPairB[2];
+  int slotA;
+  int slotB;
+  char fill[IoPollerQueueCapacity];
+  char tunPayload[128];
+  char drain[16384];
+  session_t *ownerSession;
+  session_t *otherSession;
+  ioPoller_t *ownerPoller;
+  ioPoller_t *otherPoller;
+  sessionStats_t ownerStats;
+  long queued;
+
+  memset(key, 0x52, sizeof(key));
+  memset(fill, 'r', sizeof(fill));
+  memset(tunPayload, 's', sizeof(tunPayload));
+  setupServerRuntimeForTest(&runtime, 2, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  ownerSession = serverRuntimeSessionAt(&runtime, slotA);
+  otherSession = serverRuntimeSessionAt(&runtime, slotB);
+  ownerPoller = &runtime.slots[slotA].poller;
+  otherPoller = &runtime.slots[slotB].poller;
+  testAssertTrue(ownerSession != NULL, "owner session should exist");
+  testAssertTrue(otherSession != NULL, "other session should exist");
+
+  testAssertTrue(
+      ioPollerQueueWrite(ownerPoller, ioSourceTcp, fill, IoPollerQueueCapacity - 16),
+      "prefill owner tcp queue should succeed");
+  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
+  testAssertTrue(
+      sessionStep(ownerSession, ownerPoller, ioEventTunRead, key) == sessionStepContinue,
+      "overflow on owner should continue");
+  testAssertTrue(sessionGetStats(ownerSession, &ownerStats), "sessionGetStats should succeed");
+  testAssertTrue(ownerStats.pendingTcpNbytes == 0, "owner session should not keep runtime pending bytes locally");
+  testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "tun epollin should be disabled while runtime pending exists");
+
+  testAssertTrue(
+      sessionStep(otherSession, otherPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      "non-owner tcp write path should continue");
+  testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "non-owner should not consume runtime pending");
+
+  testAssertTrue(read(tcpPairA[1], drain, 10000) > 0, "first tcp drain should succeed");
+  testAssertTrue(
+      sessionStep(ownerSession, ownerPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      "owner tcp write path should continue after first drain");
+  queued = ioPollerQueuedBytes(ownerPoller, ioSourceTcp);
+  testAssertTrue(queued > IoPollerLowWatermark, "owner queue should remain above low watermark");
+  testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
+
+  testAssertTrue(read(tcpPairA[1], drain, 12000) > 0, "second tcp drain should succeed");
+  testAssertTrue(
+      sessionStep(ownerSession, ownerPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      "owner tcp write path should continue after second drain");
+  queued = ioPollerQueuedBytes(ownerPoller, ioSourceTcp);
+  testAssertTrue(queued <= IoPollerLowWatermark, "owner queue should drain to low watermark");
+  testAssertTrue((runtime.tunEvents & EPOLLIN) != 0, "tun epollin should resume at low watermark");
+
+  teardownServerRuntimeForTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+}
+
+static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(void) {
+  unsigned char key[ProtocolPskSize];
+  serverRuntime_t runtime;
+  int epollFd;
+  int tunPair[2];
+  int tcpPairA[2];
+  int tcpPairB[2] = {-1, -1};
+  int slotA;
+  int slotB;
+  char fill[IoPollerQueueCapacity];
+  char tunPayload[128];
+  session_t *session;
+  ioPoller_t *poller;
+
+  memset(key, 0x53, sizeof(key));
+  memset(fill, 'u', sizeof(fill));
+  memset(tunPayload, 'v', sizeof(tunPayload));
+  setupServerRuntimeForTest(&runtime, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  session = serverRuntimeSessionAt(&runtime, slotA);
+  testAssertTrue(session != NULL, "server session should exist");
+  poller = &runtime.slots[slotA].poller;
+
+  testAssertTrue(
+      ioPollerQueueWrite(poller, ioSourceTcp, fill, IoPollerQueueCapacity - 16),
+      "prefill tcp queue should succeed");
+  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
+  testAssertTrue(
+      sessionStep(session, poller, ioEventTunRead, key) == sessionStepContinue,
+      "overflow path should continue");
+  testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
+
+  testAssertTrue(serverRuntimeRemoveClient(&runtime, slotA), "owner removal should succeed");
+  slotA = -1;
+  testAssertTrue((runtime.tunEvents & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
+
+  teardownServerRuntimeForTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+}
+
 void runSessionTests(void) {
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
@@ -550,4 +770,7 @@ void runSessionTests(void) {
   testSessionTcpReadQueuesTunWrite();
   testBackpressurePauseAndResumeFlow();
   testSharedTunWriteInterestIsRuntimeOwned();
+  testServerTunOverflowDisablesTunEpollinGlobally();
+  testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark();
+  testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin();
 }
