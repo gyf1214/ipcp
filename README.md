@@ -123,13 +123,23 @@ Supported v1 schema:
 
 - Single mode per file
 - Unknown JSON fields are ignored
-- Key material is loaded only from `key_file` path
 - `if_mode` is optional (`"tun"` or `"tap"`, default `"tun"`)
 - `heartbeat_interval_ms` is optional (default `5000`)
 - `heartbeat_timeout_ms` is optional (default `15000`)
 - Both heartbeat fields must be positive integers, and `heartbeat_timeout_ms` must be greater than `heartbeat_interval_ms`
 - Config is loaded once at startup (no reload)
 - Server runtime supports concurrent client sessions in one process (job 1)
+- Client mode uses top-level `key_file` and claim field by mode:
+  - `if_mode: "tun"` requires `tun_ip`
+  - `if_mode: "tap"` requires `tap_mac`
+- Server mode requires `auth_timeout_ms` and `credentials` list:
+  - `if_mode: "tun"` entries use `tun_ip` + `key_file`
+  - `if_mode: "tap"` entries use `tap_mac` + `key_file`
+  - Top-level server `key_file` is not accepted
+- Server pre-auth handshake is:
+  - client sends cleartext claim bootstrap frame
+  - server sends cleartext `AUTH_CHALLENGE` nonce
+  - client sends encrypted `CLIENT_HELLO` with nonce echo + client nonce
 
 ### Secret file
 
@@ -148,7 +158,17 @@ head -c 32 /dev/urandom > secret.key
   "if_mode": "tun",
   "listen_ip": "0.0.0.0",
   "listen_port": 5000,
-  "key_file": "secret.key",
+  "auth_timeout_ms": 5000,
+  "credentials": [
+    {
+      "tun_ip": "10.10.0.2",
+      "key_file": "client-a.key"
+    },
+    {
+      "tun_ip": "10.10.0.3",
+      "key_file": "client-b.key"
+    }
+  ],
   "heartbeat_interval_ms": 5000,
   "heartbeat_timeout_ms": 15000
 }
@@ -167,6 +187,7 @@ Run:
   "mode": "client",
   "if_name": "tun0",
   "if_mode": "tun",
+  "tun_ip": "10.10.0.2",
   "server_ip": "203.0.113.10",
   "server_port": 5000,
   "key_file": "secret.key",
@@ -194,7 +215,7 @@ Run:
 - On shared TUN backpressure, each session retains at most one pending overflow frame and pauses only that session's TCP read
 - When TUN backlog drains to low watermark, blocked-session retries run in round-robin order from a rotating cursor
 - Job-1 TUN egress may select any currently connected client (routing-table selection is deferred)
-- Job-1 keying model is one shared PSK (`key_file`) for all clients; per-client identity/key selection is deferred
+- Server runtime uses per-client key selection by configured `tun_ip`/`tap_mac` claim mapping
 
 ## Component Roles
 
