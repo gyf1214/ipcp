@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sodium.h>
+#include <arpa/inet.h>
 
 #include "config.h"
 #include "crypt.h"
@@ -18,6 +19,126 @@ static ioIfMode_t toIoIfMode(configIfMode_t mode) {
     return ioIfModeTap;
   }
   return ioIfModeTun;
+}
+
+typedef struct {
+  const cryptServerKeyStore_t *store;
+  configIfMode_t ifMode;
+} serverKeyLookupCtx_t;
+
+static const char *ifModeLabel(configIfMode_t mode) {
+  return mode == configIfModeTap ? "tap" : "tun";
+}
+
+static int serverLookupByClaim(void *ctx, const char *claim, unsigned char key[ProtocolPskSize]) {
+  serverKeyLookupCtx_t *lookup = (serverKeyLookupCtx_t *)ctx;
+  if (lookup == NULL || lookup->store == NULL) {
+    return -1;
+  }
+  return cryptServerKeyStoreLookup(lookup->store, lookup->ifMode, claim, key);
+}
+
+static int writeAll(int fd, const void *buf, long nbytes) {
+  long offset = 0;
+  while (offset < nbytes) {
+    ssize_t n = write(fd, (const char *)buf + offset, (size_t)(nbytes - offset));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -1;
+    }
+    if (n == 0) {
+      return -1;
+    }
+    offset += (long)n;
+  }
+  return 0;
+}
+
+static int readAll(int fd, void *buf, long nbytes) {
+  long offset = 0;
+  while (offset < nbytes) {
+    ssize_t n = read(fd, (char *)buf + offset, (size_t)(nbytes - offset));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -1;
+    }
+    if (n == 0) {
+      return -1;
+    }
+    offset += (long)n;
+  }
+  return 0;
+}
+
+static int writeWireFrame(int fd, const protocolFrame_t *frame) {
+  uint32_t wire = 0;
+  if (frame == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+    return -1;
+  }
+  wire = htonl((uint32_t)frame->nbytes);
+  if (writeAll(fd, &wire, ProtocolWireLengthSize) != 0) {
+    return -1;
+  }
+  return writeAll(fd, frame->buf, frame->nbytes);
+}
+
+static int readWireFrame(int fd, protocolFrame_t *frame) {
+  uint32_t wire = 0;
+  if (frame == NULL) {
+    return -1;
+  }
+  if (readAll(fd, &wire, ProtocolWireLengthSize) != 0) {
+    return -1;
+  }
+  frame->nbytes = (long)ntohl(wire);
+  if (frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+    return -1;
+  }
+  return readAll(fd, frame->buf, frame->nbytes);
+}
+
+static int clientRunPreAuthHandshake(
+    int connFd, const char *claim, const unsigned char key[ProtocolPskSize]) {
+  protocolFrame_t frame;
+  protocolMessage_t msg;
+  unsigned char helloPayload[ProtocolNonceSize * 2];
+
+  if (claim == NULL || claim[0] == '\0' || key == NULL) {
+    return -1;
+  }
+  if (protocolEncode(claim, (long)strlen(claim), &frame) != protocolStatusOk) {
+    return -1;
+  }
+  if (writeWireFrame(connFd, &frame) != 0) {
+    return -1;
+  }
+
+  if (readWireFrame(connFd, &frame) != 0) {
+    return -1;
+  }
+  if (protocolMessageDecodeFrame(&frame, &msg) != protocolStatusOk) {
+    return -1;
+  }
+  if (msg.type != protocolMsgAuthChallenge || msg.nbytes != ProtocolNonceSize) {
+    return -1;
+  }
+
+  memcpy(helloPayload, msg.buf, ProtocolNonceSize);
+  randombytes_buf(helloPayload + ProtocolNonceSize, ProtocolNonceSize);
+  msg.type = protocolMsgClientHello;
+  msg.nbytes = sizeof(helloPayload);
+  msg.buf = (const char *)helloPayload;
+  if (protocolSecureEncodeMessage(&msg, key, &frame) != protocolStatusOk) {
+    return -1;
+  }
+  if (writeWireFrame(connFd, &frame) != 0) {
+    return -1;
+  }
+  return 0;
 }
 
 static int serveTcp(
@@ -84,8 +205,10 @@ static int listenTcp(
     configIfMode_t ifMode,
     const char *listenIP,
     int port,
-    const unsigned char key[ProtocolPskSize],
+    const cryptServerKeyStore_t *keyStore,
+    int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg) {
+  serverKeyLookupCtx_t lookupCtx;
   int tunFd = -1;
   int listenFd = ioTcpListen(listenIP, port);
   if (listenFd < 0) {
@@ -102,7 +225,18 @@ static int listenTcp(
   }
   logf("successfully opened tun device %s", ifName);
 
-  if (sessionServeMultiClient(tunFd, listenFd, key, heartbeatCfg, 64) != 0) {
+  lookupCtx.store = keyStore;
+  lookupCtx.ifMode = ifMode;
+  if (sessionServeMultiClient(
+          tunFd,
+          listenFd,
+          serverLookupByClaim,
+          &lookupCtx,
+          ifModeLabel(ifMode),
+          authTimeoutMs,
+          heartbeatCfg,
+          64)
+      != 0) {
     close(tunFd);
     close(listenFd);
     return -1;
@@ -118,6 +252,7 @@ static int connTcp(
     configIfMode_t ifMode,
     const char *remoteIP,
     int port,
+    const char *claim,
     const unsigned char key[ProtocolPskSize],
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   int connFd = ioTcpConnect(remoteIP, port);
@@ -126,6 +261,11 @@ static int connTcp(
     return -1;
   }
   logf("connected to %s:%d", remoteIP, port);
+  if (clientRunPreAuthHandshake(connFd, claim, key) != 0) {
+    errf("pre-auth handshake failed");
+    close(connFd);
+    return -1;
+  }
 
   return serveTcp(ifName, ifMode, connFd, key, false, heartbeatCfg);
 }
@@ -134,11 +274,14 @@ int main(int argc, char **argv) {
   daemonConfig_t cfg;
   sessionHeartbeatConfig_t heartbeatCfg;
   unsigned char key[ProtocolPskSize];
+  cryptServerKeyStore_t keyStore;
   int exitCode = EXIT_FAILURE;
   bool configLoaded = false;
   bool keyLoaded = false;
+  bool keyStoreLoaded = false;
 
   configZero(&cfg);
+  cryptServerKeyStoreZero(&keyStore);
 
   if (argc != 2) {
     errf("invalid arguments: <configFile>");
@@ -152,22 +295,41 @@ int main(int argc, char **argv) {
   }
   configLoaded = true;
 
-  if (cryptLoadKeyFromFile(key, cfg.keyFile) != 0) {
-    errf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
-    goto cleanup;
+  if (cfg.mode == configModeServer) {
+    if (cryptServerKeyStoreLoadFromConfig(&keyStore, &cfg) != 0) {
+      errf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
+      goto cleanup;
+    }
+    keyStoreLoaded = true;
+    memcpy(key, keyStore.entries[0].key, sizeof(key));
+    keyLoaded = true;
+  } else {
+    if (cryptLoadKeyFromFile(key, cfg.keyFile) != 0) {
+      errf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
+      goto cleanup;
+    }
+    keyLoaded = true;
   }
-  keyLoaded = true;
   heartbeatCfg.intervalMs = cfg.heartbeatIntervalMs;
   heartbeatCfg.timeoutMs = cfg.heartbeatTimeoutMs;
 
   if (cfg.mode == configModeServer) {
     exitCode =
-        listenTcp(cfg.ifName, cfg.ifMode, cfg.listenIP, cfg.listenPort, key, &heartbeatCfg) == 0
+        listenTcp(
+            cfg.ifName,
+            cfg.ifMode,
+            cfg.listenIP,
+            cfg.listenPort,
+            &keyStore,
+            cfg.authTimeoutMs,
+            &heartbeatCfg)
+            == 0
             ? EXIT_SUCCESS
             : EXIT_FAILURE;
   } else {
+    const char *claim = cfg.ifMode == configIfModeTap ? cfg.tapMac : cfg.tunIP;
     exitCode =
-        connTcp(cfg.ifName, cfg.ifMode, cfg.serverIP, cfg.serverPort, key, &heartbeatCfg) == 0
+        connTcp(cfg.ifName, cfg.ifMode, cfg.serverIP, cfg.serverPort, claim, key, &heartbeatCfg) == 0
             ? EXIT_SUCCESS
             : EXIT_FAILURE;
   }
@@ -175,6 +337,9 @@ int main(int argc, char **argv) {
 cleanup:
   if (keyLoaded) {
     sodium_memzero(key, sizeof(key));
+  }
+  if (keyStoreLoaded) {
+    cryptServerKeyStoreZero(&keyStore);
   }
   if (configLoaded) {
     configZero(&cfg);

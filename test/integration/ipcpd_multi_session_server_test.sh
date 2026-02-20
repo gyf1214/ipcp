@@ -161,7 +161,12 @@ cat > "$serverConfig" <<JSON
   "if_mode": "tun",
   "listen_ip": "0.0.0.0",
   "listen_port": 46100,
-  "key_file": "$keyFile"
+  "auth_timeout_ms": 5000,
+  "credentials": [
+    { "tun_ip": "10.250.1.2", "key_file": "$keyFile" },
+    { "tun_ip": "10.250.2.2", "key_file": "$keyFile" },
+    { "tun_ip": "10.250.3.2", "key_file": "$keyFile" }
+  ]
 }
 JSON
 
@@ -170,6 +175,7 @@ cat > "$clientConfigA" <<JSON
   "mode": "client",
   "if_name": "tun0",
   "if_mode": "tun",
+  "tun_ip": "10.250.1.2",
   "server_ip": "10.210.1.1",
   "server_port": 46100,
   "key_file": "$keyFile"
@@ -181,6 +187,7 @@ cat > "$clientConfigB" <<JSON
   "mode": "client",
   "if_name": "tun0",
   "if_mode": "tun",
+  "tun_ip": "10.250.2.2",
   "server_ip": "10.210.2.1",
   "server_port": 46100,
   "key_file": "$keyFile"
@@ -192,6 +199,7 @@ cat > "$clientConfigC" <<JSON
   "mode": "client",
   "if_name": "tun1",
   "if_mode": "tun",
+  "tun_ip": "10.250.3.2",
   "server_ip": "10.210.3.1",
   "server_port": 46100,
   "key_file": "$keyFile"

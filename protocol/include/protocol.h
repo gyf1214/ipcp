@@ -54,5 +54,8 @@ protocolStatus_t protocolSecureDecoderReadMessage(
     protocolMessage_t *msg);
 protocolStatus_t protocolSecureDecodeFrame(
     protocolFrame_t *frame, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg);
+long protocolMessageMaxPayloadSize();
+protocolStatus_t protocolMessageEncodeFrame(const protocolMessage_t *msg, protocolFrame_t *frame);
+protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protocolMessage_t *msg);
 
 long protocolMaxPlaintextSize();

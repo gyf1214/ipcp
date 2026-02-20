@@ -4,6 +4,8 @@
 
 #include "session.h"
 
+#define SessionClaimSize 128
+
 typedef struct serverRuntime_t serverRuntime_t;
 
 typedef enum {
@@ -16,6 +18,8 @@ typedef struct {
   int connFd;
   session_t *session;
   ioPoller_t poller;
+  unsigned char key[ProtocolPskSize];
+  char claim[SessionClaimSize];
   bool active;
 } serverRuntimeSlot_t;
 
@@ -45,7 +49,11 @@ bool serverRuntimeInit(
     const sessionHeartbeatConfig_t *heartbeatCfg);
 void serverRuntimeDeinit(serverRuntime_t *runtime);
 
-int serverRuntimeAddClient(serverRuntime_t *runtime, int connFd);
+int serverRuntimeAddClient(
+    serverRuntime_t *runtime,
+    int connFd,
+    const unsigned char key[ProtocolPskSize],
+    const char *claim);
 bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot);
 
 int serverRuntimeFindSlotByFd(const serverRuntime_t *runtime, int connFd);
@@ -67,3 +75,5 @@ bool serverRuntimeDropPendingTunToTcpByOwner(serverRuntime_t *runtime, int owner
 
 session_t *serverRuntimeSessionAt(serverRuntime_t *runtime, int slot);
 int serverRuntimeConnFdAt(const serverRuntime_t *runtime, int slot);
+const unsigned char *serverRuntimeKeyAt(const serverRuntime_t *runtime, int slot);
+bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const char *claim);

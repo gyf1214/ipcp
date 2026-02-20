@@ -2,12 +2,15 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/epoll.h>
 #include <time.h>
 #include <unistd.h>
+#include <sodium.h>
 
 #include "log.h"
 #include "serverRuntime.h"
@@ -655,10 +658,161 @@ static bool serverEpollCtl(int epollFd, int op, int fd, unsigned int events) {
   return epoll_ctl(epollFd, op, fd, &event) == 0;
 }
 
-static bool serverDispatchClient(serverRuntime_t *runtime, int slot, ioEvent_t event, const unsigned char key[ProtocolPskSize]) {
+static int isValidTunClaim(const char *claim) {
+  struct in_addr addr;
+  return claim != NULL && inet_pton(AF_INET, claim, &addr) == 1;
+}
+
+static int isValidTapClaim(const char *claim) {
+  int i;
+  if (claim == NULL || strlen(claim) != 17) {
+    return 0;
+  }
+  for (i = 0; i < 17; i++) {
+    if ((i % 3) == 2) {
+      if (claim[i] != ':') {
+        return 0;
+      }
+    } else if (!isxdigit((unsigned char)claim[i])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static bool authReadExactWithTimeout(int fd, void *buf, long nbytes, int timeoutMs) {
+  long offset = 0;
+  while (offset < nbytes) {
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN,
+    };
+    int prc = poll(&pfd, 1, timeoutMs);
+    if (prc <= 0) {
+      return false;
+    }
+    if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+      return false;
+    }
+    {
+      ssize_t n = read(fd, (char *)buf + offset, (size_t)(nbytes - offset));
+      if (n <= 0) {
+        return false;
+      }
+      offset += (long)n;
+    }
+  }
+  return true;
+}
+
+static bool authWriteAll(int fd, const void *buf, long nbytes) {
+  long offset = 0;
+  while (offset < nbytes) {
+    ssize_t n = write(fd, (const char *)buf + offset, (size_t)(nbytes - offset));
+    if (n <= 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    offset += (long)n;
+  }
+  return true;
+}
+
+static bool authReadWireFrame(int fd, int timeoutMs, protocolFrame_t *frame) {
+  uint32_t wireNbytes = 0;
+  if (frame == NULL) {
+    return false;
+  }
+  if (!authReadExactWithTimeout(fd, &wireNbytes, ProtocolWireLengthSize, timeoutMs)) {
+    return false;
+  }
+  frame->nbytes = (long)ntohl(wireNbytes);
+  if (frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+    return false;
+  }
+  return authReadExactWithTimeout(fd, frame->buf, frame->nbytes, timeoutMs);
+}
+
+static bool authWriteWireFrame(int fd, const protocolFrame_t *frame) {
+  uint32_t wireNbytes;
+  if (frame == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+    return false;
+  }
+  wireNbytes = htonl((uint32_t)frame->nbytes);
+  if (!authWriteAll(fd, &wireNbytes, ProtocolWireLengthSize)) {
+    return false;
+  }
+  return authWriteAll(fd, frame->buf, frame->nbytes);
+}
+
+static bool serverAuthenticateClient(
+    int connFd,
+    const char *ifModeLabel,
+    sessionServerKeyLookupFn_t keyLookupFn,
+    void *keyLookupCtx,
+    int authTimeoutMs,
+    char outClaim[SessionClaimSize],
+    unsigned char outKey[ProtocolPskSize]) {
+  protocolFrame_t frame;
+  protocolMessage_t msg;
+  unsigned char serverNonce[ProtocolNonceSize];
+  unsigned char helloPayload[ProtocolNonceSize * 2];
+
+  if (ifModeLabel == NULL || keyLookupFn == NULL || outClaim == NULL || outKey == NULL || authTimeoutMs <= 0) {
+    return false;
+  }
+
+  if (!authReadWireFrame(connFd, authTimeoutMs, &frame)) {
+    return false;
+  }
+  if (frame.nbytes <= 0 || frame.nbytes >= SessionClaimSize) {
+    return false;
+  }
+  memcpy(outClaim, frame.buf, (size_t)frame.nbytes);
+  outClaim[frame.nbytes] = '\0';
+
+  if ((strcmp(ifModeLabel, "tun") == 0 && !isValidTunClaim(outClaim))
+      || (strcmp(ifModeLabel, "tap") == 0 && !isValidTapClaim(outClaim))) {
+    return false;
+  }
+  if (keyLookupFn(keyLookupCtx, outClaim, outKey) != 0) {
+    return false;
+  }
+
+  randombytes_buf(serverNonce, sizeof(serverNonce));
+  msg.type = protocolMsgAuthChallenge;
+  msg.nbytes = ProtocolNonceSize;
+  msg.buf = (const char *)serverNonce;
+  if (protocolMessageEncodeFrame(&msg, &frame) != protocolStatusOk || !authWriteWireFrame(connFd, &frame)) {
+    return false;
+  }
+
+  if (!authReadWireFrame(connFd, authTimeoutMs, &frame)) {
+    return false;
+  }
+  if (protocolSecureDecodeFrame(&frame, outKey, &msg) != protocolStatusOk) {
+    return false;
+  }
+  if (msg.type != protocolMsgClientHello || msg.nbytes != ProtocolNonceSize * 2) {
+    return false;
+  }
+  memcpy(helloPayload, msg.buf, sizeof(helloPayload));
+  if (memcmp(helloPayload, serverNonce, ProtocolNonceSize) != 0) {
+    return false;
+  }
+  return true;
+}
+
+static bool serverDispatchClient(serverRuntime_t *runtime, int slot, ioEvent_t event) {
   session_t *session = serverRuntimeSessionAt(runtime, slot);
   int connFd = serverRuntimeConnFdAt(runtime, slot);
+  const unsigned char *key = serverRuntimeKeyAt(runtime, slot);
   if (session == NULL || connFd < 0) {
+    return false;
+  }
+  if (key == NULL) {
     return false;
   }
 
@@ -670,13 +824,13 @@ static bool serverDispatchClient(serverRuntime_t *runtime, int slot, ioEvent_t e
   return true;
 }
 
-static bool serverTickAllClients(serverRuntime_t *runtime, const unsigned char key[ProtocolPskSize]) {
+static bool serverTickAllClients(serverRuntime_t *runtime) {
   int slot;
   for (slot = 0; slot < runtime->maxSessions; slot++) {
     if (!runtime->slots[slot].active) {
       continue;
     }
-    if (!serverDispatchClient(runtime, slot, ioEventTimeout, key)) {
+    if (!serverDispatchClient(runtime, slot, ioEventTimeout)) {
       return false;
     }
   }
@@ -686,7 +840,10 @@ static bool serverTickAllClients(serverRuntime_t *runtime, const unsigned char k
 int sessionServeMultiClient(
     int tunFd,
     int listenFd,
-    const unsigned char key[ProtocolPskSize],
+    sessionServerKeyLookupFn_t keyLookupFn,
+    void *keyLookupCtx,
+    const char *ifModeLabel,
+    int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxSessions) {
   serverRuntime_t runtime;
@@ -695,7 +852,13 @@ int sessionServeMultiClient(
   int rc = -1;
   int i;
 
-  if (tunFd < 0 || listenFd < 0 || key == NULL || heartbeatCfg == NULL || maxSessions <= 0) {
+  if (tunFd < 0
+      || listenFd < 0
+      || keyLookupFn == NULL
+      || ifModeLabel == NULL
+      || authTimeoutMs <= 0
+      || heartbeatCfg == NULL
+      || maxSessions <= 0) {
     return -1;
   }
   if (!serverRuntimeInit(&runtime, tunFd, listenFd, maxSessions, heartbeatCfg)) {
@@ -734,6 +897,8 @@ int sessionServeMultiClient(
           int clientPort = 0;
           ioStatus_t status = ioTcpAcceptNonBlocking(listenFd, &connFd, clientIp, sizeof(clientIp), &clientPort);
           int slot;
+          char claim[SessionClaimSize];
+          unsigned char key[ProtocolPskSize];
           if (status == ioStatusWouldBlock) {
             break;
           }
@@ -741,7 +906,17 @@ int sessionServeMultiClient(
             goto cleanup;
           }
           logf("connected with %s:%d", clientIp, clientPort);
-          slot = serverRuntimeAddClient(&runtime, connFd);
+          if (!serverAuthenticateClient(
+                  connFd, ifModeLabel, keyLookupFn, keyLookupCtx, authTimeoutMs, claim, key)) {
+            close(connFd);
+            continue;
+          }
+          if (serverRuntimeHasActiveClaim(&runtime, claim)) {
+            close(connFd);
+            continue;
+          }
+          slot = serverRuntimeAddClient(&runtime, connFd, key, claim);
+          sodium_memzero(key, sizeof(key));
           if (slot < 0) {
             close(connFd);
             continue;
@@ -760,7 +935,7 @@ int sessionServeMultiClient(
         if ((ev & EPOLLIN) != 0) {
           int connFd = serverRuntimePickEgressClient(&runtime);
           int slot = serverRuntimeFindSlotByFd(&runtime, connFd);
-          if (slot >= 0 && !serverDispatchClient(&runtime, slot, ioEventTunRead, key)) {
+          if (slot >= 0 && !serverDispatchClient(&runtime, slot, ioEventTunRead)) {
             goto cleanup;
           }
         }
@@ -796,21 +971,21 @@ int sessionServeMultiClient(
           (void)serverRuntimeRemoveClient(&runtime, slot);
           continue;
         }
-        if ((ev & EPOLLIN) != 0 && !serverDispatchClient(&runtime, slot, ioEventTcpRead, key)) {
+        if ((ev & EPOLLIN) != 0 && !serverDispatchClient(&runtime, slot, ioEventTcpRead)) {
           goto cleanup;
         }
         if ((ev & EPOLLOUT) != 0) {
           if (!ioPollerServiceWriteEvent(&runtime.slots[slot].poller, ioSourceTcp)) {
             goto cleanup;
           }
-          if (!serverDispatchClient(&runtime, slot, ioEventTcpWrite, key)) {
+          if (!serverDispatchClient(&runtime, slot, ioEventTcpWrite)) {
             goto cleanup;
           }
         }
       }
     }
 
-    if (!serverTickAllClients(&runtime, key)) {
+    if (!serverTickAllClients(&runtime)) {
       goto cleanup;
     }
   }

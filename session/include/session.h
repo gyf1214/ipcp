@@ -9,6 +9,7 @@ typedef struct session_t session_t;
 struct serverRuntime_t;
 
 typedef long long (*sessionNowMsFn_t)(void *ctx);
+typedef int (*sessionServerKeyLookupFn_t)(void *ctx, const char *claim, unsigned char key[ProtocolPskSize]);
 
 typedef struct {
   int intervalMs;
@@ -48,7 +49,10 @@ sessionStepResult_t sessionStep(
 int sessionServeMultiClient(
     int tunFd,
     int listenFd,
-    const unsigned char key[ProtocolPskSize],
+    sessionServerKeyLookupFn_t keyLookupFn,
+    void *keyLookupCtx,
+    const char *ifModeLabel,
+    int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxSessions);
 

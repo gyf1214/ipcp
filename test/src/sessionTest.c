@@ -15,10 +15,25 @@
 #include "testAssert.h"
 
 static long long fakeNowMs = 0;
+static unsigned char testServerKey[ProtocolPskSize] = {
+    0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+    0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f,
+    0x1f, 0x2e, 0x3d, 0x4c, 0x5b, 0x6a, 0x79, 0x88,
+    0x97, 0xa6, 0xb5, 0xc4, 0xd3, 0xe2, 0xf1, 0x00,
+};
 static const sessionHeartbeatConfig_t defaultHeartbeatCfg = {
     .intervalMs = 5000,
     .timeoutMs = 15000,
 };
+
+static int fakeLookup(void *ctx, const char *claim, unsigned char key[ProtocolPskSize]) {
+  (void)ctx;
+  if (claim == NULL || key == NULL) {
+    return -1;
+  }
+  memcpy(key, testServerKey, ProtocolPskSize);
+  return 0;
+}
 
 static long long fakeNow(void *ctx) {
   (void)ctx;
@@ -465,20 +480,17 @@ static void testSessionCreateRejectsInvalidHeartbeatConfig(void) {
 }
 
 static void testSessionServeMultiClientRejectsInvalidArgs(void) {
-  unsigned char key[ProtocolPskSize];
-  memset(key, 0x47, sizeof(key));
-
   testAssertTrue(
-      sessionServeMultiClient(-1, -1, key, &defaultHeartbeatCfg, 2) < 0,
+      sessionServeMultiClient(-1, -1, fakeLookup, NULL, "tun", 5000, &defaultHeartbeatCfg, 2) < 0,
       "server runtime should reject invalid fds");
   testAssertTrue(
-      sessionServeMultiClient(1, 2, NULL, &defaultHeartbeatCfg, 2) < 0,
-      "server runtime should reject null key");
+      sessionServeMultiClient(1, 2, NULL, NULL, "tun", 5000, &defaultHeartbeatCfg, 2) < 0,
+      "server runtime should reject null lookup callback");
   testAssertTrue(
-      sessionServeMultiClient(1, 2, key, NULL, 2) < 0,
+      sessionServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, NULL, 2) < 0,
       "server runtime should reject null heartbeat config");
   testAssertTrue(
-      sessionServeMultiClient(1, 2, key, &defaultHeartbeatCfg, 0) < 0,
+      sessionServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, &defaultHeartbeatCfg, 0) < 0,
       "server runtime should reject non-positive max session count");
 }
 
@@ -509,8 +521,8 @@ static void testSharedTunWriteInterestIsRuntimeOwned(void) {
       "add tun fd should succeed");
   testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "initial tun interest sync should succeed");
 
-  testAssertTrue(serverRuntimeAddClient(&runtime, tcpPairA[0]) == 0, "first client should be added");
-  testAssertTrue(serverRuntimeAddClient(&runtime, tcpPairB[0]) == 1, "second client should be added");
+  testAssertTrue(serverRuntimeAddClient(&runtime, tcpPairA[0], testServerKey, "10.0.0.2") == 0, "first client should be added");
+  testAssertTrue(serverRuntimeAddClient(&runtime, tcpPairB[0], testServerKey, "10.0.0.3") == 1, "second client should be added");
 
   testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadA, (long)strlen(payloadA)), "queue payload A should succeed");
   testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadB, (long)strlen(payloadB)), "queue payload B should succeed");
@@ -558,7 +570,7 @@ static void setupServerRuntimeForTest(
           == 0,
       "add tun fd should succeed");
 
-  *slotA = serverRuntimeAddClient(runtime, tcpPairA[0]);
+  *slotA = serverRuntimeAddClient(runtime, tcpPairA[0], testServerKey, "10.0.0.2");
   testAssertTrue(*slotA == 0, "first client should be added");
   testAssertTrue(
       epoll_ctl(
@@ -572,7 +584,7 @@ static void setupServerRuntimeForTest(
   *slotB = -1;
   if (maxSessions > 1) {
     testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
-    *slotB = serverRuntimeAddClient(runtime, tcpPairB[0]);
+    *slotB = serverRuntimeAddClient(runtime, tcpPairB[0], testServerKey, "10.0.0.3");
     testAssertTrue(*slotB == 1, "second client should be added");
     testAssertTrue(
         epoll_ctl(

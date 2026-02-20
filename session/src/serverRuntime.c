@@ -78,11 +78,15 @@ void serverRuntimeDeinit(serverRuntime_t *runtime) {
   memset(runtime, 0, sizeof(*runtime));
 }
 
-int serverRuntimeAddClient(serverRuntime_t *runtime, int connFd) {
+int serverRuntimeAddClient(
+    serverRuntime_t *runtime,
+    int connFd,
+    const unsigned char key[ProtocolPskSize],
+    const char *claim) {
   int i;
   session_t *session;
 
-  if (runtime == NULL || runtime->slots == NULL || connFd < 0) {
+  if (runtime == NULL || runtime->slots == NULL || connFd < 0 || key == NULL || claim == NULL) {
     return -1;
   }
   if (runtime->clientCount >= runtime->maxSessions) {
@@ -111,6 +115,9 @@ int serverRuntimeAddClient(serverRuntime_t *runtime, int connFd) {
     runtime->slots[i].poller.tunOutNbytes = 0;
     runtime->slots[i].poller.tcpOutOffset = 0;
     runtime->slots[i].poller.tcpOutNbytes = 0;
+    memcpy(runtime->slots[i].key, key, ProtocolPskSize);
+    strncpy(runtime->slots[i].claim, claim, sizeof(runtime->slots[i].claim) - 1);
+    runtime->slots[i].claim[sizeof(runtime->slots[i].claim) - 1] = '\0';
     runtime->slots[i].active = true;
     runtime->clientCount++;
     return i;
@@ -130,6 +137,8 @@ bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot) {
   sessionDestroy(runtime->slots[slot].session);
   runtime->slots[slot].poller.tcpOutOffset = 0;
   runtime->slots[slot].poller.tcpOutNbytes = 0;
+  memset(runtime->slots[slot].key, 0, sizeof(runtime->slots[slot].key));
+  memset(runtime->slots[slot].claim, 0, sizeof(runtime->slots[slot].claim));
   runtime->slots[slot].connFd = -1;
   runtime->slots[slot].session = NULL;
   runtime->slots[slot].active = false;
@@ -398,4 +407,27 @@ int serverRuntimeConnFdAt(const serverRuntime_t *runtime, int slot) {
     return -1;
   }
   return runtime->slots[slot].connFd;
+}
+
+const unsigned char *serverRuntimeKeyAt(const serverRuntime_t *runtime, int slot) {
+  if (!slotIndexValid(runtime, slot) || !runtime->slots[slot].active) {
+    return NULL;
+  }
+  return runtime->slots[slot].key;
+}
+
+bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const char *claim) {
+  int i;
+  if (runtime == NULL || runtime->slots == NULL || claim == NULL) {
+    return false;
+  }
+  for (i = 0; i < runtime->maxSessions; i++) {
+    if (!runtime->slots[i].active) {
+      continue;
+    }
+    if (strcmp(runtime->slots[i].claim, claim) == 0) {
+      return true;
+    }
+  }
+  return false;
 }

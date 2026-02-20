@@ -78,6 +78,18 @@ run_case() {
   local serverConfig="$tmpDir/server_${ifMode}.json"
   local clientConfig="$tmpDir/client_${ifMode}.json"
   local result=0
+  local claimField=""
+  local claimValue=""
+  local serverCredential=""
+
+  if [[ "$ifMode" == "tun" ]]; then
+    claimField="tun_ip"
+    claimValue="10.250.0.2"
+  else
+    claimField="tap_mac"
+    claimValue="02:11:22:33:44:55"
+  fi
+  serverCredential="{ \"$claimField\": \"$claimValue\", \"key_file\": \"$keyFile\" }"
 
   head -c 32 /dev/urandom > "$keyFile"
 
@@ -88,7 +100,10 @@ run_case() {
   "if_mode": "$ifMode",
   "listen_ip": "10.200.1.1",
   "listen_port": 46000,
-  "key_file": "$keyFile"
+  "auth_timeout_ms": 5000,
+  "credentials": [
+    $serverCredential
+  ]
 }
 JSON
 
@@ -97,6 +112,7 @@ JSON
   "mode": "client",
   "if_name": "$ifName",
   "if_mode": "$ifMode",
+  "$claimField": "$claimValue",
   "server_ip": "10.200.1.1",
   "server_port": 46000,
   "key_file": "$keyFile"
