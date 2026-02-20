@@ -301,8 +301,6 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
     keyStoreLoaded = true;
-    memcpy(key, keyStore.entries[0].key, sizeof(key));
-    keyLoaded = true;
   } else {
     if (cryptLoadKeyFromFile(key, cfg.keyFile) != 0) {
       errf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
