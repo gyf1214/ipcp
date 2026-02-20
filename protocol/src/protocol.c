@@ -13,7 +13,9 @@ static long protocolMessageHeaderSize() {
 static int protocolMessageTypeValid(protocolMessageType_t type) {
   return type == protocolMsgData
       || type == protocolMsgHeartbeatReq
-      || type == protocolMsgHeartbeatAck;
+      || type == protocolMsgHeartbeatAck
+      || type == protocolMsgAuthChallenge
+      || type == protocolMsgClientHello;
 }
 
 static long protocolExpectedSize(const protocolDecoder_t *decoder) {
@@ -175,6 +177,12 @@ protocolStatus_t protocolMessageEncodeFrame(const protocolMessage_t *msg, protoc
   if ((msg->type == protocolMsgHeartbeatReq || msg->type == protocolMsgHeartbeatAck) && msg->nbytes != 0) {
     return protocolStatusBadFrame;
   }
+  if (msg->type == protocolMsgAuthChallenge && msg->nbytes != ProtocolNonceSize) {
+    return protocolStatusBadFrame;
+  }
+  if (msg->type == protocolMsgClientHello && msg->nbytes != ProtocolNonceSize * 2) {
+    return protocolStatusBadFrame;
+  }
   if (msg->nbytes > 0 && msg->buf == NULL) {
     return protocolStatusBadFrame;
   }
@@ -219,6 +227,12 @@ protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protoc
     return protocolStatusBadFrame;
   }
   if ((type == protocolMsgHeartbeatReq || type == protocolMsgHeartbeatAck) && nbytes != 0) {
+    return protocolStatusBadFrame;
+  }
+  if (type == protocolMsgAuthChallenge && nbytes != ProtocolNonceSize) {
+    return protocolStatusBadFrame;
+  }
+  if (type == protocolMsgClientHello && nbytes != ProtocolNonceSize * 2) {
     return protocolStatusBadFrame;
   }
 

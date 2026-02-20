@@ -378,6 +378,80 @@ void testMessageHeartbeatAckRoundTrip() {
   testAssertTrue(out.nbytes == 0, "decoded heartbeat ack should be empty");
 }
 
+void testMessageAuthChallengeRoundTrip() {
+  unsigned char nonce[ProtocolNonceSize];
+  memset(nonce, 0x17, sizeof(nonce));
+  protocolMessage_t in = {
+      .type = protocolMsgAuthChallenge,
+      .nbytes = ProtocolNonceSize,
+      .buf = (const char *)nonce,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolMessageEncodeFrame(&in, &frame);
+  testAssertTrue(status == protocolStatusOk, "auth challenge encode should succeed");
+
+  protocolMessage_t out;
+  status = protocolMessageDecodeFrame(&frame, &out);
+  testAssertTrue(status == protocolStatusOk, "auth challenge decode should succeed");
+  testAssertTrue(out.type == protocolMsgAuthChallenge, "decoded auth challenge type should match");
+  testAssertTrue(out.nbytes == ProtocolNonceSize, "decoded auth challenge nonce size should match");
+  testAssertTrue(memcmp(out.buf, nonce, ProtocolNonceSize) == 0, "decoded auth challenge nonce should match");
+}
+
+void testMessageClientHelloRoundTrip() {
+  unsigned char nonces[ProtocolNonceSize * 2];
+  memset(nonces, 0x29, sizeof(nonces));
+  protocolMessage_t in = {
+      .type = protocolMsgClientHello,
+      .nbytes = ProtocolNonceSize * 2,
+      .buf = (const char *)nonces,
+  };
+  protocolFrame_t frame;
+  protocolStatus_t status = protocolMessageEncodeFrame(&in, &frame);
+  testAssertTrue(status == protocolStatusOk, "client hello encode should succeed");
+
+  protocolMessage_t out;
+  status = protocolMessageDecodeFrame(&frame, &out);
+  testAssertTrue(status == protocolStatusOk, "client hello decode should succeed");
+  testAssertTrue(out.type == protocolMsgClientHello, "decoded client hello type should match");
+  testAssertTrue(out.nbytes == ProtocolNonceSize * 2, "decoded client hello nonce pair size should match");
+  testAssertTrue(memcmp(out.buf, nonces, ProtocolNonceSize * 2) == 0, "decoded client hello payload should match");
+}
+
+void testMessageRejectInvalidAuthPayloadSizes() {
+  unsigned char payload[ProtocolNonceSize * 2];
+  memset(payload, 0x33, sizeof(payload));
+  protocolFrame_t frame;
+  protocolStatus_t status;
+
+  protocolMessage_t badChallenge = {
+      .type = protocolMsgAuthChallenge,
+      .nbytes = ProtocolNonceSize - 1,
+      .buf = (const char *)payload,
+  };
+  status = protocolMessageEncodeFrame(&badChallenge, &frame);
+  testAssertTrue(status == protocolStatusBadFrame, "auth challenge with wrong nonce size should fail");
+
+  protocolMessage_t badHello = {
+      .type = protocolMsgClientHello,
+      .nbytes = ProtocolNonceSize,
+      .buf = (const char *)payload,
+  };
+  status = protocolMessageEncodeFrame(&badHello, &frame);
+  testAssertTrue(status == protocolStatusBadFrame, "client hello with wrong payload size should fail");
+
+  frame.nbytes = 5 + ProtocolNonceSize - 1;
+  frame.buf[0] = (char)protocolMsgAuthChallenge;
+  frame.buf[1] = 0x00;
+  frame.buf[2] = 0x00;
+  frame.buf[3] = 0x00;
+  frame.buf[4] = (char)(ProtocolNonceSize - 1);
+  memset(frame.buf + 5, 0x44, ProtocolNonceSize - 1);
+  protocolMessage_t out;
+  status = protocolMessageDecodeFrame(&frame, &out);
+  testAssertTrue(status == protocolStatusBadFrame, "decoder should reject invalid auth challenge payload size");
+}
+
 void testMessageRejectInvalidType() {
   protocolFrame_t frame;
   frame.buf[0] = (char)0x7f;
@@ -465,6 +539,9 @@ void runProtocolTests(void) {
   testMessageDataRoundTrip();
   testMessageHeartbeatReqRoundTrip();
   testMessageHeartbeatAckRoundTrip();
+  testMessageAuthChallengeRoundTrip();
+  testMessageClientHelloRoundTrip();
+  testMessageRejectInvalidAuthPayloadSizes();
   testMessageRejectInvalidType();
   testMessageRejectInvalidSizeTypeCombo();
   testMessageEncodeUsesFixedBigEndianLengthHeader();
