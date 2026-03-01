@@ -28,7 +28,6 @@ typedef enum {
   protocolMsgData = 1,
   protocolMsgHeartbeatReq = 2,
   protocolMsgHeartbeatAck = 3,
-  protocolMsgAuthChallenge = 4,
   protocolMsgClientHello = 5,
 } protocolMessageType_t;
 

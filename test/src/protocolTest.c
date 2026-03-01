@@ -411,17 +411,17 @@ void testMessageRejectInvalidType() {
   testAssertTrue(status == protocolStatusBadFrame, "invalid message type should fail");
 }
 
-void testMessageRejectAuthChallengeType() {
+void testMessageRejectLegacyChallengeTypeValue() {
   unsigned char nonce[ProtocolNonceSize];
   memset(nonce, 0x17, sizeof(nonce));
   protocolMessage_t challenge = {
-      .type = protocolMsgAuthChallenge,
+      .type = (protocolMessageType_t)4,
       .nbytes = ProtocolNonceSize,
       .buf = (const char *)nonce,
   };
   protocolFrame_t frame;
   protocolStatus_t status = protocolMessageEncodeFrame(&challenge, &frame);
-  testAssertTrue(status == protocolStatusBadFrame, "typed auth challenge should no longer encode");
+  testAssertTrue(status == protocolStatusBadFrame, "legacy challenge type value should be rejected");
 }
 
 void testMessageRejectInvalidSizeTypeCombo() {
@@ -510,7 +510,7 @@ void runProtocolTests(void) {
   testMessageHeartbeatAckRoundTrip();
   testMessageClientHelloRoundTrip();
   testMessageRejectInvalidType();
-  testMessageRejectAuthChallengeType();
+  testMessageRejectLegacyChallengeTypeValue();
   testMessageRejectInvalidSizeTypeCombo();
   testMessageEncodeUsesFixedBigEndianLengthHeader();
   testMessageDecodeUsesFixedBigEndianLengthHeader();
