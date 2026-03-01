@@ -21,9 +21,9 @@ struct session_t {
   sessionNowMsFn_t nowFn;
   void *nowCtx;
   protocolDecoder_t tcpDecoder;
-  char tcpBuf[ProtocolFrameSize];
-  char tcpBufferedBuf[ProtocolFrameSize];
-  long tcpBufferedNbytes;
+  char tcpReadBuf[ProtocolFrameSize];
+  char tcpReadCarryBuf[ProtocolFrameSize];
+  long tcpReadCarryNbytes;
   long long lastValidInboundMs;
   long long lastDataSentMs;
   long long lastDataRecvMs;
@@ -34,10 +34,10 @@ struct session_t {
   long long lastHeartbeatReqMs;
   bool tunReadPaused;
   bool tcpReadPaused;
-  long pendingTcpNbytes;
-  char pendingTcpBuf[ProtocolWireLengthSize + ProtocolFrameSize];
-  long pendingTunNbytes;
-  char pendingTunBuf[ProtocolFrameSize];
+  long tcpWritePendingNbytes;
+  char tcpWritePendingBuf[ProtocolWireLengthSize + ProtocolFrameSize];
+  long tunWritePendingNbytes;
+  char tunWritePendingBuf[ProtocolFrameSize];
 };
 
 typedef enum {
@@ -130,7 +130,7 @@ static queueResult_t queueTcpWithBackpressure(ioPoller_t *poller, session_t *ses
   long queued;
   int ownerSlot;
 
-  if (session->pendingTcpNbytes > 0) {
+  if (session->tcpWritePendingNbytes > 0) {
     return queueResultBlocked;
   }
   if (session->isServer && session->runtime != NULL && serverRuntimeHasPendingTunToTcp(session->runtime)) {
@@ -157,8 +157,8 @@ static queueResult_t queueTcpWithBackpressure(ioPoller_t *poller, session_t *ses
       session->tunReadPaused = true;
       return queueResultBlocked;
     }
-    memcpy(session->pendingTcpBuf, data, (size_t)nbytes);
-    session->pendingTcpNbytes = nbytes;
+    memcpy(session->tcpWritePendingBuf, data, (size_t)nbytes);
+    session->tcpWritePendingNbytes = nbytes;
     if (!pauseReadSourceForSession(session, poller, ioSourceTun, &session->tunReadPaused)) {
       return queueResultError;
     }
@@ -170,7 +170,7 @@ static queueResult_t queueTcpWithBackpressure(ioPoller_t *poller, session_t *ses
 static queueResult_t queueTunWithBackpressure(ioPoller_t *poller, session_t *session, const void *data, long nbytes) {
   long queued;
 
-  if (session->pendingTunNbytes > 0) {
+  if (session->tunWritePendingNbytes > 0) {
     return queueResultBlocked;
   }
   if (session->isServer && session->runtime != NULL) {
@@ -187,8 +187,8 @@ static queueResult_t queueTunWithBackpressure(ioPoller_t *poller, session_t *ses
     return queueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
-    memcpy(session->pendingTunBuf, data, (size_t)nbytes);
-    session->pendingTunNbytes = nbytes;
+    memcpy(session->tunWritePendingBuf, data, (size_t)nbytes);
+    session->tunWritePendingNbytes = nbytes;
     if (!pauseReadSourceForSession(session, poller, ioSourceTcp, &session->tcpReadPaused)) {
       return queueResultError;
     }
@@ -218,35 +218,35 @@ static bool serviceBackpressure(ioPoller_t *poller, session_t *session, ioEvent_
     }
   }
 
-  if (!serverMode && session->pendingTcpNbytes > 0) {
-    if (ioPollerQueueWrite(poller, ioSourceTcp, session->pendingTcpBuf, session->pendingTcpNbytes)) {
-      session->pendingTcpNbytes = 0;
+  if (!serverMode && session->tcpWritePendingNbytes > 0) {
+    if (ioPollerQueueWrite(poller, ioSourceTcp, session->tcpWritePendingBuf, session->tcpWritePendingNbytes)) {
+      session->tcpWritePendingNbytes = 0;
     } else {
       queued = ioPollerQueuedBytes(poller, ioSourceTcp);
-      if (queued < 0 || queued + session->pendingTcpNbytes <= IoPollerQueueCapacity) {
+      if (queued < 0 || queued + session->tcpWritePendingNbytes <= IoPollerQueueCapacity) {
         return false;
       }
     }
   }
 
-  if (session->pendingTunNbytes > 0) {
+  if (session->tunWritePendingNbytes > 0) {
     bool queuedTun = false;
     if (session->isServer && session->runtime != NULL) {
-      queuedTun = serverRuntimeQueueTunWrite(session->runtime, session->pendingTunBuf, session->pendingTunNbytes);
+      queuedTun = serverRuntimeQueueTunWrite(session->runtime, session->tunWritePendingBuf, session->tunWritePendingNbytes);
     } else {
-      queuedTun = ioPollerQueueWrite(poller, ioSourceTun, session->pendingTunBuf, session->pendingTunNbytes);
+      queuedTun = ioPollerQueueWrite(poller, ioSourceTun, session->tunWritePendingBuf, session->tunWritePendingNbytes);
     }
     if (queuedTun) {
-      session->pendingTunNbytes = 0;
+      session->tunWritePendingNbytes = 0;
     } else {
       queued = queuedBytesForDestination(session, poller, ioSourceTun);
-      if (queued < 0 || queued + session->pendingTunNbytes <= IoPollerQueueCapacity) {
+      if (queued < 0 || queued + session->tunWritePendingNbytes <= IoPollerQueueCapacity) {
         return false;
       }
     }
   }
 
-  if (!maybeResumeReadSource(session, poller, ioSourceTcp, ioSourceTun, &session->tcpReadPaused, session->pendingTunNbytes)) {
+  if (!maybeResumeReadSource(session, poller, ioSourceTcp, ioSourceTun, &session->tcpReadPaused, session->tunWritePendingNbytes)) {
     return false;
   }
 
@@ -272,7 +272,7 @@ static bool serviceBackpressure(ioPoller_t *poller, session_t *session, ioEvent_
   }
 
   return maybeResumeReadSource(
-      session, poller, ioSourceTun, ioSourceTcp, &session->tunReadPaused, session->pendingTcpNbytes);
+      session, poller, ioSourceTun, ioSourceTcp, &session->tunReadPaused, session->tcpWritePendingNbytes);
 }
 
 static queueResult_t sendMessage(
@@ -440,20 +440,20 @@ static bool pipeTcp(
   int k;
   ioStatus_t readStatus;
 
-  if (session->tcpBufferedNbytes > 0) {
-    if (!pipeTcpBytes(poller, key, session, session->tcpBufferedBuf, (int)session->tcpBufferedNbytes, &consumed)) {
+  if (session->tcpReadCarryNbytes > 0) {
+    if (!pipeTcpBytes(poller, key, session, session->tcpReadCarryBuf, (int)session->tcpReadCarryNbytes, &consumed)) {
       return false;
     }
-    if (consumed < session->tcpBufferedNbytes) {
-      long rem = session->tcpBufferedNbytes - consumed;
-      memmove(session->tcpBufferedBuf, session->tcpBufferedBuf + consumed, (size_t)rem);
-      session->tcpBufferedNbytes = rem;
+    if (consumed < session->tcpReadCarryNbytes) {
+      long rem = session->tcpReadCarryNbytes - consumed;
+      memmove(session->tcpReadCarryBuf, session->tcpReadCarryBuf + consumed, (size_t)rem);
+      session->tcpReadCarryNbytes = rem;
       return true;
     }
-    session->tcpBufferedNbytes = 0;
+    session->tcpReadCarryNbytes = 0;
   }
 
-  readStatus = ioReadSome(poller->tcpFd, session->tcpBuf, sizeof(session->tcpBuf), &nbytes);
+  readStatus = ioReadSome(poller->tcpFd, session->tcpReadBuf, sizeof(session->tcpReadBuf), &nbytes);
   if (readStatus == ioStatusWouldBlock) {
     return true;
   }
@@ -461,13 +461,13 @@ static bool pipeTcp(
     return false;
   }
   k = (int)nbytes;
-  if (!pipeTcpBytes(poller, key, session, session->tcpBuf, k, &consumed)) {
+  if (!pipeTcpBytes(poller, key, session, session->tcpReadBuf, k, &consumed)) {
     return false;
   }
   if (consumed < k) {
     long rem = (long)(k - consumed);
-    memcpy(session->tcpBufferedBuf, session->tcpBuf + consumed, (size_t)rem);
-    session->tcpBufferedNbytes = rem;
+    memcpy(session->tcpReadCarryBuf, session->tcpReadBuf + consumed, (size_t)rem);
+    session->tcpReadCarryNbytes = rem;
   }
 
   return true;
@@ -591,9 +591,9 @@ bool sessionGetStats(const session_t *session, sessionStats_t *outStats) {
   outStats->lastHeartbeatReqMs = session->lastHeartbeatReqMs;
   outStats->tunReadPaused = session->tunReadPaused;
   outStats->tcpReadPaused = session->tcpReadPaused;
-  outStats->pendingTcpNbytes = session->pendingTcpNbytes;
-  outStats->pendingTunNbytes = session->pendingTunNbytes;
-  outStats->tcpBufferedNbytes = session->tcpBufferedNbytes;
+  outStats->tcpWritePendingNbytes = session->tcpWritePendingNbytes;
+  outStats->tunWritePendingNbytes = session->tunWritePendingNbytes;
+  outStats->tcpReadCarryNbytes = session->tcpReadCarryNbytes;
   return true;
 }
 
@@ -608,7 +608,7 @@ bool sessionHasPendingTunEgress(const session_t *session) {
   if (session == NULL) {
     return false;
   }
-  return session->pendingTunNbytes > 0;
+  return session->tunWritePendingNbytes > 0;
 }
 
 bool sessionServiceBackpressure(session_t *session, ioPoller_t *poller) {

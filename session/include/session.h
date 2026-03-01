@@ -31,9 +31,9 @@ typedef struct {
   long long lastHeartbeatReqMs;
   bool tunReadPaused;
   bool tcpReadPaused;
-  long pendingTcpNbytes;
-  long pendingTunNbytes;
-  long tcpBufferedNbytes;
+  long tcpWritePendingNbytes;
+  long tunWritePendingNbytes;
+  long tcpReadCarryNbytes;
 } sessionStats_t;
 
 session_t *sessionCreate(

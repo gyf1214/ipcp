@@ -147,13 +147,13 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
       sessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "session should stay alive on overflow backpressure");
   testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.pendingTcpNbytes > 0, "pending tcp bytes should be tracked");
+  testAssertTrue(stats.tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
   testAssertTrue(stats.tunReadPaused, "tun read should be paused under overflow");
 
   sessionReset(session);
   testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed after reset");
-  testAssertTrue(stats.pendingTcpNbytes == 0, "reset should clear pending tcp bytes");
-  testAssertTrue(stats.pendingTunNbytes == 0, "reset should clear pending tun bytes");
+  testAssertTrue(stats.tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
+  testAssertTrue(stats.tunWritePendingNbytes == 0, "reset should clear pending tun bytes");
   testAssertTrue(!stats.tunReadPaused, "reset should clear tun pause");
   testAssertTrue(!stats.tcpReadPaused, "reset should clear tcp pause");
   sessionDestroy(session);
@@ -444,7 +444,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
       "overflow path should continue");
   testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
   testAssertTrue(stats.tunReadPaused, "tun read should be paused");
-  testAssertTrue(stats.pendingTcpNbytes > 0, "pending tcp payload should be retained");
+  testAssertTrue(stats.tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
 
   testAssertTrue(ioPollerWait(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
   testAssertTrue(read(tcpPair[1], drain, sizeof(drain)) > 0, "drain should consume queued bytes");
@@ -452,7 +452,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
       sessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
       "service backpressure should continue");
   testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.pendingTcpNbytes == 0, "pending tcp payload should flush");
+  testAssertTrue(stats.tcpWritePendingNbytes == 0, "pending tcp payload should flush");
   testAssertTrue(!stats.tunReadPaused, "tun read should resume when queue drains");
 
   sessionDestroy(session);
@@ -656,7 +656,7 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
       sessionStep(session, poller, ioEventTunRead, key) == sessionStepContinue,
       "session should continue on overflow");
   testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.pendingTcpNbytes == 0, "server overflow should retain pending data in runtime, not session");
+  testAssertTrue(stats.tcpWritePendingNbytes == 0, "server overflow should retain pending data in runtime, not session");
   testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "runtime should disable tun epollin while pending exists");
 
   teardownServerRuntimeForTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
@@ -699,7 +699,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       sessionStep(ownerSession, ownerPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow on owner should continue");
   testAssertTrue(sessionGetStats(ownerSession, &ownerStats), "sessionGetStats should succeed");
-  testAssertTrue(ownerStats.pendingTcpNbytes == 0, "owner session should not keep runtime pending bytes locally");
+  testAssertTrue(ownerStats.tcpWritePendingNbytes == 0, "owner session should not keep runtime pending bytes locally");
   testAssertTrue((runtime.tunEvents & EPOLLIN) == 0, "tun epollin should be disabled while runtime pending exists");
 
   testAssertTrue(
