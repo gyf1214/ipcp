@@ -52,7 +52,7 @@ static long writeSecureWire(
       .buf = payload,
   };
   protocolFrame_t frame;
-  protocolStatus_t status = protocolSecureEncodeMessage(&msg, key, &frame);
+  protocolStatus_t status = protocolEncodeSecureMsg(&msg, key, &frame);
   testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
 
   uint32_t wireLen = htonl((uint32_t)frame.nbytes);
@@ -376,7 +376,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
 
   protocolDecoderInit(&decoder);
   testAssertTrue(
-      protocolSecureDecoderReadMessage(&decoder, key, out, nbytes, &consumed, &msg) == protocolStatusOk,
+      protocolDecodeSecureMsg(&decoder, key, out, nbytes, &consumed, &msg) == protocolStatusOk,
       "received wire frame should decode");
   testAssertTrue(msg.type == protocolMsgData, "decoded message type should be data");
   testAssertTrue(msg.nbytes == (long)strlen(payload), "decoded payload length should match");

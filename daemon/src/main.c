@@ -101,16 +101,46 @@ static int readWireFrame(int fd, protocolFrame_t *frame) {
   return readAll(fd, frame->buf, frame->nbytes);
 }
 
+static int decodeRawWireFrame(const protocolFrame_t *frame, protocolRawMsg_t *msg) {
+  protocolDecoder_t decoder;
+  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  uint32_t wireLen = 0;
+  long consumed = 0;
+
+  if (frame == NULL || msg == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+    return -1;
+  }
+
+  wireLen = htonl((uint32_t)frame->nbytes);
+  memcpy(wire, &wireLen, ProtocolWireLengthSize);
+  memcpy(wire + ProtocolWireLengthSize, frame->buf, (size_t)frame->nbytes);
+
+  protocolDecoderInit(&decoder);
+  if (protocolDecodeRaw(
+          &decoder,
+          wire,
+          ProtocolWireLengthSize + frame->nbytes,
+          &consumed,
+          msg)
+      != protocolStatusOk) {
+    return -1;
+  }
+  return consumed == ProtocolWireLengthSize + frame->nbytes ? 0 : -1;
+}
+
 static int clientRunPreAuthHandshake(
     int connFd, const char *claim, const unsigned char key[ProtocolPskSize]) {
   protocolFrame_t frame;
+  protocolRawMsg_t rawMsg;
   protocolMessage_t msg;
   unsigned char helloPayload[ProtocolNonceSize * 2];
 
   if (claim == NULL || claim[0] == '\0' || key == NULL) {
     return -1;
   }
-  if (protocolEncode(claim, (long)strlen(claim), &frame) != protocolStatusOk) {
+  rawMsg.nbytes = (long)strlen(claim);
+  rawMsg.buf = claim;
+  if (protocolEncodeRaw(&rawMsg, &frame) != protocolStatusOk) {
     return -1;
   }
   if (writeWireFrame(connFd, &frame) != 0) {
@@ -120,19 +150,19 @@ static int clientRunPreAuthHandshake(
   if (readWireFrame(connFd, &frame) != 0) {
     return -1;
   }
-  if (protocolMessageDecodeFrame(&frame, &msg) != protocolStatusOk) {
+  if (decodeRawWireFrame(&frame, &rawMsg) != 0) {
     return -1;
   }
-  if (msg.type != protocolMsgAuthChallenge || msg.nbytes != ProtocolNonceSize) {
+  if (rawMsg.nbytes != ProtocolNonceSize) {
     return -1;
   }
 
-  memcpy(helloPayload, msg.buf, ProtocolNonceSize);
+  memcpy(helloPayload, rawMsg.buf, ProtocolNonceSize);
   randombytes_buf(helloPayload + ProtocolNonceSize, ProtocolNonceSize);
   msg.type = protocolMsgClientHello;
   msg.nbytes = sizeof(helloPayload);
   msg.buf = (const char *)helloPayload;
-  if (protocolSecureEncodeMessage(&msg, key, &frame) != protocolStatusOk) {
+  if (protocolEncodeSecureMsg(&msg, key, &frame) != protocolStatusOk) {
     return -1;
   }
   if (writeWireFrame(connFd, &frame) != 0) {

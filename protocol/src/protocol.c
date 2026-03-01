@@ -14,7 +14,6 @@ static int protocolMessageTypeValid(protocolMessageType_t type) {
   return type == protocolMsgData
       || type == protocolMsgHeartbeatReq
       || type == protocolMsgHeartbeatAck
-      || type == protocolMsgAuthChallenge
       || type == protocolMsgClientHello;
 }
 
@@ -52,16 +51,16 @@ static int protocolLengthFromWire(const unsigned char in[ProtocolWireLengthSize]
   return *nbytes >= 0 && *nbytes <= ProtocolFrameSize;
 }
 
-protocolStatus_t protocolEncode(const void *payload, long nbytes, protocolFrame_t *frame) {
-  if (frame == NULL || nbytes <= 0 || nbytes > ProtocolFrameSize) {
+protocolStatus_t protocolEncodeRaw(const protocolRawMsg_t *msg, protocolFrame_t *frame) {
+  if (msg == NULL || frame == NULL || msg->nbytes <= 0 || msg->nbytes > ProtocolFrameSize) {
     return protocolStatusBadFrame;
   }
-  if (payload == NULL) {
+  if (msg->buf == NULL) {
     return protocolStatusBadFrame;
   }
 
-  frame->nbytes = nbytes;
-  memcpy(frame->buf, payload, (size_t)nbytes);
+  frame->nbytes = msg->nbytes;
+  memcpy(frame->buf, msg->buf, (size_t)msg->nbytes);
   return protocolStatusOk;
 }
 
@@ -69,7 +68,7 @@ void protocolDecoderInit(protocolDecoder_t *decoder) {
   memset(decoder, 0, sizeof(*decoder));
 }
 
-protocolStatus_t protocolDecodeFeed(
+static protocolStatus_t protocolDecodeFeedFrame(
     protocolDecoder_t *decoder, const void *data, long nbytes, long *consumed) {
   long totalConsumed = 0;
   if (decoder == NULL || (data == NULL && nbytes > 0)) {
@@ -145,19 +144,29 @@ protocolStatus_t protocolDecodeFeed(
   return decoder->hasFrame ? protocolStatusOk : protocolStatusNeedMore;
 }
 
-protocolStatus_t protocolDecoderTakeMessage(protocolDecoder_t *decoder, protocolMessage_t *msg) {
-  protocolFrame_t frame;
+protocolStatus_t protocolDecodeRaw(
+    protocolDecoder_t *decoder, const void *data, long nbytes, long *consumed, protocolRawMsg_t *msg) {
   protocolStatus_t status;
-
-  if (decoder == NULL || msg == NULL) {
+  protocolFrame_t frame;
+  if (decoder == NULL || msg == NULL || (data == NULL && nbytes > 0)) {
+    if (consumed != NULL) {
+      *consumed = 0;
+    }
     return protocolStatusBadFrame;
+  }
+
+  status = protocolDecodeFeedFrame(decoder, data, nbytes, consumed);
+  if (status != protocolStatusOk) {
+    return status;
   }
 
   status = protocolDecoderTakeFrame(decoder, &frame);
   if (status != protocolStatusOk) {
     return status;
   }
-  return protocolMessageDecodeFrame(&frame, msg);
+  msg->nbytes = frame.nbytes;
+  msg->buf = frame.buf;
+  return protocolStatusOk;
 }
 
 long protocolMessageMaxPayloadSize() {
@@ -175,9 +184,6 @@ protocolStatus_t protocolMessageEncodeFrame(const protocolMessage_t *msg, protoc
     return protocolStatusBadFrame;
   }
   if ((msg->type == protocolMsgHeartbeatReq || msg->type == protocolMsgHeartbeatAck) && msg->nbytes != 0) {
-    return protocolStatusBadFrame;
-  }
-  if (msg->type == protocolMsgAuthChallenge && msg->nbytes != ProtocolNonceSize) {
     return protocolStatusBadFrame;
   }
   if (msg->type == protocolMsgClientHello && msg->nbytes != ProtocolNonceSize * 2) {
@@ -229,9 +235,6 @@ protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protoc
   if ((type == protocolMsgHeartbeatReq || type == protocolMsgHeartbeatAck) && nbytes != 0) {
     return protocolStatusBadFrame;
   }
-  if (type == protocolMsgAuthChallenge && nbytes != ProtocolNonceSize) {
-    return protocolStatusBadFrame;
-  }
   if (type == protocolMsgClientHello && nbytes != ProtocolNonceSize * 2) {
     return protocolStatusBadFrame;
   }
@@ -242,7 +245,7 @@ protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protoc
   return protocolStatusOk;
 }
 
-protocolStatus_t protocolSecureEncodeMessage(
+protocolStatus_t protocolEncodeSecureMsg(
     const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize], protocolFrame_t *frame) {
   protocolStatus_t status = protocolMessageEncodeFrame(msg, frame);
   if (status != protocolStatusOk) {
@@ -251,7 +254,7 @@ protocolStatus_t protocolSecureEncodeMessage(
   return protocolFrameEncrypt(frame, key);
 }
 
-protocolStatus_t protocolSecureDecodeFrame(
+static protocolStatus_t protocolDecodeSecureFrame(
     protocolFrame_t *frame, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg) {
   protocolStatus_t status = protocolFrameDecrypt(frame, key);
   if (status != protocolStatusOk) {
@@ -260,7 +263,7 @@ protocolStatus_t protocolSecureDecodeFrame(
   return protocolMessageDecodeFrame(frame, msg);
 }
 
-protocolStatus_t protocolSecureDecoderReadMessage(
+protocolStatus_t protocolDecodeSecureMsg(
     protocolDecoder_t *decoder,
     const unsigned char key[ProtocolPskSize],
     const void *data,
@@ -277,7 +280,7 @@ protocolStatus_t protocolSecureDecoderReadMessage(
     return protocolStatusBadFrame;
   }
 
-  status = protocolDecodeFeed(decoder, data, nbytes, consumed);
+  status = protocolDecodeFeedFrame(decoder, data, nbytes, consumed);
   if (status != protocolStatusOk) {
     return status;
   }
@@ -286,7 +289,7 @@ protocolStatus_t protocolSecureDecoderReadMessage(
   if (status != protocolStatusOk) {
     return status;
   }
-  return protocolSecureDecodeFrame(&frame, key, msg);
+  return protocolDecodeSecureFrame(&frame, key, msg);
 }
 
 long protocolMaxPlaintextSize() {

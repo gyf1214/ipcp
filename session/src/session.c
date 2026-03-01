@@ -282,7 +282,7 @@ static queueResult_t sendMessage(
   long wireNbytes;
   uint32_t wireLength;
 
-  if (protocolSecureEncodeMessage(msg, key, &frame) != protocolStatusOk) {
+  if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
     return queueResultError;
   }
 
@@ -403,7 +403,7 @@ static bool pipeTcpBytes(
 
   while (offset < k) {
     consumed = 0;
-    status = protocolSecureDecoderReadMessage(
+    status = protocolDecodeSecureMsg(
         &session->tcpDecoder, key, buf + offset, k - offset, &consumed, &msg);
     if (status == protocolStatusBadFrame) {
       logf("bad frame");
@@ -747,6 +747,64 @@ static bool authWriteWireFrame(int fd, const protocolFrame_t *frame) {
   return authWriteAll(fd, frame->buf, frame->nbytes);
 }
 
+static bool authDecodeRawFrame(const protocolFrame_t *frame, protocolRawMsg_t *outMsg) {
+  protocolDecoder_t decoder;
+  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  uint32_t wireNbytes = 0;
+  long consumed = 0;
+
+  if (frame == NULL || outMsg == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+    return false;
+  }
+
+  wireNbytes = htonl((uint32_t)frame->nbytes);
+  memcpy(wire, &wireNbytes, ProtocolWireLengthSize);
+  memcpy(wire + ProtocolWireLengthSize, frame->buf, (size_t)frame->nbytes);
+
+  protocolDecoderInit(&decoder);
+  if (protocolDecodeRaw(
+          &decoder,
+          wire,
+          ProtocolWireLengthSize + frame->nbytes,
+          &consumed,
+          outMsg)
+      != protocolStatusOk) {
+    return false;
+  }
+  return consumed == ProtocolWireLengthSize + frame->nbytes;
+}
+
+static bool authDecodeSecureFrame(
+    const protocolFrame_t *frame,
+    const unsigned char key[ProtocolPskSize],
+    protocolMessage_t *outMsg) {
+  protocolDecoder_t decoder;
+  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  uint32_t wireNbytes = 0;
+  long consumed = 0;
+
+  if (frame == NULL || key == NULL || outMsg == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+    return false;
+  }
+
+  wireNbytes = htonl((uint32_t)frame->nbytes);
+  memcpy(wire, &wireNbytes, ProtocolWireLengthSize);
+  memcpy(wire + ProtocolWireLengthSize, frame->buf, (size_t)frame->nbytes);
+
+  protocolDecoderInit(&decoder);
+  if (protocolDecodeSecureMsg(
+          &decoder,
+          key,
+          wire,
+          ProtocolWireLengthSize + frame->nbytes,
+          &consumed,
+          outMsg)
+      != protocolStatusOk) {
+    return false;
+  }
+  return consumed == ProtocolWireLengthSize + frame->nbytes;
+}
+
 static bool serverAuthenticateClient(
     int connFd,
     const char *ifModeLabel,
@@ -757,6 +815,7 @@ static bool serverAuthenticateClient(
     unsigned char outKey[ProtocolPskSize]) {
   protocolFrame_t frame;
   protocolMessage_t msg;
+  protocolRawMsg_t rawMsg;
   unsigned char serverNonce[ProtocolNonceSize];
   unsigned char helloPayload[ProtocolNonceSize * 2];
 
@@ -767,11 +826,14 @@ static bool serverAuthenticateClient(
   if (!authReadWireFrame(connFd, authTimeoutMs, &frame)) {
     return false;
   }
-  if (frame.nbytes <= 0 || frame.nbytes >= SessionClaimSize) {
+  if (!authDecodeRawFrame(&frame, &rawMsg)) {
     return false;
   }
-  memcpy(outClaim, frame.buf, (size_t)frame.nbytes);
-  outClaim[frame.nbytes] = '\0';
+  if (rawMsg.nbytes <= 0 || rawMsg.nbytes >= SessionClaimSize) {
+    return false;
+  }
+  memcpy(outClaim, rawMsg.buf, (size_t)rawMsg.nbytes);
+  outClaim[rawMsg.nbytes] = '\0';
 
   if ((strcmp(ifModeLabel, "tun") == 0 && !isValidTunClaim(outClaim))
       || (strcmp(ifModeLabel, "tap") == 0 && !isValidTapClaim(outClaim))) {
@@ -782,17 +844,16 @@ static bool serverAuthenticateClient(
   }
 
   randombytes_buf(serverNonce, sizeof(serverNonce));
-  msg.type = protocolMsgAuthChallenge;
-  msg.nbytes = ProtocolNonceSize;
-  msg.buf = (const char *)serverNonce;
-  if (protocolMessageEncodeFrame(&msg, &frame) != protocolStatusOk || !authWriteWireFrame(connFd, &frame)) {
+  rawMsg.nbytes = ProtocolNonceSize;
+  rawMsg.buf = (const char *)serverNonce;
+  if (protocolEncodeRaw(&rawMsg, &frame) != protocolStatusOk || !authWriteWireFrame(connFd, &frame)) {
     return false;
   }
 
   if (!authReadWireFrame(connFd, authTimeoutMs, &frame)) {
     return false;
   }
-  if (protocolSecureDecodeFrame(&frame, outKey, &msg) != protocolStatusOk) {
+  if (!authDecodeSecureFrame(&frame, outKey, &msg)) {
     return false;
   }
   if (msg.type != protocolMsgClientHello || msg.nbytes != ProtocolNonceSize * 2) {
