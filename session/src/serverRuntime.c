@@ -4,10 +4,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <time.h>
 #include <unistd.h>
 
-static bool slotIndexValid(const serverRuntime_t *runtime, int slot) {
-  return runtime != NULL && runtime->slots != NULL && slot >= 0 && slot < runtime->maxSessions;
+static long long defaultNowMs(void *ctx) {
+  struct timespec ts;
+  (void)ctx;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
+}
+
+static bool activeSlotIndexValid(const serverRuntime_t *runtime, int slot) {
+  return runtime != NULL && runtime->activeConns != NULL && slot >= 0 && slot < runtime->maxActiveSessions;
+}
+
+static bool preAuthSlotIndexValid(const serverRuntime_t *runtime, int slot) {
+  return runtime != NULL && runtime->preAuthConns != NULL && slot >= 0 && slot < runtime->maxPreAuthSessions;
 }
 
 static bool runtimeTunEpollCtl(serverRuntime_t *runtime, unsigned int events) {
@@ -35,15 +47,29 @@ bool serverRuntimeInit(
     serverRuntime_t *runtime,
     int tunFd,
     int listenFd,
-    int maxSessions,
-    const sessionHeartbeatConfig_t *heartbeatCfg) {
-  if (runtime == NULL || heartbeatCfg == NULL || maxSessions <= 0 || tunFd < 0 || listenFd < 0) {
+    int maxActiveSessions,
+    int maxPreAuthSessions,
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    sessionNowMsFn_t nowMsFn,
+    void *nowCtx) {
+  int i;
+
+  if (runtime == NULL
+      || heartbeatCfg == NULL
+      || maxActiveSessions <= 0
+      || maxPreAuthSessions <= 0
+      || tunFd < 0
+      || listenFd < 0) {
     return false;
   }
 
   memset(runtime, 0, sizeof(*runtime));
-  runtime->slots = calloc((size_t)maxSessions, sizeof(*runtime->slots));
-  if (runtime->slots == NULL) {
+  runtime->activeConns = calloc((size_t)maxActiveSessions, sizeof(*runtime->activeConns));
+  runtime->preAuthConns = calloc((size_t)maxPreAuthSessions, sizeof(*runtime->preAuthConns));
+  if (runtime->activeConns == NULL || runtime->preAuthConns == NULL) {
+    free(runtime->activeConns);
+    free(runtime->preAuthConns);
+    memset(runtime, 0, sizeof(*runtime));
     return false;
   }
 
@@ -56,105 +82,136 @@ bool serverRuntimeInit(
   runtime->pendingOwnerSlot = -1;
   runtime->pendingTunToTcpNbytes = 0;
   runtime->retryCursor = 0;
-  runtime->maxSessions = maxSessions;
+  runtime->maxActiveSessions = maxActiveSessions;
+  runtime->activeCount = 0;
+  runtime->maxPreAuthSessions = maxPreAuthSessions;
+  runtime->preAuthCount = 0;
   runtime->heartbeatCfg = *heartbeatCfg;
+  runtime->nowMsFn = nowMsFn == NULL ? defaultNowMs : nowMsFn;
+  runtime->nowCtx = nowCtx;
+
+  for (i = 0; i < runtime->maxActiveSessions; i++) {
+    runtime->activeConns[i].connFd = -1;
+  }
+  for (i = 0; i < runtime->maxPreAuthSessions; i++) {
+    runtime->preAuthConns[i].connFd = -1;
+    runtime->preAuthConns[i].resolvedActiveSlot = -1;
+  }
+
   return true;
 }
 
 void serverRuntimeDeinit(serverRuntime_t *runtime) {
   int i;
 
-  if (runtime == NULL || runtime->slots == NULL) {
+  if (runtime == NULL) {
     return;
   }
 
-  for (i = 0; i < runtime->maxSessions; i++) {
-    if (runtime->slots[i].session != NULL) {
-      sessionDestroy(runtime->slots[i].session);
+  if (runtime->activeConns != NULL) {
+    for (i = 0; i < runtime->maxActiveSessions; i++) {
+      if (runtime->activeConns[i].session != NULL) {
+        sessionDestroy(runtime->activeConns[i].session);
+      }
     }
   }
 
-  free(runtime->slots);
+  free(runtime->activeConns);
+  free(runtime->preAuthConns);
   memset(runtime, 0, sizeof(*runtime));
 }
 
 int serverRuntimeAddClient(
     serverRuntime_t *runtime,
+    int activeSlot,
     int connFd,
     const unsigned char key[ProtocolPskSize],
     const char *claim) {
-  int i;
   session_t *session;
 
-  if (runtime == NULL || runtime->slots == NULL || connFd < 0 || key == NULL || claim == NULL) {
+  if (runtime == NULL || runtime->activeConns == NULL || connFd < 0 || key == NULL || claim == NULL) {
     return -1;
   }
-  if (runtime->clientCount >= runtime->maxSessions) {
+  if (!activeSlotIndexValid(runtime, activeSlot)) {
+    return -1;
+  }
+  if (runtime->activeConns[activeSlot].active) {
+    return -1;
+  }
+  if (runtime->activeCount >= runtime->maxActiveSessions) {
     return -1;
   }
 
-  for (i = 0; i < runtime->maxSessions; i++) {
-    if (runtime->slots[i].active) {
-      continue;
-    }
-
-    session = sessionCreate(true, &runtime->heartbeatCfg, NULL, NULL);
-    if (session == NULL) {
-      return -1;
-    }
-
-    runtime->slots[i].connFd = connFd;
-    runtime->slots[i].session = session;
-    sessionSetServerRuntime(session, runtime);
-    runtime->slots[i].poller.epollFd = runtime->epollFd;
-    runtime->slots[i].poller.tunFd = runtime->tunFd;
-    runtime->slots[i].poller.tcpFd = connFd;
-    runtime->slots[i].poller.tunEvents = runtime->tunEvents;
-    runtime->slots[i].poller.tcpEvents = EPOLLIN | EPOLLRDHUP;
-    runtime->slots[i].poller.tunOutOffset = 0;
-    runtime->slots[i].poller.tunOutNbytes = 0;
-    runtime->slots[i].poller.tcpOutOffset = 0;
-    runtime->slots[i].poller.tcpOutNbytes = 0;
-    memcpy(runtime->slots[i].key, key, ProtocolPskSize);
-    strncpy(runtime->slots[i].claim, claim, sizeof(runtime->slots[i].claim) - 1);
-    runtime->slots[i].claim[sizeof(runtime->slots[i].claim) - 1] = '\0';
-    runtime->slots[i].active = true;
-    runtime->clientCount++;
-    return i;
+  session = sessionCreate(true, &runtime->heartbeatCfg, NULL, NULL);
+  if (session == NULL) {
+    return -1;
   }
 
-  return -1;
+  runtime->activeConns[activeSlot].connFd = connFd;
+  runtime->activeConns[activeSlot].session = session;
+  sessionSetServerRuntime(session, runtime);
+  runtime->activeConns[activeSlot].poller.epollFd = runtime->epollFd;
+  runtime->activeConns[activeSlot].poller.tunFd = runtime->tunFd;
+  runtime->activeConns[activeSlot].poller.tcpFd = connFd;
+  runtime->activeConns[activeSlot].poller.tunEvents = runtime->tunEvents;
+  runtime->activeConns[activeSlot].poller.tcpEvents = EPOLLIN | EPOLLRDHUP;
+  runtime->activeConns[activeSlot].poller.tunOutOffset = 0;
+  runtime->activeConns[activeSlot].poller.tunOutNbytes = 0;
+  runtime->activeConns[activeSlot].poller.tcpOutOffset = 0;
+  runtime->activeConns[activeSlot].poller.tcpOutNbytes = 0;
+  memcpy(runtime->activeConns[activeSlot].key, key, ProtocolPskSize);
+  strncpy(runtime->activeConns[activeSlot].claim, claim, sizeof(runtime->activeConns[activeSlot].claim) - 1);
+  runtime->activeConns[activeSlot].claim[sizeof(runtime->activeConns[activeSlot].claim) - 1] = '\0';
+  runtime->activeConns[activeSlot].active = true;
+  runtime->activeCount++;
+  return activeSlot;
 }
 
 bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot) {
-  if (!slotIndexValid(runtime, slot) || !runtime->slots[slot].active) {
+  if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return false;
   }
 
   if (!serverRuntimeDropPendingTunToTcpByOwner(runtime, slot)) {
     return false;
   }
-  sessionDestroy(runtime->slots[slot].session);
-  runtime->slots[slot].poller.tcpOutOffset = 0;
-  runtime->slots[slot].poller.tcpOutNbytes = 0;
-  memset(runtime->slots[slot].key, 0, sizeof(runtime->slots[slot].key));
-  memset(runtime->slots[slot].claim, 0, sizeof(runtime->slots[slot].claim));
-  runtime->slots[slot].connFd = -1;
-  runtime->slots[slot].session = NULL;
-  runtime->slots[slot].active = false;
-  runtime->clientCount--;
+  sessionDestroy(runtime->activeConns[slot].session);
+  runtime->activeConns[slot].poller.tcpOutOffset = 0;
+  runtime->activeConns[slot].poller.tcpOutNbytes = 0;
+  memset(runtime->activeConns[slot].key, 0, sizeof(runtime->activeConns[slot].key));
+  memset(runtime->activeConns[slot].claim, 0, sizeof(runtime->activeConns[slot].claim));
+  runtime->activeConns[slot].connFd = -1;
+  runtime->activeConns[slot].session = NULL;
+  runtime->activeConns[slot].active = false;
+  runtime->activeCount--;
   return true;
 }
 
 int serverRuntimeFindSlotByFd(const serverRuntime_t *runtime, int connFd) {
   int i;
 
-  if (runtime == NULL || runtime->slots == NULL || connFd < 0) {
+  if (runtime == NULL || runtime->activeConns == NULL || connFd < 0) {
     return -1;
   }
 
-  for (i = 0; i < runtime->maxSessions; i++) {
-    if (runtime->slots[i].active && runtime->slots[i].connFd == connFd) {
+  for (i = 0; i < runtime->maxActiveSessions; i++) {
+    if (runtime->activeConns[i].active && runtime->activeConns[i].connFd == connFd) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+int serverRuntimeFindPreAuthSlotByFd(const serverRuntime_t *runtime, int connFd) {
+  int i;
+
+  if (runtime == NULL || runtime->preAuthConns == NULL || connFd < 0) {
+    return -1;
+  }
+
+  for (i = 0; i < runtime->maxPreAuthSessions; i++) {
+    if (runtime->preAuthConns[i].active && runtime->preAuthConns[i].connFd == connFd) {
       return i;
     }
   }
@@ -165,13 +222,13 @@ int serverRuntimeFindSlotByFd(const serverRuntime_t *runtime, int connFd) {
 int serverRuntimePickEgressClient(const serverRuntime_t *runtime) {
   int i;
 
-  if (runtime == NULL || runtime->slots == NULL) {
+  if (runtime == NULL || runtime->activeConns == NULL) {
     return -1;
   }
 
-  for (i = 0; i < runtime->maxSessions; i++) {
-    if (runtime->slots[i].active) {
-      return runtime->slots[i].connFd;
+  for (i = 0; i < runtime->maxActiveSessions; i++) {
+    if (runtime->activeConns[i].active) {
+      return runtime->activeConns[i].connFd;
     }
   }
 
@@ -179,10 +236,10 @@ int serverRuntimePickEgressClient(const serverRuntime_t *runtime) {
 }
 
 int serverRuntimeClientCount(const serverRuntime_t *runtime) {
-  if (runtime == NULL || runtime->slots == NULL) {
+  if (runtime == NULL || runtime->activeConns == NULL) {
     return -1;
   }
-  return runtime->clientCount;
+  return runtime->activeCount;
 }
 
 long serverRuntimeQueuedTunBytes(const serverRuntime_t *runtime) {
@@ -190,6 +247,13 @@ long serverRuntimeQueuedTunBytes(const serverRuntime_t *runtime) {
     return -1;
   }
   return runtime->tunOutNbytes;
+}
+
+long long serverRuntimeNowMs(const serverRuntime_t *runtime) {
+  if (runtime == NULL || runtime->nowMsFn == NULL) {
+    return -1;
+  }
+  return runtime->nowMsFn(runtime->nowCtx);
 }
 
 bool serverRuntimeSyncTunWriteInterest(serverRuntime_t *runtime) {
@@ -271,32 +335,32 @@ int serverRuntimeRetryBlockedTunRoundRobin(serverRuntime_t *runtime) {
   int start;
   int nextCursor = -1;
 
-  if (runtime == NULL || runtime->slots == NULL || runtime->maxSessions <= 0) {
+  if (runtime == NULL || runtime->activeConns == NULL || runtime->maxActiveSessions <= 0) {
     return -1;
   }
 
-  start = runtime->retryCursor % runtime->maxSessions;
-  for (i = 0; i < runtime->maxSessions; i++) {
-    int slot = (start + i) % runtime->maxSessions;
+  start = runtime->retryCursor % runtime->maxActiveSessions;
+  for (i = 0; i < runtime->maxActiveSessions; i++) {
+    int slot = (start + i) % runtime->maxActiveSessions;
     session_t *session;
-    if (!runtime->slots[slot].active) {
+    if (!runtime->activeConns[slot].active) {
       continue;
     }
-    session = runtime->slots[slot].session;
+    session = runtime->activeConns[slot].session;
     if (session == NULL) {
       continue;
     }
     if (!sessionHasPendingTunEgress(session)) {
       continue;
     }
-    if (!sessionServiceBackpressure(session, &runtime->slots[slot].poller)) {
+    if (!sessionServiceBackpressure(session, &runtime->activeConns[slot].poller)) {
       return -1;
     }
   }
 
-  for (i = 1; i <= runtime->maxSessions; i++) {
-    int slot = (start + i) % runtime->maxSessions;
-    if (runtime->slots[slot].active) {
+  for (i = 1; i <= runtime->maxActiveSessions; i++) {
+    int slot = (start + i) % runtime->maxActiveSessions;
+    if (runtime->activeConns[slot].active) {
       nextCursor = slot;
       break;
     }
@@ -342,7 +406,7 @@ bool serverRuntimeStorePendingTunToTcp(serverRuntime_t *runtime, int ownerSlot, 
   if (runtime == NULL || data == NULL || nbytes <= 0 || nbytes > (long)sizeof(runtime->pendingTunToTcpBuf)) {
     return false;
   }
-  if (!slotIndexValid(runtime, ownerSlot) || !runtime->slots[ownerSlot].active) {
+  if (!activeSlotIndexValid(runtime, ownerSlot) || !runtime->activeConns[ownerSlot].active) {
     return false;
   }
   if (serverRuntimeHasPendingTunToTcp(runtime)) {
@@ -396,38 +460,122 @@ bool serverRuntimeDropPendingTunToTcpByOwner(serverRuntime_t *runtime, int owner
 }
 
 session_t *serverRuntimeSessionAt(serverRuntime_t *runtime, int slot) {
-  if (!slotIndexValid(runtime, slot) || !runtime->slots[slot].active) {
+  if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return NULL;
   }
-  return runtime->slots[slot].session;
+  return runtime->activeConns[slot].session;
 }
 
 int serverRuntimeConnFdAt(const serverRuntime_t *runtime, int slot) {
-  if (!slotIndexValid(runtime, slot) || !runtime->slots[slot].active) {
+  if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return -1;
   }
-  return runtime->slots[slot].connFd;
+  return runtime->activeConns[slot].connFd;
 }
 
 const unsigned char *serverRuntimeKeyAt(const serverRuntime_t *runtime, int slot) {
-  if (!slotIndexValid(runtime, slot) || !runtime->slots[slot].active) {
+  if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return NULL;
   }
-  return runtime->slots[slot].key;
+  return runtime->activeConns[slot].key;
 }
 
 bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const char *claim) {
   int i;
-  if (runtime == NULL || runtime->slots == NULL || claim == NULL) {
+  if (runtime == NULL || runtime->activeConns == NULL || claim == NULL) {
     return false;
   }
-  for (i = 0; i < runtime->maxSessions; i++) {
-    if (!runtime->slots[i].active) {
+  for (i = 0; i < runtime->maxActiveSessions; i++) {
+    if (!runtime->activeConns[i].active) {
       continue;
     }
-    if (strcmp(runtime->slots[i].claim, claim) == 0) {
+    if (strcmp(runtime->activeConns[i].claim, claim) == 0) {
       return true;
     }
   }
   return false;
+}
+
+int serverRuntimeCreatePreAuthConn(serverRuntime_t *runtime, int connFd, long long authDeadlineMs) {
+  int i;
+
+  if (runtime == NULL || runtime->preAuthConns == NULL || connFd < 0) {
+    return -1;
+  }
+  if (runtime->preAuthCount >= runtime->maxPreAuthSessions) {
+    return -1;
+  }
+
+  for (i = 0; i < runtime->maxPreAuthSessions; i++) {
+    preAuthConn_t *conn = &runtime->preAuthConns[i];
+    if (conn->active) {
+      continue;
+    }
+    memset(conn, 0, sizeof(*conn));
+    conn->connFd = connFd;
+    conn->authDeadlineMs = authDeadlineMs;
+    conn->resolvedActiveSlot = -1;
+    protocolDecoderInit(&conn->rawDecoder);
+    protocolDecoderInit(&conn->secureDecoder);
+    conn->active = true;
+    runtime->preAuthCount++;
+    return i;
+  }
+
+  return -1;
+}
+
+bool serverRuntimeRemovePreAuthConn(serverRuntime_t *runtime, int preAuthSlot) {
+  preAuthConn_t *conn;
+
+  if (!preAuthSlotIndexValid(runtime, preAuthSlot)) {
+    return false;
+  }
+  conn = &runtime->preAuthConns[preAuthSlot];
+  if (!conn->active) {
+    return false;
+  }
+
+  memset(conn->resolvedKey, 0, sizeof(conn->resolvedKey));
+  memset(conn->serverNonce, 0, sizeof(conn->serverNonce));
+  memset(conn->claim, 0, sizeof(conn->claim));
+  memset(conn->authWriteBuf, 0, sizeof(conn->authWriteBuf));
+  conn->authWriteOffset = 0;
+  conn->authWriteNbytes = 0;
+  conn->authState = 0;
+  conn->authDeadlineMs = 0;
+  conn->resolvedActiveSlot = -1;
+  conn->connFd = -1;
+  conn->active = false;
+  runtime->preAuthCount--;
+  return true;
+}
+
+preAuthConn_t *serverRuntimePreAuthAt(serverRuntime_t *runtime, int preAuthSlot) {
+  if (!preAuthSlotIndexValid(runtime, preAuthSlot) || !runtime->preAuthConns[preAuthSlot].active) {
+    return NULL;
+  }
+  return &runtime->preAuthConns[preAuthSlot];
+}
+
+bool serverRuntimePromoteToActiveSlot(serverRuntime_t *runtime, int preAuthSlot) {
+  preAuthConn_t *preAuth;
+  int connFd;
+
+  if (runtime == NULL) {
+    return false;
+  }
+  preAuth = serverRuntimePreAuthAt(runtime, preAuthSlot);
+  if (preAuth == NULL || !activeSlotIndexValid(runtime, preAuth->resolvedActiveSlot)) {
+    return false;
+  }
+  if (runtime->activeConns[preAuth->resolvedActiveSlot].active) {
+    return false;
+  }
+
+  connFd = preAuth->connFd;
+  if (serverRuntimeAddClient(runtime, preAuth->resolvedActiveSlot, connFd, preAuth->resolvedKey, preAuth->claim) < 0) {
+    return false;
+  }
+  return serverRuntimeRemovePreAuthConn(runtime, preAuthSlot);
 }

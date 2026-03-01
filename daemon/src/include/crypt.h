@@ -22,4 +22,5 @@ int cryptServerKeyStoreLookup(
     const cryptServerKeyStore_t *store,
     configIfMode_t ifMode,
     const char *claim,
-    unsigned char key[ProtocolPskSize]);
+    unsigned char key[ProtocolPskSize],
+    int *outSlot);

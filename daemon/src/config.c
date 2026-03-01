@@ -188,6 +188,9 @@ static int parseServerConfig(const cJSON *root, daemonConfig_t *cfg) {
   if (parseRequiredPositiveInt(root, "auth_timeout_ms", &cfg->authTimeoutMs) != 0) {
     return -1;
   }
+  if (parseRequiredPositiveInt(root, "max_pre_auth_sessions", &cfg->maxPreAuthSessions) != 0) {
+    return -1;
+  }
   if (copyRequiredString(root, "listen_ip", cfg->listenIP) != 0) {
     return -1;
   }

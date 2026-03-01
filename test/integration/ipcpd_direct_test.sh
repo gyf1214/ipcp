@@ -101,6 +101,7 @@ run_case() {
   "listen_ip": "10.200.1.1",
   "listen_port": 46000,
   "auth_timeout_ms": 5000,
+  "max_pre_auth_sessions": 8,
   "credentials": [
     $serverCredential
   ]

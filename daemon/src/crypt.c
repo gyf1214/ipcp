@@ -79,7 +79,8 @@ int cryptServerKeyStoreLookup(
     const cryptServerKeyStore_t *store,
     configIfMode_t ifMode,
     const char *claim,
-    unsigned char key[ProtocolPskSize]) {
+    unsigned char key[ProtocolPskSize],
+    int *outSlot) {
   int i;
   if (store == NULL || claim == NULL || key == NULL) {
     return -1;
@@ -92,6 +93,9 @@ int cryptServerKeyStoreLookup(
       continue;
     }
     memcpy(key, store->entries[i].key, ProtocolPskSize);
+    if (outSlot != NULL) {
+      *outSlot = i;
+    }
     return 0;
   }
   return -1;

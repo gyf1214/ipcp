@@ -30,12 +30,16 @@ static const char *ifModeLabel(configIfMode_t mode) {
   return mode == configIfModeTap ? "tap" : "tun";
 }
 
-static int serverLookupByClaim(void *ctx, const char *claim, unsigned char key[ProtocolPskSize]) {
+static int serverLookupByClaim(
+    void *ctx,
+    const char *claim,
+    unsigned char key[ProtocolPskSize],
+    int *outActiveSlot) {
   serverKeyLookupCtx_t *lookup = (serverKeyLookupCtx_t *)ctx;
   if (lookup == NULL || lookup->store == NULL) {
     return -1;
   }
-  return cryptServerKeyStoreLookup(lookup->store, lookup->ifMode, claim, key);
+  return cryptServerKeyStoreLookup(lookup->store, lookup->ifMode, claim, key, outActiveSlot);
 }
 
 static int writeAll(int fd, const void *buf, long nbytes) {
@@ -237,6 +241,7 @@ static int listenTcp(
     int port,
     const cryptServerKeyStore_t *keyStore,
     int authTimeoutMs,
+    int maxPreAuthSessions,
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   serverKeyLookupCtx_t lookupCtx;
   int tunFd = -1;
@@ -265,7 +270,8 @@ static int listenTcp(
           ifModeLabel(ifMode),
           authTimeoutMs,
           heartbeatCfg,
-          64)
+          keyStore->count,
+          maxPreAuthSessions)
       != 0) {
     close(tunFd);
     close(listenFd);
@@ -350,6 +356,7 @@ int main(int argc, char **argv) {
             cfg.listenPort,
             &keyStore,
             cfg.authTimeoutMs,
+            cfg.maxPreAuthSessions,
             &heartbeatCfg)
             == 0
             ? EXIT_SUCCESS

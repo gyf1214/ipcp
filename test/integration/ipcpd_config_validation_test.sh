@@ -165,6 +165,20 @@ cat > "$tmpDir/server-bad-auth-timeout.json" <<JSON
 }
 JSON
 
+cat > "$tmpDir/server-missing-max-pre-auth.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "tun",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "auth_timeout_ms": 5000,
+  "credentials": [
+    { "tun_ip": "10.0.0.2", "key_file": "/tmp/none.key" }
+  ]
+}
+JSON
+
 cat > "$tmpDir/server-tun-credentials-missing-ip.json" <<JSON
 {
   "mode": "server",
@@ -202,6 +216,7 @@ run_expect_invalid_config "$tmpDir/bad-if-mode-type.json"
 run_expect_invalid_config "$tmpDir/server-old-key-file-only-hard-break.json"
 run_expect_invalid_config "$tmpDir/server-missing-auth-timeout.json"
 run_expect_invalid_config "$tmpDir/server-bad-auth-timeout.json"
+run_expect_invalid_config "$tmpDir/server-missing-max-pre-auth.json"
 run_expect_invalid_config "$tmpDir/server-tun-credentials-missing-ip.json"
 run_expect_invalid_config "$tmpDir/server-tap-credentials-missing-mac.json"
 run_expect_invalid_secret "$tmpDir/missing-if-mode-defaults-to-tun.json"
