@@ -21,8 +21,7 @@ typedef struct {
   unsigned char resolvedKey[ProtocolPskSize];
   unsigned char serverNonce[ProtocolNonceSize];
   char claim[SessionClaimSize];
-  protocolDecoder_t rawDecoder;
-  protocolDecoder_t secureDecoder;
+  protocolDecoder_t decoder;
   char authWriteBuf[ProtocolWireLengthSize + ProtocolFrameSize];
   long authWriteOffset;
   long authWriteNbytes;

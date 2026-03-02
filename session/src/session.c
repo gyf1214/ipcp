@@ -733,7 +733,7 @@ static bool preAuthDecodeClaim(preAuthConn_t *conn, bool *outReady) {
       }
       return false;
     }
-    protocolStatus_t status = protocolDecodeRaw(&conn->rawDecoder, &byte, 1, &consumed, &rawMsg);
+    protocolStatus_t status = protocolDecodeRaw(&conn->decoder, &byte, 1, &consumed, &rawMsg);
     if (status == protocolStatusBadFrame) {
       return false;
     }
@@ -813,7 +813,7 @@ static bool preAuthDecodeHello(preAuthConn_t *conn, bool *outReady) {
       return false;
     }
     protocolStatus_t status =
-        protocolDecodeSecureMsg(&conn->secureDecoder, conn->resolvedKey, &byte, 1, &consumed, &msg);
+        protocolDecodeSecureMsg(&conn->decoder, conn->resolvedKey, &byte, 1, &consumed, &msg);
     if (status == protocolStatusBadFrame) {
       return false;
     }
@@ -910,7 +910,7 @@ static bool serverDispatchPreAuth(
     if (serverRuntimeHasActiveClaim(runtime, conn->claim)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
-    helloDecoder = conn->secureDecoder;
+    helloDecoder = conn->decoder;
     activeSlot = conn->resolvedActiveSlot;
     if (!serverRuntimePromoteToActiveSlot(runtime, preAuthSlot)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);

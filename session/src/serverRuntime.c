@@ -515,8 +515,7 @@ int serverRuntimeCreatePreAuthConn(serverRuntime_t *runtime, int connFd, long lo
     conn->connFd = connFd;
     conn->authDeadlineMs = authDeadlineMs;
     conn->resolvedActiveSlot = -1;
-    protocolDecoderInit(&conn->rawDecoder);
-    protocolDecoderInit(&conn->secureDecoder);
+    protocolDecoderInit(&conn->decoder);
     conn->active = true;
     runtime->preAuthCount++;
     return i;
