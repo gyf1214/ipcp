@@ -21,19 +21,28 @@ static unsigned char testServerKey[ProtocolPskSize] = {
     0x1f, 0x2e, 0x3d, 0x4c, 0x5b, 0x6a, 0x79, 0x88,
     0x97, 0xa6, 0xb5, 0xc4, 0xd3, 0xe2, 0xf1, 0x00,
 };
+static const unsigned char testClaim2[] = {10, 0, 0, 2};
+static const unsigned char testClaim3[] = {10, 0, 0, 3};
 static const sessionHeartbeatConfig_t defaultHeartbeatCfg = {
     .intervalMs = 5000,
     .timeoutMs = 15000,
 };
 
-static int fakeLookup(void *ctx, const char *claim, unsigned char key[ProtocolPskSize], int *outActiveSlot) {
+static int fakeLookup(
+    void *ctx,
+    const unsigned char *claim,
+    long claimNbytes,
+    unsigned char key[ProtocolPskSize],
+    int *outActiveSlot) {
+  static const unsigned char claimA[] = {10, 0, 0, 2};
+  static const unsigned char claimB[] = {10, 0, 0, 3};
   (void)ctx;
-  if (claim == NULL || key == NULL || outActiveSlot == NULL) {
+  if (claim == NULL || claimNbytes <= 0 || key == NULL || outActiveSlot == NULL) {
     return -1;
   }
-  if (strcmp(claim, "10.0.0.2") == 0) {
+  if (claimNbytes == (long)sizeof(claimA) && memcmp(claim, claimA, sizeof(claimA)) == 0) {
     *outActiveSlot = 0;
-  } else if (strcmp(claim, "10.0.0.3") == 0) {
+  } else if (claimNbytes == (long)sizeof(claimB) && memcmp(claim, claimB, sizeof(claimB)) == 0) {
     *outActiveSlot = 1;
   } else {
     return -1;
@@ -534,10 +543,10 @@ static void testSharedTunWriteInterestIsRuntimeOwned(void) {
   testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "initial tun interest sync should succeed");
 
   testAssertTrue(
-      serverRuntimeAddClient(&runtime, 0, tcpPairA[0], testServerKey, "10.0.0.2") == 0,
+      serverRuntimeAddClient(&runtime, 0, tcpPairA[0], testServerKey, testClaim2, sizeof(testClaim2)) == 0,
       "first client should be added");
   testAssertTrue(
-      serverRuntimeAddClient(&runtime, 1, tcpPairB[0], testServerKey, "10.0.0.3") == 1,
+      serverRuntimeAddClient(&runtime, 1, tcpPairB[0], testServerKey, testClaim3, sizeof(testClaim3)) == 1,
       "second client should be added");
 
   testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadA, (long)strlen(payloadA)), "queue payload A should succeed");
@@ -588,7 +597,7 @@ static void setupServerRuntimeForTest(
           == 0,
       "add tun fd should succeed");
 
-  *slotA = serverRuntimeAddClient(runtime, 0, tcpPairA[0], testServerKey, "10.0.0.2");
+  *slotA = serverRuntimeAddClient(runtime, 0, tcpPairA[0], testServerKey, testClaim2, sizeof(testClaim2));
   testAssertTrue(*slotA == 0, "first client should be added");
   testAssertTrue(
       epoll_ctl(
@@ -602,7 +611,7 @@ static void setupServerRuntimeForTest(
   *slotB = -1;
   if (maxSessions > 1) {
     testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
-    *slotB = serverRuntimeAddClient(runtime, 1, tcpPairB[0], testServerKey, "10.0.0.3");
+    *slotB = serverRuntimeAddClient(runtime, 1, tcpPairB[0], testServerKey, testClaim3, sizeof(testClaim3));
     testAssertTrue(*slotB == 1, "second client should be added");
     testAssertTrue(
         epoll_ctl(

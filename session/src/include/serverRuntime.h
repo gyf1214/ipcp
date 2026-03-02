@@ -4,8 +4,6 @@
 
 #include "session.h"
 
-#define SessionClaimSize 128
-
 typedef struct serverRuntime_t serverRuntime_t;
 
 typedef enum {
@@ -20,7 +18,8 @@ typedef struct {
   int resolvedActiveSlot;
   unsigned char resolvedKey[ProtocolPskSize];
   unsigned char serverNonce[ProtocolNonceSize];
-  char claim[SessionClaimSize];
+  unsigned char claim[SessionClaimSize];
+  long claimNbytes;
   protocolDecoder_t decoder;
   char tcpReadCarryBuf[ProtocolFrameSize];
   long tcpReadCarryNbytes;
@@ -36,7 +35,8 @@ typedef struct {
   session_t *session;
   ioPoller_t poller;
   unsigned char key[ProtocolPskSize];
-  char claim[SessionClaimSize];
+  unsigned char claim[SessionClaimSize];
+  long claimNbytes;
   bool active;
 } activeConn_t;
 
@@ -79,7 +79,8 @@ int serverRuntimeAddClient(
     int activeSlot,
     int connFd,
     const unsigned char key[ProtocolPskSize],
-    const char *claim);
+    const unsigned char *claim,
+    long claimNbytes);
 bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot);
 
 int serverRuntimeFindSlotByFd(const serverRuntime_t *runtime, int connFd);
@@ -104,7 +105,7 @@ bool serverRuntimeDropPendingTunToTcpByOwner(serverRuntime_t *runtime, int owner
 session_t *serverRuntimeSessionAt(serverRuntime_t *runtime, int slot);
 int serverRuntimeConnFdAt(const serverRuntime_t *runtime, int slot);
 const unsigned char *serverRuntimeKeyAt(const serverRuntime_t *runtime, int slot);
-bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const char *claim);
+bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const unsigned char *claim, long claimNbytes);
 
 int serverRuntimeCreatePreAuthConn(serverRuntime_t *runtime, int connFd, long long authDeadlineMs);
 bool serverRuntimeRemovePreAuthConn(serverRuntime_t *runtime, int preAuthSlot);

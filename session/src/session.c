@@ -1,8 +1,6 @@
 #include "session.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -676,26 +674,12 @@ static bool serverEpollCtl(int epollFd, int op, int fd, unsigned int events) {
   return epoll_ctl(epollFd, op, fd, &event) == 0;
 }
 
-static int isValidTunClaim(const char *claim) {
-  struct in_addr addr;
-  return claim != NULL && inet_pton(AF_INET, claim, &addr) == 1;
+static int isValidTunClaim(const unsigned char *claim, long claimNbytes) {
+  return claim != NULL && claimNbytes == 4;
 }
 
-static int isValidTapClaim(const char *claim) {
-  int i;
-  if (claim == NULL || strlen(claim) != 17) {
-    return 0;
-  }
-  for (i = 0; i < 17; i++) {
-    if ((i % 3) == 2) {
-      if (claim[i] != ':') {
-        return 0;
-      }
-    } else if (!isxdigit((unsigned char)claim[i])) {
-      return 0;
-    }
-  }
-  return 1;
+static int isValidTapClaim(const unsigned char *claim, long claimNbytes) {
+  return claim != NULL && claimNbytes == 6;
 }
 
 typedef enum {
@@ -781,11 +765,11 @@ static bool preAuthDecodeClaim(preAuthConn_t *conn, bool *outReady) {
     }
     offset += consumed;
     if (status == protocolStatusOk) {
-      if (rawMsg.nbytes <= 0 || rawMsg.nbytes >= SessionClaimSize) {
+      if (rawMsg.nbytes <= 0 || rawMsg.nbytes > SessionClaimSize) {
         return false;
       }
       memcpy(conn->claim, rawMsg.buf, (size_t)rawMsg.nbytes);
-      conn->claim[rawMsg.nbytes] = '\0';
+      conn->claimNbytes = rawMsg.nbytes;
       *outReady = true;
       break;
     }
@@ -909,11 +893,12 @@ static bool serverDispatchPreAuth(
       return true;
     }
 
-    if ((strcmp(ifModeLabel, "tun") == 0 && !isValidTunClaim(conn->claim))
-        || (strcmp(ifModeLabel, "tap") == 0 && !isValidTapClaim(conn->claim))) {
+    if ((strcmp(ifModeLabel, "tun") == 0 && !isValidTunClaim(conn->claim, conn->claimNbytes))
+        || (strcmp(ifModeLabel, "tap") == 0 && !isValidTapClaim(conn->claim, conn->claimNbytes))) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
-    if (resolveClaimFn(resolveClaimCtx, conn->claim, conn->resolvedKey, &conn->resolvedActiveSlot) != 0) {
+    if (resolveClaimFn(resolveClaimCtx, conn->claim, conn->claimNbytes, conn->resolvedKey, &conn->resolvedActiveSlot)
+        != 0) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
     if (conn->resolvedActiveSlot < 0 || conn->resolvedActiveSlot >= runtime->maxActiveSessions) {
@@ -958,7 +943,7 @@ static bool serverDispatchPreAuth(
     if (!helloReady) {
       return true;
     }
-    if (serverRuntimeHasActiveClaim(runtime, conn->claim)) {
+    if (serverRuntimeHasActiveClaim(runtime, conn->claim, conn->claimNbytes)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
     helloDecoder = conn->decoder;

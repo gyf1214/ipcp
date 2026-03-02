@@ -1,6 +1,7 @@
 #pragma once
 
 #include "protocol.h"
+#include "session.h"
 
 #define ConfigTextSize 512
 #define ConfigDefaultHeartbeatIntervalMs 5000
@@ -20,6 +21,8 @@ typedef enum {
 typedef struct {
   char tunIP[ConfigTextSize];
   char tapMac[ConfigTextSize];
+  unsigned char claim[SessionClaimSize];
+  long claimNbytes;
   char keyFile[ConfigTextSize];
 } daemonServerCredential_t;
 
@@ -34,6 +37,8 @@ typedef struct {
   int serverPort;
   char tunIP[ConfigTextSize];
   char tapMac[ConfigTextSize];
+  unsigned char claim[SessionClaimSize];
+  long claimNbytes;
   int heartbeatIntervalMs;
   int heartbeatTimeoutMs;
   int authTimeoutMs;

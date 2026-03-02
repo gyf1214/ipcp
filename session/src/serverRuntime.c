@@ -126,10 +126,17 @@ int serverRuntimeAddClient(
     int activeSlot,
     int connFd,
     const unsigned char key[ProtocolPskSize],
-    const char *claim) {
+    const unsigned char *claim,
+    long claimNbytes) {
   session_t *session;
 
-  if (runtime == NULL || runtime->activeConns == NULL || connFd < 0 || key == NULL || claim == NULL) {
+  if (runtime == NULL
+      || runtime->activeConns == NULL
+      || connFd < 0
+      || key == NULL
+      || claim == NULL
+      || claimNbytes <= 0
+      || claimNbytes > SessionClaimSize) {
     return -1;
   }
   if (!activeSlotIndexValid(runtime, activeSlot)) {
@@ -160,8 +167,8 @@ int serverRuntimeAddClient(
   runtime->activeConns[activeSlot].poller.tcpOutOffset = 0;
   runtime->activeConns[activeSlot].poller.tcpOutNbytes = 0;
   memcpy(runtime->activeConns[activeSlot].key, key, ProtocolPskSize);
-  strncpy(runtime->activeConns[activeSlot].claim, claim, sizeof(runtime->activeConns[activeSlot].claim) - 1);
-  runtime->activeConns[activeSlot].claim[sizeof(runtime->activeConns[activeSlot].claim) - 1] = '\0';
+  memcpy(runtime->activeConns[activeSlot].claim, claim, (size_t)claimNbytes);
+  runtime->activeConns[activeSlot].claimNbytes = claimNbytes;
   runtime->activeConns[activeSlot].active = true;
   runtime->activeCount++;
   return activeSlot;
@@ -180,6 +187,7 @@ bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot) {
   runtime->activeConns[slot].poller.tcpOutNbytes = 0;
   memset(runtime->activeConns[slot].key, 0, sizeof(runtime->activeConns[slot].key));
   memset(runtime->activeConns[slot].claim, 0, sizeof(runtime->activeConns[slot].claim));
+  runtime->activeConns[slot].claimNbytes = 0;
   runtime->activeConns[slot].connFd = -1;
   runtime->activeConns[slot].session = NULL;
   runtime->activeConns[slot].active = false;
@@ -480,16 +488,17 @@ const unsigned char *serverRuntimeKeyAt(const serverRuntime_t *runtime, int slot
   return runtime->activeConns[slot].key;
 }
 
-bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const char *claim) {
+bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const unsigned char *claim, long claimNbytes) {
   int i;
-  if (runtime == NULL || runtime->activeConns == NULL || claim == NULL) {
+  if (runtime == NULL || runtime->activeConns == NULL || claim == NULL || claimNbytes <= 0) {
     return false;
   }
   for (i = 0; i < runtime->maxActiveSessions; i++) {
     if (!runtime->activeConns[i].active) {
       continue;
     }
-    if (strcmp(runtime->activeConns[i].claim, claim) == 0) {
+    if (runtime->activeConns[i].claimNbytes == claimNbytes
+        && memcmp(runtime->activeConns[i].claim, claim, (size_t)claimNbytes) == 0) {
       return true;
     }
   }
@@ -538,6 +547,7 @@ bool serverRuntimeRemovePreAuthConn(serverRuntime_t *runtime, int preAuthSlot) {
   memset(conn->resolvedKey, 0, sizeof(conn->resolvedKey));
   memset(conn->serverNonce, 0, sizeof(conn->serverNonce));
   memset(conn->claim, 0, sizeof(conn->claim));
+  conn->claimNbytes = 0;
   memset(conn->tcpReadCarryBuf, 0, sizeof(conn->tcpReadCarryBuf));
   conn->tcpReadCarryNbytes = 0;
   memset(conn->authWriteBuf, 0, sizeof(conn->authWriteBuf));
@@ -575,7 +585,9 @@ bool serverRuntimePromoteToActiveSlot(serverRuntime_t *runtime, int preAuthSlot)
   }
 
   connFd = preAuth->connFd;
-  if (serverRuntimeAddClient(runtime, preAuth->resolvedActiveSlot, connFd, preAuth->resolvedKey, preAuth->claim) < 0) {
+  if (serverRuntimeAddClient(
+          runtime, preAuth->resolvedActiveSlot, connFd, preAuth->resolvedKey, preAuth->claim, preAuth->claimNbytes)
+      < 0) {
     return false;
   }
   return serverRuntimeRemovePreAuthConn(runtime, preAuthSlot);

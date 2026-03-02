@@ -5,13 +5,16 @@
 #include "io.h"
 #include "protocol.h"
 
+#define SessionClaimSize 16
+
 typedef struct session_t session_t;
 struct serverRuntime_t;
 
 typedef long long (*sessionNowMsFn_t)(void *ctx);
 typedef int (*sessionServerResolveClaimFn_t)(
     void *ctx,
-    const char *claim,
+    const unsigned char *claim,
+    long claimNbytes,
     unsigned char key[ProtocolPskSize],
     int *outActiveSlot);
 
