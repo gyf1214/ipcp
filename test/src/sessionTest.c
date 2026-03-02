@@ -16,20 +16,9 @@
 
 typedef struct {
   int epollFd;
-  int tunFd;
-  int tcpFd;
-  unsigned int tunEvents;
-  unsigned int tcpEvents;
-  long tunOutOffset;
-  long tunOutNbytes;
-  long tcpOutOffset;
-  long tcpOutNbytes;
-  unsigned char tunOutBuf[IoPollerQueueCapacity];
-  unsigned char tcpOutBuf[IoPollerQueueCapacity];
-} ioPoller_t;
-
-static void legacyToSplitPollers(const ioPoller_t *legacy, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller);
-static void splitToLegacyPoller(ioPoller_t *legacy, const ioTcpPoller_t *tcpPoller, const ioTunPoller_t *tunPoller);
+  ioTunPoller_t tunPoller;
+  ioTcpPoller_t tcpPoller;
+} splitPollersFixture_t;
 
 static long long fakeNowMs = 0;
 static unsigned char testServerKey[ProtocolPskSize] = {
@@ -45,10 +34,7 @@ static const sessionHeartbeatConfig_t defaultHeartbeatCfg = {
     .timeoutMs = 15000,
 };
 
-static int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd) {
-  ioTunPoller_t tunPoller;
-  ioTcpPoller_t tcpPoller;
-
+static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd) {
   if (poller == NULL) {
     return -1;
   }
@@ -56,58 +42,24 @@ static int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd) {
   if (poller->epollFd < 0) {
     return -1;
   }
-  if (ioTunPollerInit(&tunPoller, poller->epollFd, tunFd) < 0 || ioTcpPollerInit(&tcpPoller, poller->epollFd, tcpFd) < 0) {
+  if (ioTunPollerInit(&poller->tunPoller, poller->epollFd, tunFd) < 0
+      || ioTcpPollerInit(&poller->tcpPoller, poller->epollFd, tcpFd) < 0) {
     close(poller->epollFd);
     poller->epollFd = -1;
     return -1;
   }
-  poller->tunFd = tunFd;
-  poller->tcpFd = tcpFd;
-  poller->tunEvents = tunPoller.events;
-  poller->tcpEvents = tcpPoller.events;
-  poller->tunOutOffset = 0;
-  poller->tunOutNbytes = 0;
-  poller->tcpOutOffset = 0;
-  poller->tcpOutNbytes = 0;
-  memset(poller->tunOutBuf, 0, sizeof(poller->tunOutBuf));
-  memset(poller->tcpOutBuf, 0, sizeof(poller->tcpOutBuf));
   return 0;
 }
 
-static void ioPollerClose(ioPoller_t *poller) {
+static void teardownSplitPollers(splitPollersFixture_t *poller) {
   if (poller != NULL && poller->epollFd >= 0) {
     close(poller->epollFd);
     poller->epollFd = -1;
   }
 }
 
-static bool ioPollerQueueWrite(ioPoller_t *poller, ioSource_t source, const void *data, long nbytes) {
-  ioTcpPoller_t tcpPoller;
-  ioTunPoller_t tunPoller;
-
-  legacyToSplitPollers(poller, &tcpPoller, &tunPoller);
-  if (source == ioSourceTun) {
-    if (!ioTunWrite(&tunPoller, data, nbytes)) {
-      return false;
-    }
-  } else {
-    if (!ioTcpWrite(&tcpPoller, data, nbytes)) {
-      return false;
-    }
-  }
-  splitToLegacyPoller(poller, &tcpPoller, &tunPoller);
-  return true;
-}
-
-static ioEvent_t ioPollerWait(ioPoller_t *poller, int timeoutMs) {
-  ioTcpPoller_t tcpPoller;
-  ioTunPoller_t tunPoller;
-  ioEvent_t event;
-
-  legacyToSplitPollers(poller, &tcpPoller, &tunPoller);
-  event = ioPollersWait(&tunPoller, &tcpPoller, timeoutMs);
-  splitToLegacyPoller(poller, &tcpPoller, &tunPoller);
-  return event;
+static ioEvent_t waitSplitPollers(splitPollersFixture_t *poller, int timeoutMs) {
+  return ioPollersWait(&poller->tunPoller, &poller->tcpPoller, timeoutMs);
 }
 
 static int fakeLookup(
@@ -159,57 +111,22 @@ static long writeSecureWire(
   return ProtocolWireLengthSize + frame.nbytes;
 }
 
-static void setupPoller(ioPoller_t *poller, int tunPair[2], int tcpPair[2]) {
+static void setupSplitPollersFixture(splitPollersFixture_t *poller, int tunPair[2], int tcpPair[2]) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(ioPollerInit(poller, tunPair[0], tcpPair[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(setupSplitPollers(poller, tunPair[0], tcpPair[0]) == 0, "setupSplitPollers should succeed");
 }
 
-static void teardownPoller(ioPoller_t *poller, int tunPair[2], int tcpPair[2]) {
-  ioPollerClose(poller);
+static void teardownSplitPollersFixture(splitPollersFixture_t *poller, int tunPair[2], int tcpPair[2]) {
+  teardownSplitPollers(poller);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);
   close(tcpPair[1]);
 }
 
-static void legacyToSplitPollers(const ioPoller_t *legacy, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller) {
-  memset(tcpPoller, 0, sizeof(*tcpPoller));
-  memset(tunPoller, 0, sizeof(*tunPoller));
-  tunPoller->epollFd = legacy->epollFd;
-  tunPoller->tunFd = legacy->tunFd;
-  tunPoller->events = legacy->tunEvents;
-  tunPoller->outOffset = legacy->tunOutOffset;
-  tunPoller->outNbytes = legacy->tunOutNbytes;
-  memcpy(tunPoller->outBuf, legacy->tunOutBuf, sizeof(tunPoller->outBuf));
-  tcpPoller->epollFd = legacy->epollFd;
-  tcpPoller->tcpFd = legacy->tcpFd;
-  tcpPoller->events = legacy->tcpEvents;
-  tcpPoller->outOffset = legacy->tcpOutOffset;
-  tcpPoller->outNbytes = legacy->tcpOutNbytes;
-  memcpy(tcpPoller->outBuf, legacy->tcpOutBuf, sizeof(tcpPoller->outBuf));
-}
-
-static void splitToLegacyPoller(ioPoller_t *legacy, const ioTcpPoller_t *tcpPoller, const ioTunPoller_t *tunPoller) {
-  legacy->tunEvents = tunPoller->events;
-  legacy->tunOutOffset = tunPoller->outOffset;
-  legacy->tunOutNbytes = tunPoller->outNbytes;
-  memcpy(legacy->tunOutBuf, tunPoller->outBuf, sizeof(legacy->tunOutBuf));
-  legacy->tcpEvents = tcpPoller->events;
-  legacy->tcpOutOffset = tcpPoller->outOffset;
-  legacy->tcpOutNbytes = tcpPoller->outNbytes;
-  memcpy(legacy->tcpOutBuf, tcpPoller->outBuf, sizeof(legacy->tcpOutBuf));
-}
-
-static sessionStepResult_t runSessionStep(session_t *session, ioPoller_t *poller, ioEvent_t event, const unsigned char key[ProtocolPskSize]) {
-  ioTcpPoller_t tcpPoller;
-  ioTunPoller_t tunPoller;
-  sessionStepResult_t result;
-
-  legacyToSplitPollers(poller, &tcpPoller, &tunPoller);
-  result = sessionStep(session, &tcpPoller, &tunPoller, event, key);
-  splitToLegacyPoller(poller, &tcpPoller, &tunPoller);
-  return result;
+static sessionStepResult_t runSessionStep(session_t *session, splitPollersFixture_t *poller, ioEvent_t event, const unsigned char key[ProtocolPskSize]) {
+  return sessionStep(session, &poller->tcpPoller, &poller->tunPoller, event, key);
 }
 
 static sessionStepResult_t runSessionStepSplit(
@@ -223,7 +140,7 @@ static sessionStepResult_t runSessionStepSplit(
 
 static sessionStepResult_t runSessionStepWithSuppressedStderr(
     session_t *session,
-    ioPoller_t *poller,
+    splitPollersFixture_t *poller,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]) {
   int savedStderr = dup(STDERR_FILENO);
@@ -269,7 +186,7 @@ static void testSessionInitSeedsModeAndTimestamps(void) {
 
 static void testSessionResetClearsPendingAndPauseFlags(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
@@ -281,12 +198,12 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   memset(tunPayload, 't', sizeof(tunPayload));
   fakeNowMs = 5000;
 
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
   testAssertTrue(
-      ioPollerQueueWrite(&poller, ioSourceTcp, fill, IoPollerQueueCapacity - 32),
+      ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 32),
       "prefill tcp queue should succeed");
   testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
@@ -303,17 +220,17 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   testAssertTrue(!stats.tunReadPaused, "reset should clear tun pause");
   testAssertTrue(!stats.tcpReadPaused, "reset should clear tcp pause");
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testServerHeartbeatTimeoutStopsSession(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
 
   memset(key, 0x11, sizeof(key));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   fakeNowMs = 0;
   session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -324,12 +241,12 @@ static void testServerHeartbeatTimeoutStopsSession(void) {
       "server should stop after heartbeat timeout");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testClientHeartbeatUsesConfiguredInterval(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   sessionStats_t stats;
@@ -339,7 +256,7 @@ static void testClientHeartbeatUsesConfiguredInterval(void) {
   };
 
   memset(key, 0x31, sizeof(key));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -359,12 +276,12 @@ static void testClientHeartbeatUsesConfiguredInterval(void) {
   testAssertTrue(stats.heartbeatPending, "heartbeat should be pending at configured interval");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testClientHeartbeatTimeoutUsesConfiguredTimeout(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   sessionStats_t stats;
@@ -374,7 +291,7 @@ static void testClientHeartbeatTimeoutUsesConfiguredTimeout(void) {
   };
 
   memset(key, 0x32, sizeof(key));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -397,12 +314,12 @@ static void testClientHeartbeatTimeoutUsesConfiguredTimeout(void) {
       "client should stop at configured timeout");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   sessionHeartbeatConfig_t heartbeatCfg = {
@@ -411,7 +328,7 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
   };
 
   memset(key, 0x33, sizeof(key));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   fakeNowMs = 0;
   session_t *session = sessionCreate(true, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -426,12 +343,12 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
       "server should stop at configured timeout");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testClientHeartbeatRequestAndAckFlow(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   sessionStats_t stats;
@@ -439,7 +356,7 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   long wireNbytes;
 
   memset(key, 0x22, sizeof(key));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -466,19 +383,19 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   testAssertTrue(!stats.heartbeatPending, "heartbeat pending should clear after ack");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testClientRejectsInboundHeartbeatRequest(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   char wire[ProtocolWireLengthSize + ProtocolFrameSize];
   long wireNbytes;
 
   memset(key, 0x23, sizeof(key));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatReq, NULL, 0, wire);
@@ -488,12 +405,12 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
       "client should stop on inbound heartbeat request");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   char payload[] = "tun-payload";
@@ -504,7 +421,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   long consumed = 0;
 
   memset(key, 0x44, sizeof(key));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
@@ -513,7 +430,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "tun read event should continue");
 
-  testAssertTrue(ioPollerWait(&poller, 100) == ioEventTcpWrite, "tcp write event should be available");
+  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should be available");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
       "tcp write event should continue");
@@ -529,12 +446,12 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   testAssertTrue(memcmp(msg.buf, payload, strlen(payload)) == 0, "decoded payload should match");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testSessionTcpReadQueuesTunWrite(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   char wire[ProtocolWireLengthSize + ProtocolFrameSize];
@@ -543,7 +460,7 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   char payload[] = "tcp-payload";
 
   memset(key, 0x45, sizeof(key));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
@@ -553,7 +470,7 @@ static void testSessionTcpReadQueuesTunWrite(void) {
       runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
       "tcp read event should continue");
 
-  testAssertTrue(ioPollerWait(&poller, 100) == ioEventTunWrite, "tun write event should be available");
+  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTunWrite, "tun write event should be available");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTunWrite, key) == sessionStepContinue,
       "tun write event should continue");
@@ -561,12 +478,12 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   testAssertTrue(memcmp(out, payload, strlen(payload)) == 0, "tun payload should match");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testBackpressurePauseAndResumeFlow(void) {
   unsigned char key[ProtocolPskSize];
-  ioPoller_t poller;
+  splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
@@ -577,12 +494,12 @@ static void testBackpressurePauseAndResumeFlow(void) {
   memset(key, 0x46, sizeof(key));
   memset(fill, 'x', sizeof(fill));
   memset(tunPayload, 'y', sizeof(tunPayload));
-  setupPoller(&poller, tunPair, tcpPair);
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
   testAssertTrue(
-      ioPollerQueueWrite(&poller, ioSourceTcp, fill, IoPollerQueueCapacity - 16),
+      ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 16),
       "prefill should succeed");
   testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
@@ -592,7 +509,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
   testAssertTrue(stats.tunReadPaused, "tun read should be paused");
   testAssertTrue(stats.tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
 
-  testAssertTrue(ioPollerWait(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
+  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
   testAssertTrue(read(tcpPair[1], drain, sizeof(drain)) > 0, "drain should consume queued bytes");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
@@ -602,7 +519,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
   testAssertTrue(!stats.tunReadPaused, "tun read should resume when queue drains");
 
   sessionDestroy(session);
-  teardownPoller(&poller, tunPair, tcpPair);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testSessionCreateRejectsNullHeartbeatConfig(void) {
