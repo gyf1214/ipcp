@@ -2,11 +2,67 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 
 #include "ioTest.h"
 #include "io.h"
 #include "testAssert.h"
+
+typedef struct {
+  int epollFd;
+  ioTunPoller_t tunPoller;
+  ioTcpPoller_t tcpPoller;
+} ioPoller_t;
+
+static int ioPollerInit(ioPoller_t *poller, int tunFd, int tcpFd) {
+  if (poller == NULL) {
+    return -1;
+  }
+  poller->epollFd = epoll_create1(0);
+  if (poller->epollFd < 0) {
+    return -1;
+  }
+  if (ioTunPollerInit(&poller->tunPoller, poller->epollFd, tunFd) < 0
+      || ioTcpPollerInit(&poller->tcpPoller, poller->epollFd, tcpFd) < 0) {
+    close(poller->epollFd);
+    poller->epollFd = -1;
+    return -1;
+  }
+  return 0;
+}
+
+static void ioPollerClose(ioPoller_t *poller) {
+  if (poller != NULL && poller->epollFd >= 0) {
+    close(poller->epollFd);
+    poller->epollFd = -1;
+  }
+}
+
+static ioEvent_t ioPollerWait(ioPoller_t *poller, int timeoutMs) {
+  return ioPollersWait(&poller->tunPoller, &poller->tcpPoller, timeoutMs);
+}
+
+static bool ioPollerQueueWrite(ioPoller_t *poller, ioSource_t source, const void *data, long nbytes) {
+  if (source == ioSourceTun) {
+    return ioTunWrite(&poller->tunPoller, data, nbytes);
+  }
+  return ioTcpWrite(&poller->tcpPoller, data, nbytes);
+}
+
+static bool ioPollerSetReadEnabled(ioPoller_t *poller, ioSource_t source, bool enabled) {
+  if (source == ioSourceTun) {
+    return ioTunSetReadEnabled(&poller->tunPoller, enabled);
+  }
+  return ioTcpSetReadEnabled(&poller->tcpPoller, enabled);
+}
+
+static long ioPollerQueuedBytes(const ioPoller_t *poller, ioSource_t source) {
+  if (source == ioSourceTun) {
+    return ioTunQueuedBytes(&poller->tunPoller);
+  }
+  return ioTcpQueuedBytes(&poller->tcpPoller);
+}
 
 static void testIoReadSomeOk(void) {
   int fds[2];

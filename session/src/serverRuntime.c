@@ -1,6 +1,5 @@
 #include "serverRuntime.h"
 
-#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -25,21 +24,21 @@ static bool preAuthSlotIndexValid(const serverRuntime_t *runtime, int slot) {
 static bool runtimeTunEpollCtl(serverRuntime_t *runtime, unsigned int events) {
   struct epoll_event event;
 
-  if (runtime == NULL || runtime->tunFd < 0) {
+  if (runtime == NULL || runtime->tunPoller.tunFd < 0) {
     return false;
   }
   if (runtime->epollFd < 0) {
-    runtime->tunEvents = events;
+    runtime->tunPoller.events = events;
     return true;
   }
 
   memset(&event, 0, sizeof(event));
   event.events = events;
-  event.data.fd = runtime->tunFd;
-  if (epoll_ctl(runtime->epollFd, EPOLL_CTL_MOD, runtime->tunFd, &event) < 0) {
+  event.data.fd = runtime->tunPoller.tunFd;
+  if (epoll_ctl(runtime->epollFd, EPOLL_CTL_MOD, runtime->tunPoller.tunFd, &event) < 0) {
     return false;
   }
-  runtime->tunEvents = events;
+  runtime->tunPoller.events = events;
   return true;
 }
 
@@ -73,12 +72,14 @@ bool serverRuntimeInit(
     return false;
   }
 
-  runtime->tunFd = tunFd;
+  runtime->tunPoller.epollFd = -1;
+  runtime->tunPoller.tunFd = tunFd;
   runtime->listenFd = listenFd;
   runtime->epollFd = -1;
-  runtime->tunEvents = EPOLLIN | EPOLLRDHUP;
-  runtime->tunOutOffset = 0;
-  runtime->tunOutNbytes = 0;
+  runtime->tunPoller.events = EPOLLIN | EPOLLRDHUP;
+  runtime->tunPoller.outOffset = 0;
+  runtime->tunPoller.outNbytes = 0;
+  memset(runtime->tunPoller.outBuf, 0, sizeof(runtime->tunPoller.outBuf));
   runtime->pendingOwnerSlot = -1;
   runtime->pendingTunToTcpNbytes = 0;
   runtime->retryCursor = 0;
@@ -157,15 +158,12 @@ int serverRuntimeAddClient(
   runtime->activeConns[activeSlot].connFd = connFd;
   runtime->activeConns[activeSlot].session = session;
   sessionSetServerRuntime(session, runtime);
-  runtime->activeConns[activeSlot].poller.epollFd = runtime->epollFd;
-  runtime->activeConns[activeSlot].poller.tunFd = runtime->tunFd;
-  runtime->activeConns[activeSlot].poller.tcpFd = connFd;
-  runtime->activeConns[activeSlot].poller.tunEvents = runtime->tunEvents;
-  runtime->activeConns[activeSlot].poller.tcpEvents = EPOLLIN | EPOLLRDHUP;
-  runtime->activeConns[activeSlot].poller.tunOutOffset = 0;
-  runtime->activeConns[activeSlot].poller.tunOutNbytes = 0;
-  runtime->activeConns[activeSlot].poller.tcpOutOffset = 0;
-  runtime->activeConns[activeSlot].poller.tcpOutNbytes = 0;
+  runtime->activeConns[activeSlot].tcpPoller.epollFd = runtime->epollFd;
+  runtime->activeConns[activeSlot].tcpPoller.tcpFd = connFd;
+  runtime->activeConns[activeSlot].tcpPoller.events = EPOLLIN | EPOLLRDHUP;
+  runtime->activeConns[activeSlot].tcpPoller.outOffset = 0;
+  runtime->activeConns[activeSlot].tcpPoller.outNbytes = 0;
+  memset(runtime->activeConns[activeSlot].tcpPoller.outBuf, 0, sizeof(runtime->activeConns[activeSlot].tcpPoller.outBuf));
   memcpy(runtime->activeConns[activeSlot].key, key, ProtocolPskSize);
   memcpy(runtime->activeConns[activeSlot].claim, claim, (size_t)claimNbytes);
   runtime->activeConns[activeSlot].claimNbytes = claimNbytes;
@@ -183,8 +181,9 @@ bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot) {
     return false;
   }
   sessionDestroy(runtime->activeConns[slot].session);
-  runtime->activeConns[slot].poller.tcpOutOffset = 0;
-  runtime->activeConns[slot].poller.tcpOutNbytes = 0;
+  runtime->activeConns[slot].tcpPoller.outOffset = 0;
+  runtime->activeConns[slot].tcpPoller.outNbytes = 0;
+  memset(runtime->activeConns[slot].tcpPoller.outBuf, 0, sizeof(runtime->activeConns[slot].tcpPoller.outBuf));
   memset(runtime->activeConns[slot].key, 0, sizeof(runtime->activeConns[slot].key));
   memset(runtime->activeConns[slot].claim, 0, sizeof(runtime->activeConns[slot].claim));
   runtime->activeConns[slot].claimNbytes = 0;
@@ -254,7 +253,7 @@ long serverRuntimeQueuedTunBytes(const serverRuntime_t *runtime) {
   if (runtime == NULL) {
     return -1;
   }
-  return runtime->tunOutNbytes;
+  return ioTunQueuedBytes(&runtime->tunPoller);
 }
 
 long long serverRuntimeNowMs(const serverRuntime_t *runtime) {
@@ -275,67 +274,37 @@ bool serverRuntimeSyncTunWriteInterest(serverRuntime_t *runtime) {
     return true;
   }
 
-  needWrite = runtime->tunOutNbytes > 0;
-  nextEvents = runtime->tunEvents;
+  needWrite = runtime->tunPoller.outNbytes > 0;
+  nextEvents = runtime->tunPoller.events;
   if (needWrite) {
     nextEvents |= EPOLLOUT;
   } else {
     nextEvents &= ~EPOLLOUT;
   }
-  if (nextEvents == runtime->tunEvents) {
+  if (nextEvents == runtime->tunPoller.events) {
     return true;
   }
   return runtimeTunEpollCtl(runtime, nextEvents);
 }
 
 bool serverRuntimeQueueTunWrite(serverRuntime_t *runtime, const void *data, long nbytes) {
-  long used;
-
-  if (runtime == NULL || data == NULL || nbytes <= 0 || nbytes > IoPollerQueueCapacity) {
-    return false;
-  }
-
-  used = runtime->tunOutOffset + runtime->tunOutNbytes;
-  if (used + nbytes > IoPollerQueueCapacity && runtime->tunOutOffset > 0) {
-    memmove(runtime->tunOutBuf, runtime->tunOutBuf + runtime->tunOutOffset, (size_t)runtime->tunOutNbytes);
-    runtime->tunOutOffset = 0;
-    used = runtime->tunOutNbytes;
-  }
-
-  if (used + nbytes > IoPollerQueueCapacity) {
-    return false;
-  }
-
-  memcpy(runtime->tunOutBuf + used, data, (size_t)nbytes);
-  runtime->tunOutNbytes += nbytes;
-  return serverRuntimeSyncTunWriteInterest(runtime);
-}
-
-bool serverRuntimeServiceTunWriteEvent(serverRuntime_t *runtime) {
-  while (runtime != NULL && runtime->tunOutNbytes > 0) {
-    long wrote = (long)write(runtime->tunFd, runtime->tunOutBuf + runtime->tunOutOffset, (size_t)runtime->tunOutNbytes);
-    if (wrote > 0) {
-      runtime->tunOutOffset += wrote;
-      runtime->tunOutNbytes -= wrote;
-      continue;
-    }
-    if (wrote == 0) {
-      return false;
-    }
-    if (errno == EINTR) {
-      continue;
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return serverRuntimeSyncTunWriteInterest(runtime);
-    }
-    return false;
-  }
-
   if (runtime == NULL) {
     return false;
   }
-  runtime->tunOutOffset = 0;
-  return serverRuntimeSyncTunWriteInterest(runtime);
+  if (runtime->epollFd >= 0) {
+    runtime->tunPoller.epollFd = runtime->epollFd;
+  }
+  if (!ioTunWrite(&runtime->tunPoller, data, nbytes)) {
+    return false;
+  }
+  return true;
+}
+
+bool serverRuntimeServiceTunWriteEvent(serverRuntime_t *runtime) {
+  if (runtime == NULL) {
+    return false;
+  }
+  return ioTunServiceWriteEvent(&runtime->tunPoller);
 }
 
 int serverRuntimeRetryBlockedTunRoundRobin(serverRuntime_t *runtime) {
@@ -361,9 +330,9 @@ int serverRuntimeRetryBlockedTunRoundRobin(serverRuntime_t *runtime) {
     if (!sessionHasPendingTunEgress(session)) {
       continue;
     }
-    if (!sessionServiceBackpressure(session, &runtime->activeConns[slot].poller)) {
-      return -1;
-    }
+      if (!sessionServiceBackpressure(session, &runtime->activeConns[slot].tcpPoller, &runtime->tunPoller)) {
+        return -1;
+      }
   }
 
   for (i = 1; i <= runtime->maxActiveSessions; i++) {
@@ -387,13 +356,13 @@ bool serverRuntimeSetTunReadEnabled(serverRuntime_t *runtime, bool enabled) {
     return false;
   }
 
-  nextEvents = runtime->tunEvents;
+  nextEvents = runtime->tunPoller.events;
   if (enabled) {
     nextEvents |= EPOLLIN;
   } else {
     nextEvents &= ~EPOLLIN;
   }
-  if (nextEvents == runtime->tunEvents) {
+  if (nextEvents == runtime->tunPoller.events) {
     return true;
   }
   return runtimeTunEpollCtl(runtime, nextEvents);
@@ -428,7 +397,7 @@ bool serverRuntimeStorePendingTunToTcp(serverRuntime_t *runtime, int ownerSlot, 
 }
 
 serverRuntimePendingRetry_t serverRuntimeRetryPendingTunToTcp(
-    serverRuntime_t *runtime, int ownerSlot, ioPoller_t *ownerPoller) {
+    serverRuntime_t *runtime, int ownerSlot, ioTcpPoller_t *ownerPoller) {
   long queued;
 
   if (runtime == NULL || ownerPoller == NULL) {
@@ -441,13 +410,13 @@ serverRuntimePendingRetry_t serverRuntimeRetryPendingTunToTcp(
     return serverRuntimePendingRetryBlocked;
   }
 
-  if (ioPollerQueueWrite(ownerPoller, ioSourceTcp, runtime->pendingTunToTcpBuf, runtime->pendingTunToTcpNbytes)) {
+  if (ioTcpWrite(ownerPoller, runtime->pendingTunToTcpBuf, runtime->pendingTunToTcpNbytes)) {
     runtime->pendingTunToTcpNbytes = 0;
     runtime->pendingOwnerSlot = -1;
     return serverRuntimePendingRetryQueued;
   }
 
-  queued = ioPollerQueuedBytes(ownerPoller, ioSourceTcp);
+  queued = ioTcpQueuedBytes(ownerPoller);
   if (queued < 0 || queued + runtime->pendingTunToTcpNbytes <= IoPollerQueueCapacity) {
     return serverRuntimePendingRetryError;
   }

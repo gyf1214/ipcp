@@ -106,18 +106,27 @@ static void testServerRuntimeSharedTunInterestTracksGlobalQueue(void) {
   epollFd = epoll_create1(0);
   testAssertTrue(epollFd >= 0, "epoll_create1 should succeed");
   runtime.epollFd = epollFd;
-  testAssertTrue(epoll_ctl(epollFd, EPOLL_CTL_ADD, runtime.tunFd, &(struct epoll_event){.events = runtime.tunEvents, .data.fd = runtime.tunFd}) == 0, "add tun fd should succeed");
+  testAssertTrue(
+      epoll_ctl(
+          epollFd,
+          EPOLL_CTL_ADD,
+          runtime.tunPoller.tunFd,
+          &(struct epoll_event){.events = runtime.tunPoller.events, .data.fd = runtime.tunPoller.tunFd})
+      == 0,
+      "add tun fd should succeed");
 
   testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadA, sizeof(payloadA)), "first shared tun queue write should succeed");
   testAssertTrue(serverRuntimeQueueTunWrite(&runtime, payloadB, sizeof(payloadB)), "second shared tun queue write should succeed");
-  testAssertTrue((runtime.tunEvents & EPOLLOUT) != 0, "shared tun epollout should stay enabled while queue has bytes");
+  testAssertTrue(
+      (runtime.tunPoller.events & EPOLLOUT) != 0, "shared tun epollout should stay enabled while queue has bytes");
   testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should keep epollout enabled while queue is not empty");
-  testAssertTrue((runtime.tunEvents & EPOLLOUT) != 0, "sync should preserve epollout while backlog remains");
+  testAssertTrue(
+      (runtime.tunPoller.events & EPOLLOUT) != 0, "sync should preserve epollout while backlog remains");
 
-  runtime.tunOutOffset = 0;
-  runtime.tunOutNbytes = 0;
+  runtime.tunPoller.outOffset = 0;
+  runtime.tunPoller.outNbytes = 0;
   testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should disable epollout when queue drains");
-  testAssertTrue((runtime.tunEvents & EPOLLOUT) == 0, "shared tun epollout should disable after global queue drains");
+  testAssertTrue((runtime.tunPoller.events & EPOLLOUT) == 0, "shared tun epollout should disable after global queue drains");
 
   close(epollFd);
   serverRuntimeDeinit(&runtime);

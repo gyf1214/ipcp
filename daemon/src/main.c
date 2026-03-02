@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sodium.h>
 #include <arpa/inet.h>
+#include <sys/epoll.h>
 
 #include "config.h"
 #include "crypt.h"
@@ -183,10 +184,12 @@ static int serveTcp(
     const unsigned char key[ProtocolPskSize],
     bool isServer,
     const sessionHeartbeatConfig_t *heartbeatCfg) {
-  ioPoller_t poller;
+  ioTunPoller_t tunPoller;
+  ioTcpPoller_t tcpPoller;
   ioEvent_t event;
   session_t *session = NULL;
   int tunFd = -1;
+  int epollFd = -1;
   int result = -1;
 
   logf("opening tun device %s", ifName);
@@ -197,7 +200,12 @@ static int serveTcp(
   }
   logf("successfully opened tun device %s", ifName);
 
-  if (ioPollerInit(&poller, tunFd, connFd) != 0) {
+  epollFd = epoll_create1(0);
+  if (epollFd < 0) {
+    errf("setup epoll failed: %s", strerror(errno));
+    goto cleanup;
+  }
+  if (ioTunPollerInit(&tunPoller, epollFd, tunFd) != 0 || ioTcpPollerInit(&tcpPoller, epollFd, connFd) != 0) {
     errf("setup epoll failed: %s", strerror(errno));
     goto cleanup;
   }
@@ -205,20 +213,18 @@ static int serveTcp(
   session = sessionCreate(isServer, heartbeatCfg, NULL, NULL);
   if (session == NULL) {
     errf("session setup failed");
-    ioPollerClose(&poller);
     goto cleanup;
   }
 
   while (1) {
-    event = ioPollerWait(&poller, EPOLL_WAIT_MS);
-    if (sessionStep(session, &poller, event, key) == sessionStepStop) {
+    event = ioPollersWait(&tunPoller, &tcpPoller, EPOLL_WAIT_MS);
+    if (sessionStep(session, &tcpPoller, &tunPoller, event, key) == sessionStepStop) {
       break;
     }
   }
 
   result = 0;
   sessionDestroy(session);
-  ioPollerClose(&poller);
   logf("connection stopped");
 
 cleanup:
@@ -230,6 +236,9 @@ cleanup:
   }
   if (tunFd >= 0) {
     close(tunFd);
+  }
+  if (epollFd >= 0) {
+    close(epollFd);
   }
 
   return result;

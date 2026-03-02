@@ -33,7 +33,7 @@ typedef struct {
 typedef struct {
   int connFd;
   session_t *session;
-  ioPoller_t poller;
+  ioTcpPoller_t tcpPoller;
   unsigned char key[ProtocolPskSize];
   unsigned char claim[SessionClaimSize];
   long claimNbytes;
@@ -41,13 +41,9 @@ typedef struct {
 } activeConn_t;
 
 struct serverRuntime_t {
-  int tunFd;
   int listenFd;
   int epollFd;
-  unsigned int tunEvents;
-  long tunOutOffset;
-  long tunOutNbytes;
-  unsigned char tunOutBuf[IoPollerQueueCapacity];
+  ioTunPoller_t tunPoller;
   int pendingOwnerSlot;
   long pendingTunToTcpNbytes;
   unsigned char pendingTunToTcpBuf[ProtocolWireLengthSize + ProtocolFrameSize];
@@ -99,7 +95,7 @@ bool serverRuntimeHasPendingTunToTcp(const serverRuntime_t *runtime);
 int serverRuntimePendingTunToTcpOwner(const serverRuntime_t *runtime);
 bool serverRuntimeStorePendingTunToTcp(serverRuntime_t *runtime, int ownerSlot, const void *data, long nbytes);
 serverRuntimePendingRetry_t serverRuntimeRetryPendingTunToTcp(
-    serverRuntime_t *runtime, int ownerSlot, ioPoller_t *ownerPoller);
+    serverRuntime_t *runtime, int ownerSlot, ioTcpPoller_t *ownerPoller);
 bool serverRuntimeDropPendingTunToTcpByOwner(serverRuntime_t *runtime, int ownerSlot);
 
 session_t *serverRuntimeSessionAt(serverRuntime_t *runtime, int slot);
