@@ -46,7 +46,11 @@ void sessionDestroy(session_t *session);
 void sessionReset(session_t *session);
 bool sessionGetStats(const session_t *session, sessionStats_t *outStats);
 void sessionSetServerRuntime(session_t *session, struct serverRuntime_t *runtime);
-bool sessionSetTcpDecoder(session_t *session, const protocolDecoder_t *decoder);
+bool sessionPromoteFromPreAuth(
+    session_t *session,
+    const protocolDecoder_t *decoder,
+    const char *carryBuf,
+    long carryNbytes);
 bool sessionHasPendingTunEgress(const session_t *session);
 bool sessionServiceBackpressure(session_t *session, ioPoller_t *poller);
 sessionStepResult_t sessionStep(

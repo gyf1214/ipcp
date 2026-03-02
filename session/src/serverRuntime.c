@@ -538,6 +538,8 @@ bool serverRuntimeRemovePreAuthConn(serverRuntime_t *runtime, int preAuthSlot) {
   memset(conn->resolvedKey, 0, sizeof(conn->resolvedKey));
   memset(conn->serverNonce, 0, sizeof(conn->serverNonce));
   memset(conn->claim, 0, sizeof(conn->claim));
+  memset(conn->tcpReadCarryBuf, 0, sizeof(conn->tcpReadCarryBuf));
+  conn->tcpReadCarryNbytes = 0;
   memset(conn->authWriteBuf, 0, sizeof(conn->authWriteBuf));
   conn->authWriteOffset = 0;
   conn->authWriteNbytes = 0;

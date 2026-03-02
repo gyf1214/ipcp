@@ -603,11 +603,22 @@ void sessionSetServerRuntime(session_t *session, serverRuntime_t *runtime) {
   session->runtime = runtime;
 }
 
-bool sessionSetTcpDecoder(session_t *session, const protocolDecoder_t *decoder) {
-  if (session == NULL || decoder == NULL) {
+bool sessionPromoteFromPreAuth(
+    session_t *session,
+    const protocolDecoder_t *decoder,
+    const char *carryBuf,
+    long carryNbytes) {
+  if (session == NULL || decoder == NULL || carryNbytes < 0 || carryNbytes > ProtocolFrameSize) {
     return false;
   }
   session->tcpDecoder = *decoder;
+  if (carryNbytes > 0) {
+    if (carryBuf == NULL) {
+      return false;
+    }
+    memcpy(session->tcpReadCarryBuf, carryBuf, (size_t)carryNbytes);
+  }
+  session->tcpReadCarryNbytes = carryNbytes;
   return true;
 }
 
@@ -713,30 +724,62 @@ static bool serverSetPreAuthWriteEnabled(serverRuntime_t *runtime, int connFd, b
   return serverEpollCtl(runtime->epollFd, EPOLL_CTL_MOD, connFd, events);
 }
 
+static bool preAuthReadIntoCarry(preAuthConn_t *conn) {
+  long nbytes = 0;
+  ioStatus_t status;
+
+  if (conn->tcpReadCarryNbytes >= (long)sizeof(conn->tcpReadCarryBuf)) {
+    return false;
+  }
+  status = ioReadSome(
+      conn->connFd,
+      conn->tcpReadCarryBuf + conn->tcpReadCarryNbytes,
+      (long)sizeof(conn->tcpReadCarryBuf) - conn->tcpReadCarryNbytes,
+      &nbytes);
+  if (status == ioStatusWouldBlock) {
+    return true;
+  }
+  if (status != ioStatusOk || nbytes <= 0) {
+    return false;
+  }
+  conn->tcpReadCarryNbytes += nbytes;
+  return true;
+}
+
+static void preAuthDropConsumedCarry(preAuthConn_t *conn, long consumedNbytes) {
+  long remaining;
+  if (consumedNbytes <= 0) {
+    return;
+  }
+  if (consumedNbytes >= conn->tcpReadCarryNbytes) {
+    conn->tcpReadCarryNbytes = 0;
+    return;
+  }
+  remaining = conn->tcpReadCarryNbytes - consumedNbytes;
+  memmove(conn->tcpReadCarryBuf, conn->tcpReadCarryBuf + consumedNbytes, (size_t)remaining);
+  conn->tcpReadCarryNbytes = remaining;
+}
+
 static bool preAuthDecodeClaim(preAuthConn_t *conn, bool *outReady) {
   protocolRawMsg_t rawMsg;
-  char byte = 0;
+  long offset = 0;
 
   *outReady = false;
-  while (1) {
+  while (offset < conn->tcpReadCarryNbytes) {
     long consumed = 0;
-    ssize_t nread = read(conn->connFd, &byte, 1);
-    if (nread == 0) {
-      return false;
-    }
-    if (nread < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return true;
-      }
-      return false;
-    }
-    protocolStatus_t status = protocolDecodeRaw(&conn->decoder, &byte, 1, &consumed, &rawMsg);
+    protocolStatus_t status = protocolDecodeRaw(
+        &conn->decoder,
+        conn->tcpReadCarryBuf + offset,
+        conn->tcpReadCarryNbytes - offset,
+        &consumed,
+        &rawMsg);
     if (status == protocolStatusBadFrame) {
       return false;
     }
+    if (consumed <= 0) {
+      break;
+    }
+    offset += consumed;
     if (status == protocolStatusOk) {
       if (rawMsg.nbytes <= 0 || rawMsg.nbytes >= SessionClaimSize) {
         return false;
@@ -744,9 +787,11 @@ static bool preAuthDecodeClaim(preAuthConn_t *conn, bool *outReady) {
       memcpy(conn->claim, rawMsg.buf, (size_t)rawMsg.nbytes);
       conn->claim[rawMsg.nbytes] = '\0';
       *outReady = true;
-      return true;
+      break;
     }
   }
+  preAuthDropConsumedCarry(conn, offset);
+  return true;
 }
 
 static bool preAuthQueueChallenge(preAuthConn_t *conn) {
@@ -794,29 +839,25 @@ static bool preAuthFlushChallenge(preAuthConn_t *conn) {
 
 static bool preAuthDecodeHello(preAuthConn_t *conn, bool *outReady) {
   protocolMessage_t msg;
-  char byte = 0;
+  long offset = 0;
 
   *outReady = false;
-  while (1) {
+  while (offset < conn->tcpReadCarryNbytes) {
     long consumed = 0;
-    ssize_t nread = read(conn->connFd, &byte, 1);
-    if (nread == 0) {
-      return false;
-    }
-    if (nread < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return true;
-      }
-      return false;
-    }
-    protocolStatus_t status =
-        protocolDecodeSecureMsg(&conn->decoder, conn->resolvedKey, &byte, 1, &consumed, &msg);
+    protocolStatus_t status = protocolDecodeSecureMsg(
+        &conn->decoder,
+        conn->resolvedKey,
+        conn->tcpReadCarryBuf + offset,
+        conn->tcpReadCarryNbytes - offset,
+        &consumed,
+        &msg);
     if (status == protocolStatusBadFrame) {
       return false;
     }
+    if (consumed <= 0) {
+      break;
+    }
+    offset += consumed;
     if (status == protocolStatusOk) {
       if (msg.type != protocolMsgClientHello || msg.nbytes != ProtocolNonceSize * 2) {
         return false;
@@ -825,9 +866,11 @@ static bool preAuthDecodeHello(preAuthConn_t *conn, bool *outReady) {
         return false;
       }
       *outReady = true;
-      return true;
+      break;
     }
   }
+  preAuthDropConsumedCarry(conn, offset);
+  return true;
 }
 
 static bool serverDispatchPreAuth(
@@ -856,6 +899,9 @@ static bool serverDispatchPreAuth(
   if (conn->authState == preAuthStateWaitClaim && event == ioEventTcpRead) {
     bool claimReady = false;
 
+    if (!preAuthReadIntoCarry(conn)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
     if (!preAuthDecodeClaim(conn, &claimReady)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
@@ -899,8 +945,13 @@ static bool serverDispatchPreAuth(
     int activeSlot;
     int activeConnFd;
     protocolDecoder_t helloDecoder;
+    char helloCarryBuf[ProtocolFrameSize];
+    long helloCarryNbytes = 0;
     session_t *activeSession;
 
+    if (!preAuthReadIntoCarry(conn)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
     if (!preAuthDecodeHello(conn, &helloReady)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
@@ -911,12 +962,18 @@ static bool serverDispatchPreAuth(
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
     helloDecoder = conn->decoder;
+    helloCarryNbytes = conn->tcpReadCarryNbytes;
+    if (helloCarryNbytes > 0) {
+      memcpy(helloCarryBuf, conn->tcpReadCarryBuf, (size_t)helloCarryNbytes);
+    }
     activeSlot = conn->resolvedActiveSlot;
     if (!serverRuntimePromoteToActiveSlot(runtime, preAuthSlot)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
     activeSession = serverRuntimeSessionAt(runtime, activeSlot);
-    if (activeSession == NULL || !sessionSetTcpDecoder(activeSession, &helloDecoder)) {
+    if (activeSession == NULL
+        || !sessionPromoteFromPreAuth(
+            activeSession, &helloDecoder, helloCarryNbytes > 0 ? helloCarryBuf : NULL, helloCarryNbytes)) {
       int failedConnFd = serverRuntimeConnFdAt(runtime, activeSlot);
       if (failedConnFd >= 0) {
         close(failedConnFd);
