@@ -32,14 +32,15 @@ static const char *ifModeLabel(configIfMode_t mode) {
 
 static int serverLookupByClaim(
     void *ctx,
-    const char *claim,
+    const unsigned char *claim,
+    long claimNbytes,
     unsigned char key[ProtocolPskSize],
     int *outActiveSlot) {
   serverKeyLookupCtx_t *lookup = (serverKeyLookupCtx_t *)ctx;
   if (lookup == NULL || lookup->store == NULL) {
     return -1;
   }
-  return cryptServerKeyStoreLookup(lookup->store, lookup->ifMode, claim, key, outActiveSlot);
+  return cryptServerKeyStoreLookup(lookup->store, lookup->ifMode, claim, claimNbytes, key, outActiveSlot);
 }
 
 static int writeAll(int fd, const void *buf, long nbytes) {
@@ -133,17 +134,17 @@ static int decodeRawWireFrame(const protocolFrame_t *frame, protocolRawMsg_t *ms
 }
 
 static int clientRunPreAuthHandshake(
-    int connFd, const char *claim, const unsigned char key[ProtocolPskSize]) {
+    int connFd, const unsigned char *claim, long claimNbytes, const unsigned char key[ProtocolPskSize]) {
   protocolFrame_t frame;
   protocolRawMsg_t rawMsg;
   protocolMessage_t msg;
   unsigned char helloPayload[ProtocolNonceSize * 2];
 
-  if (claim == NULL || claim[0] == '\0' || key == NULL) {
+  if (claim == NULL || claimNbytes <= 0 || key == NULL) {
     return -1;
   }
-  rawMsg.nbytes = (long)strlen(claim);
-  rawMsg.buf = claim;
+  rawMsg.nbytes = claimNbytes;
+  rawMsg.buf = (const char *)claim;
   if (protocolEncodeRaw(&rawMsg, &frame) != protocolStatusOk) {
     return -1;
   }
@@ -288,7 +289,8 @@ static int connTcp(
     configIfMode_t ifMode,
     const char *remoteIP,
     int port,
-    const char *claim,
+    const unsigned char *claim,
+    long claimNbytes,
     const unsigned char key[ProtocolPskSize],
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   int connFd = ioTcpConnect(remoteIP, port);
@@ -297,7 +299,7 @@ static int connTcp(
     return -1;
   }
   logf("connected to %s:%d", remoteIP, port);
-  if (clientRunPreAuthHandshake(connFd, claim, key) != 0) {
+  if (clientRunPreAuthHandshake(connFd, claim, claimNbytes, key) != 0) {
     errf("pre-auth handshake failed");
     close(connFd);
     return -1;
@@ -362,9 +364,9 @@ int main(int argc, char **argv) {
             ? EXIT_SUCCESS
             : EXIT_FAILURE;
   } else {
-    const char *claim = cfg.ifMode == configIfModeTap ? cfg.tapMac : cfg.tunIP;
+    const unsigned char *claim = cfg.claim;
     exitCode =
-        connTcp(cfg.ifName, cfg.ifMode, cfg.serverIP, cfg.serverPort, claim, key, &heartbeatCfg) == 0
+        connTcp(cfg.ifName, cfg.ifMode, cfg.serverIP, cfg.serverPort, claim, cfg.claimNbytes, key, &heartbeatCfg) == 0
             ? EXIT_SUCCESS
             : EXIT_FAILURE;
   }

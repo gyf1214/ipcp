@@ -61,14 +61,13 @@ int cryptServerKeyStoreLoadFromConfig(cryptServerKeyStore_t *store, const daemon
       cryptServerKeyStoreZero(store);
       return -1;
     }
-    entry->ifMode = cfg->ifMode;
-    if (cfg->ifMode == configIfModeTun) {
-      strncpy(entry->claim, cred->tunIP, sizeof(entry->claim) - 1);
-      entry->claim[sizeof(entry->claim) - 1] = '\0';
-    } else {
-      strncpy(entry->claim, cred->tapMac, sizeof(entry->claim) - 1);
-      entry->claim[sizeof(entry->claim) - 1] = '\0';
+    if (cred->claimNbytes <= 0 || cred->claimNbytes > SessionClaimSize) {
+      cryptServerKeyStoreZero(store);
+      return -1;
     }
+    entry->ifMode = cfg->ifMode;
+    memcpy(entry->claim, cred->claim, (size_t)cred->claimNbytes);
+    entry->claimNbytes = cred->claimNbytes;
   }
 
   store->count = cfg->serverCredentialCount;
@@ -78,18 +77,22 @@ int cryptServerKeyStoreLoadFromConfig(cryptServerKeyStore_t *store, const daemon
 int cryptServerKeyStoreLookup(
     const cryptServerKeyStore_t *store,
     configIfMode_t ifMode,
-    const char *claim,
+    const unsigned char *claim,
+    long claimNbytes,
     unsigned char key[ProtocolPskSize],
     int *outSlot) {
   int i;
-  if (store == NULL || claim == NULL || key == NULL) {
+  if (store == NULL || claim == NULL || claimNbytes <= 0 || key == NULL) {
     return -1;
   }
   for (i = 0; i < store->count; i++) {
     if (store->entries[i].ifMode != ifMode) {
       continue;
     }
-    if (strcmp(store->entries[i].claim, claim) != 0) {
+    if (store->entries[i].claimNbytes != claimNbytes) {
+      continue;
+    }
+    if (memcmp(store->entries[i].claim, claim, (size_t)claimNbytes) != 0) {
       continue;
     }
     memcpy(key, store->entries[i].key, ProtocolPskSize);

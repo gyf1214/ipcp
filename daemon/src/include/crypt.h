@@ -5,7 +5,8 @@
 
 typedef struct {
   configIfMode_t ifMode;
-  char claim[ConfigTextSize];
+  unsigned char claim[SessionClaimSize];
+  long claimNbytes;
   unsigned char key[ProtocolPskSize];
 } cryptServerKeyEntry_t;
 
@@ -21,6 +22,7 @@ int cryptServerKeyStoreLoadFromConfig(cryptServerKeyStore_t *store, const daemon
 int cryptServerKeyStoreLookup(
     const cryptServerKeyStore_t *store,
     configIfMode_t ifMode,
-    const char *claim,
+    const unsigned char *claim,
+    long claimNbytes,
     unsigned char key[ProtocolPskSize],
     int *outSlot);
