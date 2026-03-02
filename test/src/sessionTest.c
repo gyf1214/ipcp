@@ -110,32 +110,6 @@ static ioEvent_t ioPollerWait(ioPoller_t *poller, int timeoutMs) {
   return event;
 }
 
-static long ioPollerQueuedBytes(const ioPoller_t *poller, ioSource_t source) {
-  ioTcpPoller_t tcpPoller;
-  ioTunPoller_t tunPoller;
-
-  legacyToSplitPollers(poller, &tcpPoller, &tunPoller);
-  if (source == ioSourceTun) {
-    return ioTunQueuedBytes(&tunPoller);
-  }
-  return ioTcpQueuedBytes(&tcpPoller);
-}
-
-static bool ioPollerSetReadEnabled(ioPoller_t *poller, ioSource_t source, bool enabled) {
-  ioTcpPoller_t tcpPoller;
-  ioTunPoller_t tunPoller;
-  bool ok;
-
-  legacyToSplitPollers(poller, &tcpPoller, &tunPoller);
-  if (source == ioSourceTun) {
-    ok = ioTunSetReadEnabled(&tunPoller, enabled);
-  } else {
-    ok = ioTcpSetReadEnabled(&tcpPoller, enabled);
-  }
-  splitToLegacyPoller(poller, &tcpPoller, &tunPoller);
-  return ok;
-}
-
 static int fakeLookup(
     void *ctx,
     const unsigned char *claim,
