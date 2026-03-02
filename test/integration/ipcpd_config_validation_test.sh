@@ -207,6 +207,30 @@ cat > "$tmpDir/server-tap-credentials-missing-mac.json" <<JSON
 }
 JSON
 
+cat > "$tmpDir/client-tun-invalid-claim-format.json" <<JSON
+{
+  "mode": "client",
+  "if_name": "tun0",
+  "if_mode": "tun",
+  "tun_ip": "10.0.0",
+  "server_ip": "127.0.0.1",
+  "server_port": 46000,
+  "key_file": "/tmp/none.key"
+}
+JSON
+
+cat > "$tmpDir/client-tap-invalid-claim-format.json" <<JSON
+{
+  "mode": "client",
+  "if_name": "tap0",
+  "if_mode": "tap",
+  "tap_mac": "02:11:22:33:44",
+  "server_ip": "127.0.0.1",
+  "server_port": 46000,
+  "key_file": "/tmp/none.key"
+}
+JSON
+
 run_expect_invalid_config "$tmpDir/missing-field.json"
 run_expect_invalid_config "$tmpDir/bad-port-type.json"
 run_expect_invalid_config "$tmpDir/bad-mode.json"
@@ -219,6 +243,8 @@ run_expect_invalid_config "$tmpDir/server-bad-auth-timeout.json"
 run_expect_invalid_config "$tmpDir/server-missing-max-pre-auth.json"
 run_expect_invalid_config "$tmpDir/server-tun-credentials-missing-ip.json"
 run_expect_invalid_config "$tmpDir/server-tap-credentials-missing-mac.json"
+run_expect_invalid_config "$tmpDir/client-tun-invalid-claim-format.json"
+run_expect_invalid_config "$tmpDir/client-tap-invalid-claim-format.json"
 run_expect_invalid_secret "$tmpDir/missing-if-mode-defaults-to-tun.json"
 
 echo "ipcpd config validation integration test passed"

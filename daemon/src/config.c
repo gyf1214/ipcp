@@ -114,6 +114,19 @@ static int parseIPv4String(const char *s) {
   return inet_pton(AF_INET, s, &addr) == 1;
 }
 
+static int parseIPv4Claim(const char *s, unsigned char out[SessionClaimSize], long *outNbytes) {
+  struct in_addr addr;
+  if (s == NULL || out == NULL || outNbytes == NULL) {
+    return -1;
+  }
+  if (inet_pton(AF_INET, s, &addr) != 1) {
+    return -1;
+  }
+  memcpy(out, &addr, 4);
+  *outNbytes = 4;
+  return 0;
+}
+
 static int parseMacString(const char *s) {
   int i;
   if (s == NULL || strlen(s) != 17) {
@@ -131,6 +144,36 @@ static int parseMacString(const char *s) {
     }
   }
   return 1;
+}
+
+static int hexNibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return 10 + c - 'a';
+  }
+  if (c >= 'A' && c <= 'F') {
+    return 10 + c - 'A';
+  }
+  return -1;
+}
+
+static int parseMacClaim(const char *s, unsigned char out[SessionClaimSize], long *outNbytes) {
+  int i;
+  if (s == NULL || out == NULL || outNbytes == NULL || !parseMacString(s)) {
+    return -1;
+  }
+  for (i = 0; i < 6; i++) {
+    int hi = hexNibble(s[i * 3]);
+    int lo = hexNibble(s[i * 3 + 1]);
+    if (hi < 0 || lo < 0) {
+      return -1;
+    }
+    out[i] = (unsigned char)((hi << 4) | lo);
+  }
+  *outNbytes = 6;
+  return 0;
 }
 
 static int parseServerCredentials(const cJSON *root, daemonConfig_t *cfg) {
@@ -159,11 +202,17 @@ static int parseServerCredentials(const cJSON *root, daemonConfig_t *cfg) {
       if (copyRequiredString(entry, "tun_ip", cred->tunIP) != 0 || !parseIPv4String(cred->tunIP)) {
         return -1;
       }
+      if (parseIPv4Claim(cred->tunIP, cred->claim, &cred->claimNbytes) != 0) {
+        return -1;
+      }
       if (cJSON_GetObjectItemCaseSensitive(entry, "tap_mac") != NULL) {
         return -1;
       }
     } else if (cfg->ifMode == configIfModeTap) {
       if (copyRequiredString(entry, "tap_mac", cred->tapMac) != 0 || !parseMacString(cred->tapMac)) {
+        return -1;
+      }
+      if (parseMacClaim(cred->tapMac, cred->claim, &cred->claimNbytes) != 0) {
         return -1;
       }
       if (cJSON_GetObjectItemCaseSensitive(entry, "tun_ip") != NULL) {
@@ -220,8 +269,14 @@ static int parseClientConfig(const cJSON *root, daemonConfig_t *cfg) {
     if (copyRequiredString(root, "tun_ip", cfg->tunIP) != 0 || !parseIPv4String(cfg->tunIP)) {
       return -1;
     }
+    if (parseIPv4Claim(cfg->tunIP, cfg->claim, &cfg->claimNbytes) != 0) {
+      return -1;
+    }
   } else if (cfg->ifMode == configIfModeTap) {
     if (copyRequiredString(root, "tap_mac", cfg->tapMac) != 0 || !parseMacString(cfg->tapMac)) {
+      return -1;
+    }
+    if (parseMacClaim(cfg->tapMac, cfg->claim, &cfg->claimNbytes) != 0) {
       return -1;
     }
   } else {
