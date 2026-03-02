@@ -137,9 +137,12 @@ Supported v1 schema:
   - `if_mode: "tap"` entries use `tap_mac` + `key_file`
   - Top-level server `key_file` is not accepted
 - Server pre-auth handshake is:
-  - client sends cleartext claim bootstrap frame
-  - server sends cleartext `AUTH_CHALLENGE` nonce
+  - client sends cleartext binary claim bootstrap frame
+    - `tun`: 4-byte IPv4 address bytes
+    - `tap`: 6-byte MAC address bytes
+  - server sends cleartext raw nonce challenge payload
   - client sends encrypted `CLIENT_HELLO` with nonce echo + client nonce
+- JSON config still uses text claims (`tun_ip`/`tap_mac`); `ipcpd` converts claims to binary at config-load time
 
 ### Secret file
 
