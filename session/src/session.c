@@ -603,6 +603,14 @@ void sessionSetServerRuntime(session_t *session, serverRuntime_t *runtime) {
   session->runtime = runtime;
 }
 
+bool sessionSetTcpDecoder(session_t *session, const protocolDecoder_t *decoder) {
+  if (session == NULL || decoder == NULL) {
+    return false;
+  }
+  session->tcpDecoder = *decoder;
+  return true;
+}
+
 bool sessionHasPendingTunEgress(const session_t *session) {
   if (session == NULL) {
     return false;
@@ -890,6 +898,8 @@ static bool serverDispatchPreAuth(
     bool helloReady = false;
     int activeSlot;
     int activeConnFd;
+    protocolDecoder_t helloDecoder;
+    session_t *activeSession;
 
     if (!preAuthDecodeHello(conn, &helloReady)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
@@ -900,9 +910,19 @@ static bool serverDispatchPreAuth(
     if (serverRuntimeHasActiveClaim(runtime, conn->claim)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
     }
+    helloDecoder = conn->secureDecoder;
     activeSlot = conn->resolvedActiveSlot;
     if (!serverRuntimePromoteToActiveSlot(runtime, preAuthSlot)) {
       return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    activeSession = serverRuntimeSessionAt(runtime, activeSlot);
+    if (activeSession == NULL || !sessionSetTcpDecoder(activeSession, &helloDecoder)) {
+      int failedConnFd = serverRuntimeConnFdAt(runtime, activeSlot);
+      if (failedConnFd >= 0) {
+        close(failedConnFd);
+      }
+      (void)serverRuntimeRemoveClient(runtime, activeSlot);
+      return false;
     }
     activeConnFd = serverRuntimeConnFdAt(runtime, activeSlot);
     runtime->activeConns[activeSlot].poller.epollFd = runtime->epollFd;
