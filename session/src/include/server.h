@@ -2,7 +2,7 @@
 
 #include <stdbool.h>
 
-#include "session.h"
+#include "sessionInternal.h"
 
 typedef struct server_t server_t;
 

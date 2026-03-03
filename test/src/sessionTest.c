@@ -11,7 +11,7 @@
 #include "io.h"
 #include "protocol.h"
 #include "server.h"
-#include "session.h"
+#include "sessionInternal.h"
 #include "testAssert.h"
 
 typedef struct {

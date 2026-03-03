@@ -1,4 +1,4 @@
-#include "session.h"
+#include "sessionInternal.h"
 
 #include <arpa/inet.h>
 #include <stdint.h>

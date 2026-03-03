@@ -1,7 +1,7 @@
 #pragma once
 
 #include "protocol.h"
-#include "session.h"
+#include "sessionInternal.h"
 
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg);
 int clientWriteSecureMsg(
