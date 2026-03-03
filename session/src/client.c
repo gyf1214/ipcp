@@ -47,18 +47,6 @@ static int readAll(int fd, void *buf, long nbytes) {
   return 0;
 }
 
-static int writeWireFrame(int fd, const protocolFrame_t *frame) {
-  uint32_t wire = 0;
-  if (frame == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
-    return -1;
-  }
-  wire = htonl((uint32_t)frame->nbytes);
-  if (writeAll(fd, &wire, ProtocolWireLengthSize) != 0) {
-    return -1;
-  }
-  return writeAll(fd, frame->buf, frame->nbytes);
-}
-
 static int readWireFrame(int fd, protocolFrame_t *frame) {
   uint32_t wire = 0;
   if (frame == NULL) {
@@ -116,8 +104,14 @@ static int clientRunPreAuthHandshake(
   if (protocolEncodeRaw(&rawMsg, &frame) != protocolStatusOk) {
     return -1;
   }
-  if (writeWireFrame(connFd, &frame) != 0) {
-    return -1;
+  {
+    uint32_t wireNbytes = htonl((uint32_t)frame.nbytes);
+    if (writeAll(connFd, &wireNbytes, ProtocolWireLengthSize) != 0) {
+      return -1;
+    }
+    if (writeAll(connFd, frame.buf, frame.nbytes) != 0) {
+      return -1;
+    }
   }
 
   if (readWireFrame(connFd, &frame) != 0) {
@@ -138,8 +132,14 @@ static int clientRunPreAuthHandshake(
   if (protocolEncodeSecureMsg(&msg, key, &frame) != protocolStatusOk) {
     return -1;
   }
-  if (writeWireFrame(connFd, &frame) != 0) {
-    return -1;
+  {
+    uint32_t wireNbytes = htonl((uint32_t)frame.nbytes);
+    if (writeAll(connFd, &wireNbytes, ProtocolWireLengthSize) != 0) {
+      return -1;
+    }
+    if (writeAll(connFd, frame.buf, frame.nbytes) != 0) {
+      return -1;
+    }
   }
   return 0;
 }
