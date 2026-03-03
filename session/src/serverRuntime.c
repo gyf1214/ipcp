@@ -77,8 +77,12 @@ bool serverRuntimeInit(
   runtime->listenFd = listenFd;
   runtime->epollFd = -1;
   runtime->tunPoller.events = EPOLLIN | EPOLLRDHUP;
-  runtime->tunPoller.outOffset = 0;
-  runtime->tunPoller.outNbytes = 0;
+  runtime->tunPoller.readPos = 0;
+  runtime->tunPoller.writePos = 0;
+  runtime->tunPoller.queuedBytes = 0;
+  runtime->tunPoller.frameHead = 0;
+  runtime->tunPoller.frameTail = 0;
+  runtime->tunPoller.frameCount = 0;
   memset(runtime->tunPoller.outBuf, 0, sizeof(runtime->tunPoller.outBuf));
   runtime->pendingOwnerSlot = -1;
   runtime->pendingTunToTcpNbytes = 0;
@@ -274,7 +278,7 @@ bool serverRuntimeSyncTunWriteInterest(serverRuntime_t *runtime) {
     return true;
   }
 
-  needWrite = runtime->tunPoller.outNbytes > 0;
+  needWrite = ioTunQueuedBytes(&runtime->tunPoller) > 0;
   nextEvents = runtime->tunPoller.events;
   if (needWrite) {
     nextEvents |= EPOLLOUT;

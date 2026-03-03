@@ -1208,7 +1208,7 @@ int sessionServeMultiClient(
           if (!serverRuntimeServiceTunWriteEvent(&runtime)) {
             goto cleanup;
           }
-          if (runtime.tunPoller.outNbytes <= IoPollerLowWatermark) {
+          if (ioTunQueuedBytes(&runtime.tunPoller) <= IoPollerLowWatermark) {
             if (serverRuntimeRetryBlockedTunRoundRobin(&runtime) < 0) {
               goto cleanup;
             }

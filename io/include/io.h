@@ -21,6 +21,7 @@ typedef enum {
 #define IoPollerQueueCapacity 65536
 #define IoPollerLowWatermark 49152
 #define IoTcpListenBacklog 16
+#define IoTunQueueFrameCapacity 256
 
 typedef enum {
   ioIfModeTun = 0,
@@ -40,8 +41,16 @@ typedef struct {
   int epollFd;
   int tunFd;
   unsigned int events;
-  long outOffset;
-  long outNbytes;
+  long readPos;
+  long writePos;
+  long queuedBytes;
+  int frameHead;
+  int frameTail;
+  int frameCount;
+  struct {
+    long start;
+    long nbytes;
+  } frames[IoTunQueueFrameCapacity];
   unsigned char outBuf[IoPollerQueueCapacity];
 } ioTunPoller_t;
 

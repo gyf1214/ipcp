@@ -602,8 +602,7 @@ static void testSharedTunWriteInterestIsRuntimeOwned(void) {
   testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should keep epollout while queue has pending bytes");
   testAssertTrue((runtime.tunPoller.events & EPOLLOUT) != 0, "runtime should keep epollout until shared queue drains");
 
-  runtime.tunPoller.outOffset = 0;
-  runtime.tunPoller.outNbytes = 0;
+  testAssertTrue(serverRuntimeServiceTunWriteEvent(&runtime), "shared tun write event should flush queued frames");
   testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should disable epollout after queue drains");
   testAssertTrue((runtime.tunPoller.events & EPOLLOUT) == 0, "runtime should disable epollout when shared queue drains");
 

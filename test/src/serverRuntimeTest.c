@@ -123,8 +123,7 @@ static void testServerRuntimeSharedTunInterestTracksGlobalQueue(void) {
   testAssertTrue(
       (runtime.tunPoller.events & EPOLLOUT) != 0, "sync should preserve epollout while backlog remains");
 
-  runtime.tunPoller.outOffset = 0;
-  runtime.tunPoller.outNbytes = 0;
+  testAssertTrue(serverRuntimeServiceTunWriteEvent(&runtime), "shared tun write event should flush queued frames");
   testAssertTrue(serverRuntimeSyncTunWriteInterest(&runtime), "sync should disable epollout when queue drains");
   testAssertTrue((runtime.tunPoller.events & EPOLLOUT) == 0, "shared tun epollout should disable after global queue drains");
 
