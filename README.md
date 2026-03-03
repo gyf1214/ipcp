@@ -52,12 +52,11 @@ make all
 make test
 ```
 
-### Unit tests in container
-
-Use this route when the host is missing local build/test prerequisites (for example `mkmake` setup):
+### Build and test in container
 
 ```bash
 podman build -t ipcp-dev:local -f Dockerfile .
+podman run --rm -v "$PWD:/work" -w /work ipcp-dev:local bash -lc "make all"
 podman run --rm -v "$PWD:/work" -w /work ipcp-dev:local bash -lc "make test"
 ```
 
@@ -114,11 +113,11 @@ ipcpd <config.json>
 
 - `config.json`: JSON config file for either `server` or `client` mode
 
-Supported v1 schema:
+Supported schema:
 
 - Single mode per file
 - Unknown JSON fields are ignored
-- `if_mode` is optional (`"tun"` or `"tap"`, default `"tun"`)
+- `if_mode` is `"tun"` or `"tap"` (default `"tun"`)
 - `heartbeat_interval_ms` is optional (default `5000`)
 - `heartbeat_timeout_ms` is optional (default `15000`)
 - Both heartbeat fields must be positive integers, and `heartbeat_timeout_ms` must be greater than `heartbeat_interval_ms`
