@@ -4,7 +4,7 @@
 
 #include "ioTest.h"
 #include "protocolTest.h"
-#include "serverRuntimeTest.h"
+#include "serverTest.h"
 #include "sessionTest.h"
 
 typedef struct {
@@ -15,7 +15,7 @@ typedef struct {
 static const suiteEntry_t suites[] = {
     {"protocol", runProtocolTests},
     {"io", runIoTests},
-    {"serverRuntime", runServerRuntimeTests},
+    {"server", runServerTests},
     {"session", runSessionTests},
 };
 
@@ -52,7 +52,7 @@ int main(int argc, char **argv) {
   }
 
   if (status != 0) {
-    fprintf(stderr, "usage: %s [protocol] [io] [serverRuntime] [session]\n", argv[0]);
+    fprintf(stderr, "usage: %s [protocol] [io] [server] [session]\n", argv[0]);
     return EXIT_FAILURE;
   }
 

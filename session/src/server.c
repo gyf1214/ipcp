@@ -1,4 +1,4 @@
-#include "serverRuntime.h"
+#include "server.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -13,15 +13,15 @@ static long long defaultNowMs(void *ctx) {
   return (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
 }
 
-static bool activeSlotIndexValid(const serverRuntime_t *runtime, int slot) {
+static bool activeSlotIndexValid(const server_t *runtime, int slot) {
   return runtime != NULL && runtime->activeConns != NULL && slot >= 0 && slot < runtime->maxActiveSessions;
 }
 
-static bool preAuthSlotIndexValid(const serverRuntime_t *runtime, int slot) {
+static bool preAuthSlotIndexValid(const server_t *runtime, int slot) {
   return runtime != NULL && runtime->preAuthConns != NULL && slot >= 0 && slot < runtime->maxPreAuthSessions;
 }
 
-static bool runtimeTunEpollCtl(serverRuntime_t *runtime, unsigned int events) {
+static bool runtimeTunEpollCtl(server_t *runtime, unsigned int events) {
   struct epoll_event event;
 
   if (runtime == NULL || runtime->tunPoller.tunFd < 0) {
@@ -42,8 +42,8 @@ static bool runtimeTunEpollCtl(serverRuntime_t *runtime, unsigned int events) {
   return true;
 }
 
-bool serverRuntimeInit(
-    serverRuntime_t *runtime,
+bool serverInit(
+    server_t *runtime,
     int tunFd,
     int listenFd,
     int maxActiveSessions,
@@ -106,7 +106,7 @@ bool serverRuntimeInit(
   return true;
 }
 
-void serverRuntimeDeinit(serverRuntime_t *runtime) {
+void serverDeinit(server_t *runtime) {
   int i;
 
   if (runtime == NULL) {
@@ -126,8 +126,8 @@ void serverRuntimeDeinit(serverRuntime_t *runtime) {
   memset(runtime, 0, sizeof(*runtime));
 }
 
-int serverRuntimeAddClient(
-    serverRuntime_t *runtime,
+int serverAddClient(
+    server_t *runtime,
     int activeSlot,
     int connFd,
     const unsigned char key[ProtocolPskSize],
@@ -161,7 +161,7 @@ int serverRuntimeAddClient(
 
   runtime->activeConns[activeSlot].connFd = connFd;
   runtime->activeConns[activeSlot].session = session;
-  sessionSetServerRuntime(session, runtime);
+  sessionSetServer(session, runtime);
   runtime->activeConns[activeSlot].tcpPoller.epollFd = runtime->epollFd;
   runtime->activeConns[activeSlot].tcpPoller.tcpFd = connFd;
   runtime->activeConns[activeSlot].tcpPoller.events = EPOLLIN | EPOLLRDHUP;
@@ -176,12 +176,12 @@ int serverRuntimeAddClient(
   return activeSlot;
 }
 
-bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot) {
+bool serverRemoveClient(server_t *runtime, int slot) {
   if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return false;
   }
 
-  if (!serverRuntimeDropPendingTunToTcpByOwner(runtime, slot)) {
+  if (!serverDropPendingTunToTcpByOwner(runtime, slot)) {
     return false;
   }
   sessionDestroy(runtime->activeConns[slot].session);
@@ -198,7 +198,7 @@ bool serverRuntimeRemoveClient(serverRuntime_t *runtime, int slot) {
   return true;
 }
 
-int serverRuntimeFindSlotByFd(const serverRuntime_t *runtime, int connFd) {
+int serverFindSlotByFd(const server_t *runtime, int connFd) {
   int i;
 
   if (runtime == NULL || runtime->activeConns == NULL || connFd < 0) {
@@ -214,7 +214,7 @@ int serverRuntimeFindSlotByFd(const serverRuntime_t *runtime, int connFd) {
   return -1;
 }
 
-int serverRuntimeFindPreAuthSlotByFd(const serverRuntime_t *runtime, int connFd) {
+int serverFindPreAuthSlotByFd(const server_t *runtime, int connFd) {
   int i;
 
   if (runtime == NULL || runtime->preAuthConns == NULL || connFd < 0) {
@@ -230,7 +230,7 @@ int serverRuntimeFindPreAuthSlotByFd(const serverRuntime_t *runtime, int connFd)
   return -1;
 }
 
-int serverRuntimePickEgressClient(const serverRuntime_t *runtime) {
+int serverPickEgressClient(const server_t *runtime) {
   int i;
 
   if (runtime == NULL || runtime->activeConns == NULL) {
@@ -246,28 +246,28 @@ int serverRuntimePickEgressClient(const serverRuntime_t *runtime) {
   return -1;
 }
 
-int serverRuntimeClientCount(const serverRuntime_t *runtime) {
+int serverClientCount(const server_t *runtime) {
   if (runtime == NULL || runtime->activeConns == NULL) {
     return -1;
   }
   return runtime->activeCount;
 }
 
-long serverRuntimeQueuedTunBytes(const serverRuntime_t *runtime) {
+long serverQueuedTunBytes(const server_t *runtime) {
   if (runtime == NULL) {
     return -1;
   }
   return ioTunQueuedBytes(&runtime->tunPoller);
 }
 
-long long serverRuntimeNowMs(const serverRuntime_t *runtime) {
+long long serverNowMs(const server_t *runtime) {
   if (runtime == NULL || runtime->nowMsFn == NULL) {
     return -1;
   }
   return runtime->nowMsFn(runtime->nowCtx);
 }
 
-bool serverRuntimeSyncTunWriteInterest(serverRuntime_t *runtime) {
+bool serverSyncTunWriteInterest(server_t *runtime) {
   unsigned int nextEvents;
   bool needWrite;
 
@@ -291,7 +291,7 @@ bool serverRuntimeSyncTunWriteInterest(serverRuntime_t *runtime) {
   return runtimeTunEpollCtl(runtime, nextEvents);
 }
 
-bool serverRuntimeQueueTunWrite(serverRuntime_t *runtime, const void *data, long nbytes) {
+bool serverQueueTunWrite(server_t *runtime, const void *data, long nbytes) {
   if (runtime == NULL) {
     return false;
   }
@@ -304,14 +304,14 @@ bool serverRuntimeQueueTunWrite(serverRuntime_t *runtime, const void *data, long
   return true;
 }
 
-bool serverRuntimeServiceTunWriteEvent(serverRuntime_t *runtime) {
+bool serverServiceTunWriteEvent(server_t *runtime) {
   if (runtime == NULL) {
     return false;
   }
   return ioTunServiceWriteEvent(&runtime->tunPoller);
 }
 
-int serverRuntimeRetryBlockedTunRoundRobin(serverRuntime_t *runtime) {
+int serverRetryBlockedTunRoundRobin(server_t *runtime) {
   int i;
   int start;
   int nextCursor = -1;
@@ -353,7 +353,7 @@ int serverRuntimeRetryBlockedTunRoundRobin(serverRuntime_t *runtime) {
   return runtime->retryCursor;
 }
 
-bool serverRuntimeSetTunReadEnabled(serverRuntime_t *runtime, bool enabled) {
+bool serverSetTunReadEnabled(server_t *runtime, bool enabled) {
   unsigned int nextEvents;
 
   if (runtime == NULL) {
@@ -372,96 +372,96 @@ bool serverRuntimeSetTunReadEnabled(serverRuntime_t *runtime, bool enabled) {
   return runtimeTunEpollCtl(runtime, nextEvents);
 }
 
-bool serverRuntimeHasPendingTunToTcp(const serverRuntime_t *runtime) {
+bool serverHasPendingTunToTcp(const server_t *runtime) {
   return runtime != NULL && runtime->pendingTunToTcpNbytes > 0 && runtime->pendingOwnerSlot >= 0;
 }
 
-int serverRuntimePendingTunToTcpOwner(const serverRuntime_t *runtime) {
+int serverPendingTunToTcpOwner(const server_t *runtime) {
   if (runtime == NULL) {
     return -1;
   }
   return runtime->pendingOwnerSlot;
 }
 
-bool serverRuntimeStorePendingTunToTcp(serverRuntime_t *runtime, int ownerSlot, const void *data, long nbytes) {
+bool serverStorePendingTunToTcp(server_t *runtime, int ownerSlot, const void *data, long nbytes) {
   if (runtime == NULL || data == NULL || nbytes <= 0 || nbytes > (long)sizeof(runtime->pendingTunToTcpBuf)) {
     return false;
   }
   if (!activeSlotIndexValid(runtime, ownerSlot) || !runtime->activeConns[ownerSlot].active) {
     return false;
   }
-  if (serverRuntimeHasPendingTunToTcp(runtime)) {
+  if (serverHasPendingTunToTcp(runtime)) {
     return false;
   }
 
   memcpy(runtime->pendingTunToTcpBuf, data, (size_t)nbytes);
   runtime->pendingTunToTcpNbytes = nbytes;
   runtime->pendingOwnerSlot = ownerSlot;
-  return serverRuntimeSetTunReadEnabled(runtime, false);
+  return serverSetTunReadEnabled(runtime, false);
 }
 
-serverRuntimePendingRetry_t serverRuntimeRetryPendingTunToTcp(
-    serverRuntime_t *runtime, int ownerSlot, ioTcpPoller_t *ownerPoller) {
+serverPendingRetry_t serverRetryPendingTunToTcp(
+    server_t *runtime, int ownerSlot, ioTcpPoller_t *ownerPoller) {
   long queued;
 
   if (runtime == NULL || ownerPoller == NULL) {
-    return serverRuntimePendingRetryError;
+    return serverPendingRetryError;
   }
-  if (!serverRuntimeHasPendingTunToTcp(runtime)) {
-    return serverRuntimePendingRetryQueued;
+  if (!serverHasPendingTunToTcp(runtime)) {
+    return serverPendingRetryQueued;
   }
   if (runtime->pendingOwnerSlot != ownerSlot) {
-    return serverRuntimePendingRetryBlocked;
+    return serverPendingRetryBlocked;
   }
 
   if (ioTcpWrite(ownerPoller, runtime->pendingTunToTcpBuf, runtime->pendingTunToTcpNbytes)) {
     runtime->pendingTunToTcpNbytes = 0;
     runtime->pendingOwnerSlot = -1;
-    return serverRuntimePendingRetryQueued;
+    return serverPendingRetryQueued;
   }
 
   queued = ioTcpQueuedBytes(ownerPoller);
   if (queued < 0 || queued + runtime->pendingTunToTcpNbytes <= IoPollerQueueCapacity) {
-    return serverRuntimePendingRetryError;
+    return serverPendingRetryError;
   }
-  return serverRuntimePendingRetryBlocked;
+  return serverPendingRetryBlocked;
 }
 
-bool serverRuntimeDropPendingTunToTcpByOwner(serverRuntime_t *runtime, int ownerSlot) {
+bool serverDropPendingTunToTcpByOwner(server_t *runtime, int ownerSlot) {
   if (runtime == NULL) {
     return false;
   }
-  if (!serverRuntimeHasPendingTunToTcp(runtime) || runtime->pendingOwnerSlot != ownerSlot) {
+  if (!serverHasPendingTunToTcp(runtime) || runtime->pendingOwnerSlot != ownerSlot) {
     return true;
   }
 
   runtime->pendingTunToTcpNbytes = 0;
   runtime->pendingOwnerSlot = -1;
-  return serverRuntimeSetTunReadEnabled(runtime, true);
+  return serverSetTunReadEnabled(runtime, true);
 }
 
-session_t *serverRuntimeSessionAt(serverRuntime_t *runtime, int slot) {
+session_t *serverSessionAt(server_t *runtime, int slot) {
   if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return NULL;
   }
   return runtime->activeConns[slot].session;
 }
 
-int serverRuntimeConnFdAt(const serverRuntime_t *runtime, int slot) {
+int serverConnFdAt(const server_t *runtime, int slot) {
   if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return -1;
   }
   return runtime->activeConns[slot].connFd;
 }
 
-const unsigned char *serverRuntimeKeyAt(const serverRuntime_t *runtime, int slot) {
+const unsigned char *serverKeyAt(const server_t *runtime, int slot) {
   if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return NULL;
   }
   return runtime->activeConns[slot].key;
 }
 
-bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const unsigned char *claim, long claimNbytes) {
+bool serverHasActiveClaim(const server_t *runtime, const unsigned char *claim, long claimNbytes) {
   int i;
   if (runtime == NULL || runtime->activeConns == NULL || claim == NULL || claimNbytes <= 0) {
     return false;
@@ -478,7 +478,7 @@ bool serverRuntimeHasActiveClaim(const serverRuntime_t *runtime, const unsigned 
   return false;
 }
 
-int serverRuntimeCreatePreAuthConn(serverRuntime_t *runtime, int connFd, long long authDeadlineMs) {
+int serverCreatePreAuthConn(server_t *runtime, int connFd, long long authDeadlineMs) {
   int i;
 
   if (runtime == NULL || runtime->preAuthConns == NULL || connFd < 0) {
@@ -506,7 +506,7 @@ int serverRuntimeCreatePreAuthConn(serverRuntime_t *runtime, int connFd, long lo
   return -1;
 }
 
-bool serverRuntimeRemovePreAuthConn(serverRuntime_t *runtime, int preAuthSlot) {
+bool serverRemovePreAuthConn(server_t *runtime, int preAuthSlot) {
   preAuthConn_t *conn;
 
   if (!preAuthSlotIndexValid(runtime, preAuthSlot)) {
@@ -535,21 +535,21 @@ bool serverRuntimeRemovePreAuthConn(serverRuntime_t *runtime, int preAuthSlot) {
   return true;
 }
 
-preAuthConn_t *serverRuntimePreAuthAt(serverRuntime_t *runtime, int preAuthSlot) {
+preAuthConn_t *serverPreAuthAt(server_t *runtime, int preAuthSlot) {
   if (!preAuthSlotIndexValid(runtime, preAuthSlot) || !runtime->preAuthConns[preAuthSlot].active) {
     return NULL;
   }
   return &runtime->preAuthConns[preAuthSlot];
 }
 
-bool serverRuntimePromoteToActiveSlot(serverRuntime_t *runtime, int preAuthSlot) {
+bool serverPromoteToActiveSlot(server_t *runtime, int preAuthSlot) {
   preAuthConn_t *preAuth;
   int connFd;
 
   if (runtime == NULL) {
     return false;
   }
-  preAuth = serverRuntimePreAuthAt(runtime, preAuthSlot);
+  preAuth = serverPreAuthAt(runtime, preAuthSlot);
   if (preAuth == NULL || !activeSlotIndexValid(runtime, preAuth->resolvedActiveSlot)) {
     return false;
   }
@@ -558,10 +558,10 @@ bool serverRuntimePromoteToActiveSlot(serverRuntime_t *runtime, int preAuthSlot)
   }
 
   connFd = preAuth->connFd;
-  if (serverRuntimeAddClient(
+  if (serverAddClient(
           runtime, preAuth->resolvedActiveSlot, connFd, preAuth->resolvedKey, preAuth->claim, preAuth->claimNbytes)
       < 0) {
     return false;
   }
-  return serverRuntimeRemovePreAuthConn(runtime, preAuthSlot);
+  return serverRemovePreAuthConn(runtime, preAuthSlot);
 }

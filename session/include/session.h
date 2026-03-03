@@ -8,7 +8,7 @@
 #define SessionClaimSize 16
 
 typedef struct session_t session_t;
-struct serverRuntime_t;
+struct server_t;
 
 typedef long long (*sessionNowMsFn_t)(void *ctx);
 typedef int (*sessionServerResolveClaimFn_t)(
@@ -48,7 +48,7 @@ session_t *sessionCreate(
 void sessionDestroy(session_t *session);
 void sessionReset(session_t *session);
 bool sessionGetStats(const session_t *session, sessionStats_t *outStats);
-void sessionSetServerRuntime(session_t *session, struct serverRuntime_t *runtime);
+void sessionSetServer(session_t *session, struct server_t *runtime);
 bool sessionPromoteFromPreAuth(
     session_t *session,
     const protocolDecoder_t *decoder,
