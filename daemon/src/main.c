@@ -1,7 +1,9 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sodium.h>
 
 #include "config.h"
@@ -11,8 +13,6 @@
 #include "protocol.h"
 #include "session.h"
 
-#define EPOLL_WAIT_MS 200
-
 static ioIfMode_t toIoIfMode(configIfMode_t mode) {
   if (mode == configIfModeTap) {
     return ioIfModeTap;
@@ -20,63 +20,26 @@ static ioIfMode_t toIoIfMode(configIfMode_t mode) {
   return ioIfModeTun;
 }
 
-static int serveTcp(
-    const char *ifName,
-    configIfMode_t ifMode,
-    int connFd,
-    const unsigned char key[ProtocolPskSize],
-    bool isServer,
-    const sessionHeartbeatConfig_t *heartbeatCfg) {
-  ioPoller_t poller;
-  ioEvent_t event;
-  session_t *session = NULL;
-  int tunFd = -1;
-  int result = -1;
+typedef struct {
+  const cryptServerKeyStore_t *store;
+  configIfMode_t ifMode;
+} serverKeyLookupCtx_t;
 
-  logf("opening tun device %s", ifName);
-  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
-  if (tunFd < 0) {
-    errf("failed to open tun device %s: %s", ifName, strerror(errno));
-    goto cleanup;
-  }
-  logf("successfully opened tun device %s", ifName);
+static const char *ifModeLabel(configIfMode_t mode) {
+  return mode == configIfModeTap ? "tap" : "tun";
+}
 
-  if (ioPollerInit(&poller, tunFd, connFd) != 0) {
-    errf("setup epoll failed: %s", strerror(errno));
-    goto cleanup;
+static int serverLookupByClaim(
+    void *ctx,
+    const unsigned char *claim,
+    long claimNbytes,
+    unsigned char key[ProtocolPskSize],
+    int *outActiveSlot) {
+  serverKeyLookupCtx_t *lookup = (serverKeyLookupCtx_t *)ctx;
+  if (lookup == NULL || lookup->store == NULL) {
+    return -1;
   }
-
-  session = sessionCreate(isServer, heartbeatCfg, NULL, NULL);
-  if (session == NULL) {
-    errf("session setup failed");
-    ioPollerClose(&poller);
-    goto cleanup;
-  }
-
-  while (1) {
-    event = ioPollerWait(&poller, EPOLL_WAIT_MS);
-    if (sessionStep(session, &poller, event, key) == sessionStepStop) {
-      break;
-    }
-  }
-
-  result = 0;
-  sessionDestroy(session);
-  ioPollerClose(&poller);
-  logf("connection stopped");
-
-cleanup:
-  if (session != NULL && result != 0) {
-    sessionDestroy(session);
-  }
-  if (connFd >= 0) {
-    close(connFd);
-  }
-  if (tunFd >= 0) {
-    close(tunFd);
-  }
-
-  return result;
+  return cryptServerKeyStoreLookup(lookup->store, lookup->ifMode, claim, claimNbytes, key, outActiveSlot);
 }
 
 static int listenTcp(
@@ -84,8 +47,11 @@ static int listenTcp(
     configIfMode_t ifMode,
     const char *listenIP,
     int port,
-    const unsigned char key[ProtocolPskSize],
+    const cryptServerKeyStore_t *keyStore,
+    int authTimeoutMs,
+    int maxPreAuthSessions,
     const sessionHeartbeatConfig_t *heartbeatCfg) {
+  serverKeyLookupCtx_t lookupCtx;
   int tunFd = -1;
   int listenFd = ioTcpListen(listenIP, port);
   if (listenFd < 0) {
@@ -102,7 +68,19 @@ static int listenTcp(
   }
   logf("successfully opened tun device %s", ifName);
 
-  if (sessionServeMultiClient(tunFd, listenFd, key, heartbeatCfg, 64) != 0) {
+  lookupCtx.store = keyStore;
+  lookupCtx.ifMode = ifMode;
+  if (sessionRunServer(
+          tunFd,
+          listenFd,
+          serverLookupByClaim,
+          &lookupCtx,
+          ifModeLabel(ifMode),
+          authTimeoutMs,
+          heartbeatCfg,
+          keyStore->count,
+          maxPreAuthSessions)
+      != 0) {
     close(tunFd);
     close(listenFd);
     return -1;
@@ -118,27 +96,58 @@ static int connTcp(
     configIfMode_t ifMode,
     const char *remoteIP,
     int port,
+    const unsigned char *claim,
+    long claimNbytes,
     const unsigned char key[ProtocolPskSize],
     const sessionHeartbeatConfig_t *heartbeatCfg) {
-  int connFd = ioTcpConnect(remoteIP, port);
+  int tunFd = -1;
+  int connFd = -1;
+  int status = -1;
+
+  logf("opening tun device %s", ifName);
+  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
+  if (tunFd < 0) {
+    errf("failed to open tun device %s: %s", ifName, strerror(errno));
+    goto cleanup;
+  }
+  logf("successfully opened tun device %s", ifName);
+
+  connFd = ioTcpConnect(remoteIP, port);
   if (connFd < 0) {
     errf("connect to %s:%d failed: %s", remoteIP, port, strerror(errno));
-    return -1;
+    goto cleanup;
   }
   logf("connected to %s:%d", remoteIP, port);
 
-  return serveTcp(ifName, ifMode, connFd, key, false, heartbeatCfg);
+  if (sessionRunClient(tunFd, connFd, claim, claimNbytes, key, heartbeatCfg) != 0) {
+    errf("client session failed");
+    goto cleanup;
+  }
+
+  status = 0;
+
+cleanup:
+  if (connFd >= 0) {
+    close(connFd);
+  }
+  if (tunFd >= 0) {
+    close(tunFd);
+  }
+  return status;
 }
 
 int main(int argc, char **argv) {
   daemonConfig_t cfg;
   sessionHeartbeatConfig_t heartbeatCfg;
   unsigned char key[ProtocolPskSize];
+  cryptServerKeyStore_t keyStore;
   int exitCode = EXIT_FAILURE;
   bool configLoaded = false;
   bool keyLoaded = false;
+  bool keyStoreLoaded = false;
 
   configZero(&cfg);
+  cryptServerKeyStoreZero(&keyStore);
 
   if (argc != 2) {
     errf("invalid arguments: <configFile>");
@@ -152,22 +161,40 @@ int main(int argc, char **argv) {
   }
   configLoaded = true;
 
-  if (cryptLoadKeyFromFile(key, cfg.keyFile) != 0) {
-    errf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
-    goto cleanup;
+  if (cfg.mode == configModeServer) {
+    if (cryptServerKeyStoreLoadFromConfig(&keyStore, &cfg) != 0) {
+      errf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
+      goto cleanup;
+    }
+    keyStoreLoaded = true;
+  } else {
+    if (cryptLoadKeyFromFile(key, cfg.keyFile) != 0) {
+      errf("invalid secret file, expected exactly %d raw bytes", ProtocolPskSize);
+      goto cleanup;
+    }
+    keyLoaded = true;
   }
-  keyLoaded = true;
   heartbeatCfg.intervalMs = cfg.heartbeatIntervalMs;
   heartbeatCfg.timeoutMs = cfg.heartbeatTimeoutMs;
 
   if (cfg.mode == configModeServer) {
     exitCode =
-        listenTcp(cfg.ifName, cfg.ifMode, cfg.listenIP, cfg.listenPort, key, &heartbeatCfg) == 0
+        listenTcp(
+            cfg.ifName,
+            cfg.ifMode,
+            cfg.listenIP,
+            cfg.listenPort,
+            &keyStore,
+            cfg.authTimeoutMs,
+            cfg.maxPreAuthSessions,
+            &heartbeatCfg)
+            == 0
             ? EXIT_SUCCESS
             : EXIT_FAILURE;
   } else {
+    const unsigned char *claim = cfg.claim;
     exitCode =
-        connTcp(cfg.ifName, cfg.ifMode, cfg.serverIP, cfg.serverPort, key, &heartbeatCfg) == 0
+        connTcp(cfg.ifName, cfg.ifMode, cfg.serverIP, cfg.serverPort, claim, cfg.claimNbytes, key, &heartbeatCfg) == 0
             ? EXIT_SUCCESS
             : EXIT_FAILURE;
   }
@@ -175,6 +202,9 @@ int main(int argc, char **argv) {
 cleanup:
   if (keyLoaded) {
     sodium_memzero(key, sizeof(key));
+  }
+  if (keyStoreLoaded) {
+    cryptServerKeyStoreZero(&keyStore);
   }
   if (configLoaded) {
     configZero(&cfg);

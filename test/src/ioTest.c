@@ -2,11 +2,46 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 
 #include "ioTest.h"
 #include "io.h"
 #include "testAssert.h"
+
+typedef struct {
+  int epollFd;
+  ioTunPoller_t tunPoller;
+  ioTcpPoller_t tcpPoller;
+} splitPollersFixture_t;
+
+static int setupSplitPollers(splitPollersFixture_t *fixture, int tunFd, int tcpFd) {
+  if (fixture == NULL) {
+    return -1;
+  }
+  fixture->epollFd = epoll_create1(0);
+  if (fixture->epollFd < 0) {
+    return -1;
+  }
+  if (ioTunPollerInit(&fixture->tunPoller, fixture->epollFd, tunFd) < 0
+      || ioTcpPollerInit(&fixture->tcpPoller, fixture->epollFd, tcpFd) < 0) {
+    close(fixture->epollFd);
+    fixture->epollFd = -1;
+    return -1;
+  }
+  return 0;
+}
+
+static void teardownSplitPollers(splitPollersFixture_t *fixture) {
+  if (fixture != NULL && fixture->epollFd >= 0) {
+    close(fixture->epollFd);
+    fixture->epollFd = -1;
+  }
+}
+
+static ioEvent_t waitSplitPollers(splitPollersFixture_t *fixture, int timeoutMs) {
+  return ioPollersWait(&fixture->tunPoller, &fixture->tcpPoller, timeoutMs);
+}
 
 static void testIoReadSomeOk(void) {
   int fds[2];
@@ -54,17 +89,17 @@ static void testIoReadSomeError(void) {
 static void testIoPollerTimeout(void) {
   int tunPipe[2];
   int tcpPipe[2];
-  ioPoller_t poller;
+  splitPollersFixture_t pollers;
   ioEvent_t event;
 
   testAssertTrue(pipe(tunPipe) == 0, "tun pipe should be created");
   testAssertTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
-  testAssertTrue(ioPollerInit(&poller, tunPipe[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(setupSplitPollers(&pollers, tunPipe[0], tcpPipe[0]) == 0, "setupSplitPollers should succeed");
 
-  event = ioPollerWait(&poller, 10);
-  testAssertTrue(event == ioEventTimeout, "ioPollerWait should return timeout when idle");
+  event = waitSplitPollers(&pollers, 10);
+  testAssertTrue(event == ioEventTimeout, "waitSplitPollers should return timeout when idle");
 
-  ioPollerClose(&poller);
+  teardownSplitPollers(&pollers);
   close(tunPipe[0]);
   close(tunPipe[1]);
   close(tcpPipe[0]);
@@ -74,24 +109,24 @@ static void testIoPollerTimeout(void) {
 static void testIoPollerSourceReadable(void) {
   int tunPipe[2];
   int tcpPipe[2];
-  ioPoller_t poller;
+  splitPollersFixture_t pollers;
   ioEvent_t event;
 
   testAssertTrue(pipe(tunPipe) == 0, "tun pipe should be created");
   testAssertTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
-  testAssertTrue(ioPollerInit(&poller, tunPipe[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(setupSplitPollers(&pollers, tunPipe[0], tcpPipe[0]) == 0, "setupSplitPollers should succeed");
 
   testAssertTrue(write(tunPipe[1], "a", 1) == 1, "write tun pipe should succeed");
-  event = ioPollerWait(&poller, 100);
-  testAssertTrue(event == ioEventTunRead, "ioPollerWait should tag tun source");
+  event = waitSplitPollers(&pollers, 100);
+  testAssertTrue(event == ioEventTunRead, "waitSplitPollers should tag tun source");
   testAssertTrue(read(tunPipe[0], (char[2]){0}, 1) == 1, "tun byte should drain");
 
   testAssertTrue(write(tcpPipe[1], "b", 1) == 1, "write tcp pipe should succeed");
-  event = ioPollerWait(&poller, 100);
-  testAssertTrue(event == ioEventTcpRead, "ioPollerWait should tag tcp source");
+  event = waitSplitPollers(&pollers, 100);
+  testAssertTrue(event == ioEventTcpRead, "waitSplitPollers should tag tcp source");
   testAssertTrue(read(tcpPipe[0], (char[2]){0}, 1) == 1, "tcp byte should drain");
 
-  ioPollerClose(&poller);
+  teardownSplitPollers(&pollers);
   close(tunPipe[0]);
   close(tunPipe[1]);
   close(tcpPipe[0]);
@@ -101,18 +136,18 @@ static void testIoPollerSourceReadable(void) {
 static void testIoPollerError(void) {
   int tunSock[2];
   int tcpPipe[2];
-  ioPoller_t poller;
+  splitPollersFixture_t pollers;
   ioEvent_t event;
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunSock) == 0, "tun socketpair should be created");
   testAssertTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
-  testAssertTrue(ioPollerInit(&poller, tunSock[0], tcpPipe[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(setupSplitPollers(&pollers, tunSock[0], tcpPipe[0]) == 0, "setupSplitPollers should succeed");
 
   close(tunSock[1]);
-  event = ioPollerWait(&poller, 100);
-  testAssertTrue(event == ioEventError, "ioPollerWait should map closed peer to ioEventError");
+  event = waitSplitPollers(&pollers, 100);
+  testAssertTrue(event == ioEventError, "waitSplitPollers should map closed peer to ioEventError");
 
-  ioPollerClose(&poller);
+  teardownSplitPollers(&pollers);
   close(tunSock[0]);
   close(tcpPipe[0]);
   close(tcpPipe[1]);
@@ -121,29 +156,29 @@ static void testIoPollerError(void) {
 static void testIoPollerQueueWriteFlushesOnWritable(void) {
   int tunPair[2];
   int tcpPair[2];
-  ioPoller_t poller;
+  splitPollersFixture_t pollers;
   ioEvent_t event;
   char buf[128];
   const char *payload = "queued-nonblocking-write";
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(ioPollerInit(&poller, tunPair[0], tcpPair[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(setupSplitPollers(&pollers, tunPair[0], tcpPair[0]) == 0, "setupSplitPollers should succeed");
 
   testAssertTrue(
-      ioPollerQueueWrite(&poller, ioSourceTcp, payload, (long)strlen(payload)),
+      ioTcpWrite(&pollers.tcpPoller, payload, (long)strlen(payload)),
       "queue write should succeed when space is available");
 
-  event = ioPollerWait(&poller, 100);
+  event = waitSplitPollers(&pollers, 100);
   testAssertTrue(event == ioEventTcpWrite, "poller should surface writable tcp event");
 
   testAssertTrue(read(tcpPair[1], buf, sizeof(buf)) == (long)strlen(payload), "peer should read queued payload");
   testAssertTrue(memcmp(buf, payload, strlen(payload)) == 0, "queued payload should match");
 
-  event = ioPollerWait(&poller, 20);
+  event = waitSplitPollers(&pollers, 20);
   testAssertTrue(event == ioEventTimeout, "epollout should be disabled after queue drain");
 
-  ioPollerClose(&poller);
+  teardownSplitPollers(&pollers);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);
@@ -153,22 +188,22 @@ static void testIoPollerQueueWriteFlushesOnWritable(void) {
 static void testIoPollerQueueWriteRejectsOverflow(void) {
   int tunPair[2];
   int tcpPair[2];
-  ioPoller_t poller;
+  splitPollersFixture_t pollers;
   static char payload[IoPollerQueueCapacity];
 
   memset(payload, 'x', sizeof(payload));
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(ioPollerInit(&poller, tunPair[0], tcpPair[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(setupSplitPollers(&pollers, tunPair[0], tcpPair[0]) == 0, "setupSplitPollers should succeed");
 
   testAssertTrue(
-      ioPollerQueueWrite(&poller, ioSourceTcp, payload, IoPollerQueueCapacity - 8),
+      ioTcpWrite(&pollers.tcpPoller, payload, IoPollerQueueCapacity - 8),
       "first queue write should fill almost all capacity");
   testAssertTrue(
-      !ioPollerQueueWrite(&poller, ioSourceTcp, payload, 16),
+      !ioTcpWrite(&pollers.tcpPoller, payload, 16),
       "second queue write should fail when full frame does not fit");
 
-  ioPollerClose(&poller);
+  teardownSplitPollers(&pollers);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);
@@ -178,7 +213,7 @@ static void testIoPollerQueueWriteRejectsOverflow(void) {
 static void testIoPollerReadMaskAndQueueBytes(void) {
   int tunPipe[2];
   int tcpPair[2];
-  ioPoller_t poller;
+  splitPollersFixture_t pollers;
   ioEvent_t event;
   char buf[32];
   const char *payload = "queued";
@@ -186,35 +221,118 @@ static void testIoPollerReadMaskAndQueueBytes(void) {
   testAssertTrue(IoPollerLowWatermark == 49152, "low watermark should be 75% of queue capacity");
   testAssertTrue(pipe(tunPipe) == 0, "tun pipe should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(ioPollerInit(&poller, tunPipe[0], tcpPair[0]) == 0, "ioPollerInit should succeed");
+  testAssertTrue(setupSplitPollers(&pollers, tunPipe[0], tcpPair[0]) == 0, "setupSplitPollers should succeed");
 
-  testAssertTrue(ioPollerSetReadEnabled(&poller, ioSourceTun, false), "should disable tun read interest");
+  testAssertTrue(ioTunSetReadEnabled(&pollers.tunPoller, false), "should disable tun read interest");
   testAssertTrue(write(tunPipe[1], "z", 1) == 1, "tun producer write should succeed");
-  event = ioPollerWait(&poller, 20);
+  event = waitSplitPollers(&pollers, 20);
   testAssertTrue(event == ioEventTimeout, "masked tun read should not trigger event");
 
-  testAssertTrue(ioPollerSetReadEnabled(&poller, ioSourceTun, true), "should re-enable tun read interest");
-  event = ioPollerWait(&poller, 100);
+  testAssertTrue(ioTunSetReadEnabled(&pollers.tunPoller, true), "should re-enable tun read interest");
+  event = waitSplitPollers(&pollers, 100);
   testAssertTrue(event == ioEventTunRead, "unmasked tun read should trigger event");
   testAssertTrue(read(tunPipe[0], (char[2]){0}, 1) == 1, "tun byte should drain");
 
-  testAssertTrue(ioPollerQueuedBytes(&poller, ioSourceTcp) == 0, "tcp queue should start empty");
+  testAssertTrue(ioTcpQueuedBytes(&pollers.tcpPoller) == 0, "tcp queue should start empty");
   testAssertTrue(
-      ioPollerQueueWrite(&poller, ioSourceTcp, payload, (long)strlen(payload)),
+      ioTcpWrite(&pollers.tcpPoller, payload, (long)strlen(payload)),
       "queue write should succeed");
   testAssertTrue(
-      ioPollerQueuedBytes(&poller, ioSourceTcp) == (long)strlen(payload),
+      ioTcpQueuedBytes(&pollers.tcpPoller) == (long)strlen(payload),
       "queue bytes should reflect enqueued payload");
-  event = ioPollerWait(&poller, 100);
+  event = waitSplitPollers(&pollers, 100);
   testAssertTrue(event == ioEventTcpWrite, "queue flush should surface tcp write event");
   testAssertTrue(read(tcpPair[1], buf, sizeof(buf)) == (long)strlen(payload), "peer should read queued payload");
-  testAssertTrue(ioPollerQueuedBytes(&poller, ioSourceTcp) == 0, "queue bytes should be zero after flush");
+  testAssertTrue(ioTcpQueuedBytes(&pollers.tcpPoller) == 0, "queue bytes should be zero after flush");
 
-  ioPollerClose(&poller);
+  teardownSplitPollers(&pollers);
   close(tunPipe[0]);
   close(tunPipe[1]);
   close(tcpPair[0]);
   close(tcpPair[1]);
+}
+
+static void testIoTunWriteFlushesAtFrameBoundary(void) {
+  int tunPair[2];
+  int tcpPipe[2];
+  splitPollersFixture_t pollers;
+  ioEvent_t event;
+  char frameA[64];
+  char frameB[96];
+  char recvBuf[128];
+  long nread;
+
+  memset(frameA, 'A', sizeof(frameA));
+  memset(frameB, 'B', sizeof(frameB));
+  testAssertTrue(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, tunPair) == 0, "tun seqpacket pair should be created");
+  testAssertTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
+  testAssertTrue(setupSplitPollers(&pollers, tunPair[0], tcpPipe[0]) == 0, "setupSplitPollers should succeed");
+
+  testAssertTrue(ioTunWrite(&pollers.tunPoller, frameA, sizeof(frameA)), "first tun frame enqueue should succeed");
+  testAssertTrue(ioTunWrite(&pollers.tunPoller, frameB, sizeof(frameB)), "second tun frame enqueue should succeed");
+
+  event = waitSplitPollers(&pollers, 100);
+  testAssertTrue(event == ioEventTunWrite, "tun write event should surface");
+  nread = (long)read(tunPair[1], recvBuf, sizeof(recvBuf));
+  testAssertTrue(nread == (long)sizeof(frameA), "first packet read should match first frame size");
+  testAssertTrue(memcmp(recvBuf, frameA, sizeof(frameA)) == 0, "first packet payload should match first frame");
+
+  nread = (long)read(tunPair[1], recvBuf, sizeof(recvBuf));
+  testAssertTrue(nread == (long)sizeof(frameB), "second packet read should match second frame size");
+  testAssertTrue(memcmp(recvBuf, frameB, sizeof(frameB)) == 0, "second packet payload should match second frame");
+
+  teardownSplitPollers(&pollers);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPipe[0]);
+  close(tcpPipe[1]);
+}
+
+static void testIoTunQueueWrapKeepsFrameBoundary(void) {
+  int tunPair[2];
+  int tcpPipe[2];
+  splitPollersFixture_t pollers;
+  ioEvent_t event;
+  char frameA[464];
+  char frameB[256];
+  char recvBuf[1024];
+  long nread;
+
+  memset(frameA, 'X', sizeof(frameA));
+  memset(frameB, 'Y', sizeof(frameB));
+  testAssertTrue(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, tunPair) == 0, "tun seqpacket pair should be created");
+  testAssertTrue(pipe(tcpPipe) == 0, "tcp pipe should be created");
+  testAssertTrue(setupSplitPollers(&pollers, tunPair[0], tcpPipe[0]) == 0, "setupSplitPollers should succeed");
+
+  memset(pollers.tunPoller.outBuf + (IoPollerQueueCapacity - (long)sizeof(frameA)), frameA[0], sizeof(frameA));
+  pollers.tunPoller.readPos = IoPollerQueueCapacity - (long)sizeof(frameA);
+  pollers.tunPoller.writePos = IoPollerQueueCapacity - 36;
+  pollers.tunPoller.queuedBytes = sizeof(frameA);
+  pollers.tunPoller.frameHead = 0;
+  pollers.tunPoller.frameTail = 1;
+  pollers.tunPoller.frameCount = 1;
+  pollers.tunPoller.frames[0].start = pollers.tunPoller.readPos;
+  pollers.tunPoller.frames[0].nbytes = sizeof(frameA);
+
+  testAssertTrue(
+      ioTunWrite(&pollers.tunPoller, frameB, sizeof(frameB)),
+      "tun enqueue should wrap to buffer start when tail cannot fit full frame");
+
+  event = waitSplitPollers(&pollers, 100);
+  testAssertTrue(event == ioEventTunWrite, "first tun write event should surface");
+  nread = (long)read(tunPair[1], recvBuf, sizeof(recvBuf));
+  testAssertTrue(nread == (long)sizeof(frameA), "first wrapped-sequence packet should preserve first frame size");
+  testAssertTrue(memcmp(recvBuf, frameA, sizeof(frameA)) == 0, "first wrapped-sequence payload should match");
+
+  nread = (long)read(tunPair[1], recvBuf, sizeof(recvBuf));
+  testAssertTrue(nread == (long)sizeof(frameB), "second wrapped-sequence packet should preserve second frame size");
+  testAssertTrue(memcmp(recvBuf, frameB, sizeof(frameB)) == 0, "second wrapped-sequence payload should match");
+
+  teardownSplitPollers(&pollers);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPipe[0]);
+  close(tcpPipe[1]);
 }
 
 static void testIoTunOpenRejectNullName(void) {
@@ -260,6 +378,8 @@ void runIoTests(void) {
   testIoPollerQueueWriteFlushesOnWritable();
   testIoPollerQueueWriteRejectsOverflow();
   testIoPollerReadMaskAndQueueBytes();
+  testIoTunWriteFlushesAtFrameBoundary();
+  testIoTunQueueWrapKeepsFrameBoundary();
   testIoTunOpenRejectNullName();
   testIoTunOpenRejectInvalidMode();
   testIoTcpListenRejectInvalidIp();
