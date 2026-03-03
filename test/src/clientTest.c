@@ -1,0 +1,201 @@
+#include "clientTest.h"
+
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include "protocol.h"
+#include "session.h"
+#include "testAssert.h"
+
+static unsigned char testClientKey[ProtocolPskSize] = {
+    0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+    0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f,
+    0x1f, 0x2e, 0x3d, 0x4c, 0x5b, 0x6a, 0x79, 0x88,
+    0x97, 0xa6, 0xb5, 0xc4, 0xd3, 0xe2, 0xf1, 0x00,
+};
+static const unsigned char testClaim[] = {10, 0, 0, 2};
+static const sessionHeartbeatConfig_t heartbeatCfg = {
+    .intervalMs = 5000,
+    .timeoutMs = 15000,
+};
+
+static int writeAll(int fd, const void *buf, long nbytes) {
+  long offset = 0;
+  while (offset < nbytes) {
+    ssize_t n = write(fd, (const char *)buf + offset, (size_t)(nbytes - offset));
+    if (n < 0) {
+      return -1;
+    }
+    if (n == 0) {
+      return -1;
+    }
+    offset += (long)n;
+  }
+  return 0;
+}
+
+static int readAll(int fd, void *buf, long nbytes) {
+  long offset = 0;
+  while (offset < nbytes) {
+    ssize_t n = read(fd, (char *)buf + offset, (size_t)(nbytes - offset));
+    if (n < 0) {
+      return -1;
+    }
+    if (n == 0) {
+      return -1;
+    }
+    offset += (long)n;
+  }
+  return 0;
+}
+
+static int writeWireFrame(int fd, const protocolFrame_t *frame) {
+  uint32_t wire = 0;
+  wire = htonl((uint32_t)frame->nbytes);
+  if (writeAll(fd, &wire, ProtocolWireLengthSize) != 0) {
+    return -1;
+  }
+  return writeAll(fd, frame->buf, frame->nbytes);
+}
+
+static int readWireFrame(int fd, protocolFrame_t *frame) {
+  uint32_t wire = 0;
+  if (readAll(fd, &wire, ProtocolWireLengthSize) != 0) {
+    return -1;
+  }
+  frame->nbytes = (long)ntohl(wire);
+  if (frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+    return -1;
+  }
+  return readAll(fd, frame->buf, frame->nbytes);
+}
+
+static void setupPairs(int tunPair[2], int tcpPair[2]) {
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should succeed");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
+}
+
+static void testSessionServeClientRejectsInvalidArgs(void) {
+  testAssertTrue(
+      sessionServeClient(-1, -1, NULL, 0, NULL, &heartbeatCfg) != 0,
+      "sessionServeClient should reject invalid args");
+}
+
+static void testSessionServeClientFailsOnInvalidChallengeLength(void) {
+  int tunPair[2];
+  int tcpPair[2];
+  pid_t pid;
+  protocolFrame_t claimFrame;
+  protocolRawMsg_t rawChallenge;
+  protocolFrame_t challengeFrame;
+  int status = 0;
+
+  setupPairs(tunPair, tcpPair);
+  pid = fork();
+  testAssertTrue(pid >= 0, "fork should succeed");
+  if (pid == 0) {
+    close(tunPair[1]);
+    close(tcpPair[1]);
+    _exit(sessionServeClient(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
+  }
+
+  close(tunPair[0]);
+  close(tcpPair[0]);
+  testAssertTrue(readWireFrame(tcpPair[1], &claimFrame) == 0, "server should receive claim wire frame");
+
+  rawChallenge.buf = "bad";
+  rawChallenge.nbytes = 3;
+  testAssertTrue(protocolEncodeRaw(&rawChallenge, &challengeFrame) == protocolStatusOk, "encode raw challenge should succeed");
+  testAssertTrue(writeWireFrame(tcpPair[1], &challengeFrame) == 0, "write invalid challenge should succeed");
+
+  close(tcpPair[1]);
+  close(tunPair[1]);
+  testAssertTrue(waitpid(pid, &status, 0) == pid, "waitpid should succeed");
+  testAssertTrue(WIFEXITED(status), "child should exit normally");
+  testAssertTrue(WEXITSTATUS(status) == 1, "client should fail on invalid challenge length");
+}
+
+static void testSessionServeClientHandshakeAndStopOnPeerClose(void) {
+  int tunPair[2];
+  int tcpPair[2];
+  pid_t pid;
+  protocolFrame_t claimFrame;
+  protocolRawMsg_t claimMsg;
+  protocolRawMsg_t rawChallenge;
+  protocolFrame_t challengeFrame;
+  protocolFrame_t helloFrame;
+  protocolDecoder_t decoder;
+  long consumed = 0;
+  protocolMessage_t helloMsg;
+  int status = 0;
+  unsigned char challengeNonce[ProtocolNonceSize];
+
+  memset(challengeNonce, 0x55, sizeof(challengeNonce));
+  setupPairs(tunPair, tcpPair);
+  pid = fork();
+  testAssertTrue(pid >= 0, "fork should succeed");
+  if (pid == 0) {
+    close(tunPair[1]);
+    close(tcpPair[1]);
+    _exit(sessionServeClient(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
+  }
+
+  close(tunPair[0]);
+  close(tcpPair[0]);
+
+  testAssertTrue(readWireFrame(tcpPair[1], &claimFrame) == 0, "server should receive claim");
+  {
+    unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+    uint32_t wireLen = htonl((uint32_t)claimFrame.nbytes);
+    memcpy(wire, &wireLen, ProtocolWireLengthSize);
+    memcpy(wire + ProtocolWireLengthSize, claimFrame.buf, (size_t)claimFrame.nbytes);
+    protocolDecoderInit(&decoder);
+    consumed = 0;
+    testAssertTrue(
+        protocolDecodeRaw(&decoder, wire, ProtocolWireLengthSize + claimFrame.nbytes, &consumed, &claimMsg)
+            == protocolStatusOk,
+        "server should decode claim");
+  }
+  testAssertTrue(
+      claimMsg.nbytes == (long)sizeof(testClaim) && memcmp(claimMsg.buf, testClaim, sizeof(testClaim)) == 0,
+      "claim should match input");
+
+  rawChallenge.buf = (const char *)challengeNonce;
+  rawChallenge.nbytes = ProtocolNonceSize;
+  testAssertTrue(protocolEncodeRaw(&rawChallenge, &challengeFrame) == protocolStatusOk, "encode challenge should succeed");
+  testAssertTrue(writeWireFrame(tcpPair[1], &challengeFrame) == 0, "write challenge should succeed");
+
+  testAssertTrue(readWireFrame(tcpPair[1], &helloFrame) == 0, "server should receive hello");
+  {
+    unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+    uint32_t wireLen = htonl((uint32_t)helloFrame.nbytes);
+    memcpy(wire, &wireLen, ProtocolWireLengthSize);
+    memcpy(wire + ProtocolWireLengthSize, helloFrame.buf, (size_t)helloFrame.nbytes);
+    protocolDecoderInit(&decoder);
+    consumed = 0;
+    testAssertTrue(
+        protocolDecodeSecureMsg(&decoder, testClientKey, wire, ProtocolWireLengthSize + helloFrame.nbytes, &consumed, &helloMsg)
+            == protocolStatusOk,
+        "server should decode hello");
+  }
+  testAssertTrue(helloMsg.type == protocolMsgClientHello, "hello type should be client hello");
+  testAssertTrue(helloMsg.nbytes == ProtocolNonceSize * 2, "hello payload size should include echoed and client nonce");
+  testAssertTrue(memcmp(helloMsg.buf, challengeNonce, ProtocolNonceSize) == 0, "hello should echo server nonce");
+
+  close(tcpPair[1]);
+  close(tunPair[1]);
+  testAssertTrue(waitpid(pid, &status, 0) == pid, "waitpid should succeed");
+  testAssertTrue(WIFEXITED(status), "child should exit normally");
+  testAssertTrue(WEXITSTATUS(status) == 0, "client should return success when peer closes after handshake");
+}
+
+void runClientTests(void) {
+  testSessionServeClientRejectsInvalidArgs();
+  testSessionServeClientFailsOnInvalidChallengeLength();
+  testSessionServeClientHandshakeAndStopOnPeerClose();
+}

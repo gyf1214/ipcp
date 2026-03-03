@@ -72,5 +72,12 @@ int sessionServeMultiClient(
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxActiveSessions,
     int maxPreAuthSessions);
+int sessionServeClient(
+    int tunFd,
+    int connFd,
+    const unsigned char *claim,
+    long claimNbytes,
+    const unsigned char key[ProtocolPskSize],
+    const sessionHeartbeatConfig_t *heartbeatCfg);
 
 bool sessionApiSmoke(void);

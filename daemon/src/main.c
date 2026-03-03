@@ -1,10 +1,10 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sodium.h>
-#include <arpa/inet.h>
-#include <sys/epoll.h>
 
 #include "config.h"
 #include "crypt.h"
@@ -12,8 +12,6 @@
 #include "log.h"
 #include "protocol.h"
 #include "session.h"
-
-#define EPOLL_WAIT_MS 200
 
 static ioIfMode_t toIoIfMode(configIfMode_t mode) {
   if (mode == configIfModeTap) {
@@ -42,206 +40,6 @@ static int serverLookupByClaim(
     return -1;
   }
   return cryptServerKeyStoreLookup(lookup->store, lookup->ifMode, claim, claimNbytes, key, outActiveSlot);
-}
-
-static int writeAll(int fd, const void *buf, long nbytes) {
-  long offset = 0;
-  while (offset < nbytes) {
-    ssize_t n = write(fd, (const char *)buf + offset, (size_t)(nbytes - offset));
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    if (n == 0) {
-      return -1;
-    }
-    offset += (long)n;
-  }
-  return 0;
-}
-
-static int readAll(int fd, void *buf, long nbytes) {
-  long offset = 0;
-  while (offset < nbytes) {
-    ssize_t n = read(fd, (char *)buf + offset, (size_t)(nbytes - offset));
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    if (n == 0) {
-      return -1;
-    }
-    offset += (long)n;
-  }
-  return 0;
-}
-
-static int writeWireFrame(int fd, const protocolFrame_t *frame) {
-  uint32_t wire = 0;
-  if (frame == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
-    return -1;
-  }
-  wire = htonl((uint32_t)frame->nbytes);
-  if (writeAll(fd, &wire, ProtocolWireLengthSize) != 0) {
-    return -1;
-  }
-  return writeAll(fd, frame->buf, frame->nbytes);
-}
-
-static int readWireFrame(int fd, protocolFrame_t *frame) {
-  uint32_t wire = 0;
-  if (frame == NULL) {
-    return -1;
-  }
-  if (readAll(fd, &wire, ProtocolWireLengthSize) != 0) {
-    return -1;
-  }
-  frame->nbytes = (long)ntohl(wire);
-  if (frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
-    return -1;
-  }
-  return readAll(fd, frame->buf, frame->nbytes);
-}
-
-static int decodeRawWireFrame(const protocolFrame_t *frame, protocolRawMsg_t *msg) {
-  protocolDecoder_t decoder;
-  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
-  uint32_t wireLen = 0;
-  long consumed = 0;
-
-  if (frame == NULL || msg == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
-    return -1;
-  }
-
-  wireLen = htonl((uint32_t)frame->nbytes);
-  memcpy(wire, &wireLen, ProtocolWireLengthSize);
-  memcpy(wire + ProtocolWireLengthSize, frame->buf, (size_t)frame->nbytes);
-
-  protocolDecoderInit(&decoder);
-  if (protocolDecodeRaw(
-          &decoder,
-          wire,
-          ProtocolWireLengthSize + frame->nbytes,
-          &consumed,
-          msg)
-      != protocolStatusOk) {
-    return -1;
-  }
-  return consumed == ProtocolWireLengthSize + frame->nbytes ? 0 : -1;
-}
-
-static int clientRunPreAuthHandshake(
-    int connFd, const unsigned char *claim, long claimNbytes, const unsigned char key[ProtocolPskSize]) {
-  protocolFrame_t frame;
-  protocolRawMsg_t rawMsg;
-  protocolMessage_t msg;
-  unsigned char helloPayload[ProtocolNonceSize * 2];
-
-  if (claim == NULL || claimNbytes <= 0 || key == NULL) {
-    return -1;
-  }
-  rawMsg.nbytes = claimNbytes;
-  rawMsg.buf = (const char *)claim;
-  if (protocolEncodeRaw(&rawMsg, &frame) != protocolStatusOk) {
-    return -1;
-  }
-  if (writeWireFrame(connFd, &frame) != 0) {
-    return -1;
-  }
-
-  if (readWireFrame(connFd, &frame) != 0) {
-    return -1;
-  }
-  if (decodeRawWireFrame(&frame, &rawMsg) != 0) {
-    return -1;
-  }
-  if (rawMsg.nbytes != ProtocolNonceSize) {
-    return -1;
-  }
-
-  memcpy(helloPayload, rawMsg.buf, ProtocolNonceSize);
-  randombytes_buf(helloPayload + ProtocolNonceSize, ProtocolNonceSize);
-  msg.type = protocolMsgClientHello;
-  msg.nbytes = sizeof(helloPayload);
-  msg.buf = (const char *)helloPayload;
-  if (protocolEncodeSecureMsg(&msg, key, &frame) != protocolStatusOk) {
-    return -1;
-  }
-  if (writeWireFrame(connFd, &frame) != 0) {
-    return -1;
-  }
-  return 0;
-}
-
-static int serveTcp(
-    const char *ifName,
-    configIfMode_t ifMode,
-    int connFd,
-    const unsigned char key[ProtocolPskSize],
-    bool isServer,
-    const sessionHeartbeatConfig_t *heartbeatCfg) {
-  ioTunPoller_t tunPoller;
-  ioTcpPoller_t tcpPoller;
-  ioEvent_t event;
-  session_t *session = NULL;
-  int tunFd = -1;
-  int epollFd = -1;
-  int result = -1;
-
-  logf("opening tun device %s", ifName);
-  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
-  if (tunFd < 0) {
-    errf("failed to open tun device %s: %s", ifName, strerror(errno));
-    goto cleanup;
-  }
-  logf("successfully opened tun device %s", ifName);
-
-  epollFd = epoll_create1(0);
-  if (epollFd < 0) {
-    errf("setup epoll failed: %s", strerror(errno));
-    goto cleanup;
-  }
-  if (ioTunPollerInit(&tunPoller, epollFd, tunFd) != 0 || ioTcpPollerInit(&tcpPoller, epollFd, connFd) != 0) {
-    errf("setup epoll failed: %s", strerror(errno));
-    goto cleanup;
-  }
-
-  session = sessionCreate(isServer, heartbeatCfg, NULL, NULL);
-  if (session == NULL) {
-    errf("session setup failed");
-    goto cleanup;
-  }
-
-  while (1) {
-    event = ioPollersWait(&tunPoller, &tcpPoller, EPOLL_WAIT_MS);
-    if (sessionStep(session, &tcpPoller, &tunPoller, event, key) == sessionStepStop) {
-      break;
-    }
-  }
-
-  result = 0;
-  sessionDestroy(session);
-  logf("connection stopped");
-
-cleanup:
-  if (session != NULL && result != 0) {
-    sessionDestroy(session);
-  }
-  if (connFd >= 0) {
-    close(connFd);
-  }
-  if (tunFd >= 0) {
-    close(tunFd);
-  }
-  if (epollFd >= 0) {
-    close(epollFd);
-  }
-
-  return result;
 }
 
 static int listenTcp(
@@ -302,19 +100,40 @@ static int connTcp(
     long claimNbytes,
     const unsigned char key[ProtocolPskSize],
     const sessionHeartbeatConfig_t *heartbeatCfg) {
-  int connFd = ioTcpConnect(remoteIP, port);
+  int tunFd = -1;
+  int connFd = -1;
+  int status = -1;
+
+  logf("opening tun device %s", ifName);
+  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
+  if (tunFd < 0) {
+    errf("failed to open tun device %s: %s", ifName, strerror(errno));
+    goto cleanup;
+  }
+  logf("successfully opened tun device %s", ifName);
+
+  connFd = ioTcpConnect(remoteIP, port);
   if (connFd < 0) {
     errf("connect to %s:%d failed: %s", remoteIP, port, strerror(errno));
-    return -1;
+    goto cleanup;
   }
   logf("connected to %s:%d", remoteIP, port);
-  if (clientRunPreAuthHandshake(connFd, claim, claimNbytes, key) != 0) {
-    errf("pre-auth handshake failed");
-    close(connFd);
-    return -1;
+
+  if (sessionServeClient(tunFd, connFd, claim, claimNbytes, key, heartbeatCfg) != 0) {
+    errf("client session failed");
+    goto cleanup;
   }
 
-  return serveTcp(ifName, ifMode, connFd, key, false, heartbeatCfg);
+  status = 0;
+
+cleanup:
+  if (connFd >= 0) {
+    close(connFd);
+  }
+  if (tunFd >= 0) {
+    close(tunFd);
+  }
+  return status;
 }
 
 int main(int argc, char **argv) {
