@@ -4,8 +4,10 @@
 #include "sessionInternal.h"
 
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg);
+int clientReadRawMsg(int fd, protocolRawMsg_t *msg);
 int clientWriteSecureMsg(
     int fd, const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize]);
+int clientReadSecureMsg(int fd, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg);
 int clientServeConn(
     int tunFd,
     int connFd,

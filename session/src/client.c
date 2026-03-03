@@ -29,61 +29,88 @@ static int writeAll(int fd, const void *buf, long nbytes) {
   return 0;
 }
 
-static int readAll(int fd, void *buf, long nbytes) {
-  long offset = 0;
-  while (offset < nbytes) {
-    ssize_t n = read(fd, (char *)buf + offset, (size_t)(nbytes - offset));
-    if (n < 0) {
+int clientReadRawMsg(int fd, protocolRawMsg_t *msg) {
+  char readBuf[ProtocolFrameSize];
+  protocolDecoder_t decoder;
+  long consumed = 0;
+
+  if (fd < 0 || msg == NULL) {
+    return -1;
+  }
+
+  protocolDecoderInit(&decoder);
+  while (1) {
+    ssize_t nread = read(fd, readBuf, sizeof(readBuf));
+    if (nread < 0) {
       if (errno == EINTR) {
         continue;
       }
       return -1;
     }
-    if (n == 0) {
+    if (nread == 0) {
       return -1;
     }
-    offset += (long)n;
+
+    consumed = 0;
+    protocolStatus_t status = protocolDecodeRaw(&decoder, readBuf, (long)nread, &consumed, msg);
+    if (status == protocolStatusBadFrame) {
+      return -1;
+    }
+    if (status == protocolStatusNeedMore) {
+      if (consumed != (long)nread) {
+        return -1;
+      }
+      continue;
+    }
+    if (consumed != (long)nread) {
+      return -1;
+    }
+    return 0;
   }
-  return 0;
 }
 
-static int readWireFrame(int fd, protocolFrame_t *frame) {
-  long contentNbytes = 0;
-  if (frame == NULL) {
-    return -1;
-  }
-  if (readAll(fd, frame->buf, ProtocolWireLengthSize) != 0) {
-    return -1;
-  }
-  contentNbytes = ((long)(unsigned char)frame->buf[0] << 24)
-      | ((long)(unsigned char)frame->buf[1] << 16)
-      | ((long)(unsigned char)frame->buf[2] << 8)
-      | (long)(unsigned char)frame->buf[3];
-  if (contentNbytes <= 0 || contentNbytes > (ProtocolFrameSize - ProtocolWireLengthSize)) {
-    return -1;
-  }
-  frame->nbytes = ProtocolWireLengthSize + contentNbytes;
-  return readAll(fd, frame->buf + ProtocolWireLengthSize, contentNbytes);
-}
-
-static int decodeRawWireFrame(const protocolFrame_t *frame, protocolRawMsg_t *msg) {
+int clientReadSecureMsg(int fd, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg) {
+  char readBuf[ProtocolFrameSize];
   protocolDecoder_t decoder;
   long consumed = 0;
 
-  if (frame == NULL || msg == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+  if (fd < 0 || key == NULL || msg == NULL) {
     return -1;
   }
 
   protocolDecoderInit(&decoder);
-  if (protocolDecodeRaw(&decoder, frame->buf, frame->nbytes, &consumed, msg) != protocolStatusOk) {
-    return -1;
+  while (1) {
+    ssize_t nread = read(fd, readBuf, sizeof(readBuf));
+    if (nread < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -1;
+    }
+    if (nread == 0) {
+      return -1;
+    }
+
+    consumed = 0;
+    protocolStatus_t status = protocolDecodeSecureMsg(&decoder, key, readBuf, (long)nread, &consumed, msg);
+    if (status == protocolStatusBadFrame) {
+      return -1;
+    }
+    if (status == protocolStatusNeedMore) {
+      if (consumed != (long)nread) {
+        return -1;
+      }
+      continue;
+    }
+    if (consumed != (long)nread) {
+      return -1;
+    }
+    return 0;
   }
-  return consumed == frame->nbytes ? 0 : -1;
 }
 
 static int clientRunPreAuthHandshake(
     int connFd, const unsigned char *claim, long claimNbytes, const unsigned char key[ProtocolPskSize]) {
-  protocolFrame_t frame;
   protocolRawMsg_t rawMsg;
   protocolMessage_t msg;
   unsigned char helloPayload[ProtocolNonceSize * 2];
@@ -97,10 +124,7 @@ static int clientRunPreAuthHandshake(
     return -1;
   }
 
-  if (readWireFrame(connFd, &frame) != 0) {
-    return -1;
-  }
-  if (decodeRawWireFrame(&frame, &rawMsg) != 0) {
+  if (clientReadRawMsg(connFd, &rawMsg) != 0) {
     return -1;
   }
   if (rawMsg.nbytes != ProtocolNonceSize) {
