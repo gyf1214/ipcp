@@ -8,6 +8,7 @@
 #include <sodium.h>
 
 #include "log.h"
+#include "client.h"
 
 #define EPOLL_WAIT_MS 200
 
@@ -101,17 +102,8 @@ static int clientRunPreAuthHandshake(
   }
   rawMsg.nbytes = claimNbytes;
   rawMsg.buf = (const char *)claim;
-  if (protocolEncodeRaw(&rawMsg, &frame) != protocolStatusOk) {
+  if (clientWriteRawMsg(connFd, &rawMsg) != 0) {
     return -1;
-  }
-  {
-    uint32_t wireNbytes = htonl((uint32_t)frame.nbytes);
-    if (writeAll(connFd, &wireNbytes, ProtocolWireLengthSize) != 0) {
-      return -1;
-    }
-    if (writeAll(connFd, frame.buf, frame.nbytes) != 0) {
-      return -1;
-    }
   }
 
   if (readWireFrame(connFd, &frame) != 0) {
@@ -129,19 +121,45 @@ static int clientRunPreAuthHandshake(
   msg.type = protocolMsgClientHello;
   msg.nbytes = sizeof(helloPayload);
   msg.buf = (const char *)helloPayload;
-  if (protocolEncodeSecureMsg(&msg, key, &frame) != protocolStatusOk) {
+  if (clientWriteSecureMsg(connFd, &msg, key) != 0) {
     return -1;
   }
-  {
-    uint32_t wireNbytes = htonl((uint32_t)frame.nbytes);
-    if (writeAll(connFd, &wireNbytes, ProtocolWireLengthSize) != 0) {
-      return -1;
-    }
-    if (writeAll(connFd, frame.buf, frame.nbytes) != 0) {
-      return -1;
-    }
-  }
   return 0;
+}
+
+int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg) {
+  protocolFrame_t frame;
+  uint32_t wireNbytes = 0;
+
+  if (fd < 0 || msg == NULL || msg->buf == NULL || msg->nbytes <= 0) {
+    return -1;
+  }
+  if (protocolEncodeRaw(msg, &frame) != protocolStatusOk) {
+    return -1;
+  }
+  wireNbytes = htonl((uint32_t)frame.nbytes);
+  if (writeAll(fd, &wireNbytes, ProtocolWireLengthSize) != 0) {
+    return -1;
+  }
+  return writeAll(fd, frame.buf, frame.nbytes);
+}
+
+int clientWriteSecureMsg(
+    int fd, const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize]) {
+  protocolFrame_t frame;
+  uint32_t wireNbytes = 0;
+
+  if (fd < 0 || msg == NULL || msg->buf == NULL || msg->nbytes <= 0 || key == NULL) {
+    return -1;
+  }
+  if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
+    return -1;
+  }
+  wireNbytes = htonl((uint32_t)frame.nbytes);
+  if (writeAll(fd, &wireNbytes, ProtocolWireLengthSize) != 0) {
+    return -1;
+  }
+  return writeAll(fd, frame.buf, frame.nbytes);
 }
 
 int sessionServeClient(

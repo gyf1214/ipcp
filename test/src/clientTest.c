@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "protocol.h"
+#include "client.h"
 #include "session.h"
 #include "testAssert.h"
 
@@ -84,6 +85,78 @@ static void testSessionServeClientRejectsInvalidArgs(void) {
   testAssertTrue(
       sessionServeClient(-1, -1, NULL, 0, NULL, &heartbeatCfg) != 0,
       "sessionServeClient should reject invalid args");
+}
+
+static void testClientWriteRawMsgWritesValidWireFrame(void) {
+  int tcpPair[2];
+  protocolRawMsg_t rawMsg;
+  protocolFrame_t frame;
+  protocolRawMsg_t decoded;
+  protocolDecoder_t decoder;
+  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  uint32_t wireLen = 0;
+  long consumed = 0;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
+  rawMsg.buf = "claim-data";
+  rawMsg.nbytes = (long)strlen(rawMsg.buf);
+  testAssertTrue(clientWriteRawMsg(tcpPair[0], &rawMsg) == 0, "clientWriteRawMsg should succeed");
+
+  testAssertTrue(readAll(tcpPair[1], &wireLen, ProtocolWireLengthSize) == 0, "read wire length should succeed");
+  frame.nbytes = (long)ntohl(wireLen);
+  testAssertTrue(frame.nbytes > 0 && frame.nbytes <= ProtocolFrameSize, "frame length should be valid");
+  testAssertTrue(readAll(tcpPair[1], frame.buf, frame.nbytes) == 0, "read frame payload should succeed");
+
+  memcpy(wire, &wireLen, ProtocolWireLengthSize);
+  memcpy(wire + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
+  protocolDecoderInit(&decoder);
+  consumed = 0;
+  testAssertTrue(
+      protocolDecodeRaw(&decoder, wire, ProtocolWireLengthSize + frame.nbytes, &consumed, &decoded) == protocolStatusOk,
+      "raw wire should decode");
+  testAssertTrue(decoded.nbytes == rawMsg.nbytes, "decoded nbytes should match");
+  testAssertTrue(memcmp(decoded.buf, rawMsg.buf, (size_t)rawMsg.nbytes) == 0, "decoded payload should match");
+
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
+static void testClientWriteSecureMsgWritesDecodablePayload(void) {
+  int tcpPair[2];
+  protocolMessage_t msg;
+  protocolFrame_t frame;
+  protocolMessage_t decoded;
+  protocolDecoder_t decoder;
+  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  uint32_t wireLen = 0;
+  long consumed = 0;
+  const char payload[] = "hello";
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
+  msg.type = protocolMsgData;
+  msg.buf = payload;
+  msg.nbytes = (long)sizeof(payload);
+  testAssertTrue(clientWriteSecureMsg(tcpPair[0], &msg, testClientKey) == 0, "clientWriteSecureMsg should succeed");
+
+  testAssertTrue(readAll(tcpPair[1], &wireLen, ProtocolWireLengthSize) == 0, "read wire length should succeed");
+  frame.nbytes = (long)ntohl(wireLen);
+  testAssertTrue(frame.nbytes > 0 && frame.nbytes <= ProtocolFrameSize, "frame length should be valid");
+  testAssertTrue(readAll(tcpPair[1], frame.buf, frame.nbytes) == 0, "read frame payload should succeed");
+
+  memcpy(wire, &wireLen, ProtocolWireLengthSize);
+  memcpy(wire + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
+  protocolDecoderInit(&decoder);
+  consumed = 0;
+  testAssertTrue(
+      protocolDecodeSecureMsg(&decoder, testClientKey, wire, ProtocolWireLengthSize + frame.nbytes, &consumed, &decoded)
+          == protocolStatusOk,
+      "secure wire should decode");
+  testAssertTrue(decoded.type == msg.type, "decoded type should match");
+  testAssertTrue(decoded.nbytes == msg.nbytes, "decoded nbytes should match");
+  testAssertTrue(memcmp(decoded.buf, msg.buf, (size_t)msg.nbytes) == 0, "decoded payload should match");
+
+  close(tcpPair[0]);
+  close(tcpPair[1]);
 }
 
 static void testSessionServeClientFailsOnInvalidChallengeLength(void) {
@@ -195,6 +268,8 @@ static void testSessionServeClientHandshakeAndStopOnPeerClose(void) {
 }
 
 void runClientTests(void) {
+  testClientWriteRawMsgWritesValidWireFrame();
+  testClientWriteSecureMsgWritesDecodablePayload();
   testSessionServeClientRejectsInvalidArgs();
   testSessionServeClientFailsOnInvalidChallengeLength();
   testSessionServeClientHandshakeAndStopOnPeerClose();
