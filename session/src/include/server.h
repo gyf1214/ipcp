@@ -23,7 +23,7 @@ typedef struct {
   protocolDecoder_t decoder;
   char tcpReadCarryBuf[ProtocolFrameSize];
   long tcpReadCarryNbytes;
-  char authWriteBuf[ProtocolWireLengthSize + ProtocolFrameSize];
+  char authWriteBuf[ProtocolFrameSize];
   long authWriteOffset;
   long authWriteNbytes;
   int authState;
@@ -46,7 +46,7 @@ struct server_t {
   ioTunPoller_t tunPoller;
   int pendingOwnerSlot;
   long pendingTunToTcpNbytes;
-  unsigned char pendingTunToTcpBuf[ProtocolWireLengthSize + ProtocolFrameSize];
+  unsigned char pendingTunToTcpBuf[ProtocolFrameSize];
   int retryCursor;
   int maxActiveSessions;
   int activeCount;

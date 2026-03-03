@@ -18,10 +18,10 @@ static int protocolMessageTypeValid(protocolMessageType_t type) {
 }
 
 static long protocolExpectedSize(const protocolDecoder_t *decoder) {
-  if (decoder->offset < ProtocolWireLengthSize) {
+  if (decoder->offset < ProtocolWireLengthSize || decoder->frame.nbytes <= 0) {
     return ProtocolWireLengthSize;
   }
-  return ProtocolWireLengthSize + decoder->frame.nbytes;
+  return decoder->frame.nbytes;
 }
 
 static protocolStatus_t protocolDecoderTakeFrame(protocolDecoder_t *decoder, protocolFrame_t *frame) {
@@ -35,7 +35,7 @@ static protocolStatus_t protocolDecoderTakeFrame(protocolDecoder_t *decoder, pro
 }
 
 static int protocolLengthToWire(long nbytes, unsigned char out[ProtocolWireLengthSize]) {
-  if (nbytes < 0 || nbytes > ProtocolFrameSize) {
+  if (nbytes < 0 || nbytes > (ProtocolFrameSize - ProtocolWireLengthSize)) {
     return 0;
   }
 
@@ -48,19 +48,25 @@ static int protocolLengthFromWire(const unsigned char in[ProtocolWireLengthSize]
   uint32_t wire = 0;
   memcpy(&wire, in, ProtocolWireLengthSize);
   *nbytes = (long)ntohl(wire);
-  return *nbytes >= 0 && *nbytes <= ProtocolFrameSize;
+  return *nbytes >= 0 && *nbytes <= (ProtocolFrameSize - ProtocolWireLengthSize);
 }
 
 protocolStatus_t protocolEncodeRaw(const protocolRawMsg_t *msg, protocolFrame_t *frame) {
-  if (msg == NULL || frame == NULL || msg->nbytes <= 0 || msg->nbytes > ProtocolFrameSize) {
+  if (msg == NULL
+      || frame == NULL
+      || msg->nbytes <= 0
+      || msg->nbytes > (ProtocolFrameSize - ProtocolWireLengthSize)) {
     return protocolStatusBadFrame;
   }
   if (msg->buf == NULL) {
     return protocolStatusBadFrame;
   }
 
-  frame->nbytes = msg->nbytes;
-  memcpy(frame->buf, msg->buf, (size_t)msg->nbytes);
+  if (!protocolLengthToWire(msg->nbytes, (unsigned char *)frame->buf)) {
+    return protocolStatusBadFrame;
+  }
+  memcpy(frame->buf + ProtocolWireLengthSize, msg->buf, (size_t)msg->nbytes);
+  frame->nbytes = ProtocolWireLengthSize + msg->nbytes;
   return protocolStatusOk;
 }
 
@@ -95,20 +101,28 @@ static protocolStatus_t protocolDecodeFeedFrame(
     }
 
     if (decoder->offset < ProtocolWireLengthSize) {
-      memcpy(decoder->header + decoder->offset, input + totalConsumed, (size_t)remain);
+      memcpy(decoder->frame.buf + decoder->offset, input + totalConsumed, (size_t)remain);
       decoder->offset += remain;
       totalConsumed += remain;
 
       if (decoder->offset < ProtocolWireLengthSize) {
         continue;
       }
-      if (!protocolLengthFromWire(decoder->header, &decoder->frame.nbytes)) {
+      long contentNbytes = 0;
+      if (!protocolLengthFromWire((const unsigned char *)decoder->frame.buf, &contentNbytes)) {
         if (consumed != NULL) {
           *consumed = totalConsumed;
         }
         return protocolStatusBadFrame;
       }
-      if (decoder->frame.nbytes <= 0) {
+      if (contentNbytes <= 0) {
+        if (consumed != NULL) {
+          *consumed = totalConsumed;
+        }
+        return protocolStatusBadFrame;
+      }
+      decoder->frame.nbytes = ProtocolWireLengthSize + contentNbytes;
+      if (decoder->frame.nbytes > ProtocolFrameSize) {
         if (consumed != NULL) {
           *consumed = totalConsumed;
         }
@@ -117,14 +131,11 @@ static protocolStatus_t protocolDecodeFeedFrame(
       continue;
     }
 
-    memcpy(
-        decoder->frame.buf + (decoder->offset - ProtocolWireLengthSize),
-        input + totalConsumed,
-        (size_t)remain);
+    memcpy(decoder->frame.buf + decoder->offset, input + totalConsumed, (size_t)remain);
     decoder->offset += remain;
     totalConsumed += remain;
 
-    if (decoder->frame.nbytes <= 0 || decoder->frame.nbytes > ProtocolFrameSize) {
+    if (decoder->frame.nbytes <= ProtocolWireLengthSize || decoder->frame.nbytes > ProtocolFrameSize) {
       if (consumed != NULL) {
         *consumed = totalConsumed;
       }
@@ -164,8 +175,8 @@ protocolStatus_t protocolDecodeRaw(
   if (status != protocolStatusOk) {
     return status;
   }
-  msg->nbytes = frame.nbytes;
-  msg->buf = frame.buf;
+  msg->nbytes = frame.nbytes - ProtocolWireLengthSize;
+  msg->buf = frame.buf + ProtocolWireLengthSize;
   return protocolStatusOk;
 }
 
@@ -247,20 +258,39 @@ protocolStatus_t protocolMessageDecodeFrame(const protocolFrame_t *frame, protoc
 
 protocolStatus_t protocolEncodeSecureMsg(
     const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize], protocolFrame_t *frame) {
-  protocolStatus_t status = protocolMessageEncodeFrame(msg, frame);
+  protocolFrame_t payloadFrame;
+  protocolStatus_t status = protocolMessageEncodeFrame(msg, &payloadFrame);
   if (status != protocolStatusOk) {
     return status;
   }
-  return protocolFrameEncrypt(frame, key);
+  status = protocolFrameEncrypt(&payloadFrame, key);
+  if (status != protocolStatusOk) {
+    return status;
+  }
+
+  protocolRawMsg_t raw = {
+      .nbytes = payloadFrame.nbytes,
+      .buf = payloadFrame.buf,
+  };
+  return protocolEncodeRaw(&raw, frame);
 }
 
 static protocolStatus_t protocolDecodeSecureFrame(
     protocolFrame_t *frame, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg) {
-  protocolStatus_t status = protocolFrameDecrypt(frame, key);
+  if (frame->nbytes <= ProtocolWireLengthSize) {
+    return protocolStatusBadFrame;
+  }
+
+  protocolFrame_t payloadFrame = {
+      .nbytes = frame->nbytes - ProtocolWireLengthSize,
+  };
+  memcpy(payloadFrame.buf, frame->buf + ProtocolWireLengthSize, (size_t)payloadFrame.nbytes);
+
+  protocolStatus_t status = protocolFrameDecrypt(&payloadFrame, key);
   if (status != protocolStatusOk) {
     return status;
   }
-  return protocolMessageDecodeFrame(frame, msg);
+  return protocolMessageDecodeFrame(&payloadFrame, msg);
 }
 
 protocolStatus_t protocolDecodeSecureMsg(
@@ -293,7 +323,7 @@ protocolStatus_t protocolDecodeSecureMsg(
 }
 
 long protocolMaxPlaintextSize() {
-  return ProtocolFrameSize - ProtocolNonceSize - ProtocolAuthTagSize;
+  return ProtocolFrameSize - ProtocolWireLengthSize - ProtocolNonceSize - ProtocolAuthTagSize;
 }
 
 protocolStatus_t protocolFrameEncrypt(protocolFrame_t *frame, const unsigned char key[ProtocolPskSize]) {

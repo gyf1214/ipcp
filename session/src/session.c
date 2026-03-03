@@ -1,6 +1,5 @@
 #include "sessionInternal.h"
 
-#include <arpa/inet.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +29,7 @@ struct session_t {
   bool tunReadPaused;
   bool tcpReadPaused;
   long tcpWritePendingNbytes;
-  char tcpWritePendingBuf[ProtocolWireLengthSize + ProtocolFrameSize];
+  char tcpWritePendingBuf[ProtocolFrameSize];
   long tunWritePendingNbytes;
   char tunWritePendingBuf[ProtocolFrameSize];
 };
@@ -306,19 +305,10 @@ static queueResult_t sendMessage(
     session_t *session,
     const protocolMessage_t *msg) {
   protocolFrame_t frame;
-  char wireBuf[ProtocolWireLengthSize + ProtocolFrameSize];
-  long wireNbytes;
-  uint32_t wireLength;
-
   if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
     return queueResultError;
   }
-
-  wireLength = htonl((uint32_t)frame.nbytes);
-  memcpy(wireBuf, &wireLength, ProtocolWireLengthSize);
-  memcpy(wireBuf + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
-  wireNbytes = ProtocolWireLengthSize + frame.nbytes;
-  return queueTcpWithBackpressure(tcpPoller, tunPoller, session, wireBuf, wireNbytes);
+  return queueTcpWithBackpressure(tcpPoller, tunPoller, session, frame.buf, frame.nbytes);
 }
 
 static bool pipeTun(

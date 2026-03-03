@@ -1,6 +1,5 @@
 #include "clientTest.h"
 
-#include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -55,24 +54,23 @@ static int readAll(int fd, void *buf, long nbytes) {
 }
 
 static int writeWireFrame(int fd, const protocolFrame_t *frame) {
-  uint32_t wire = 0;
-  wire = htonl((uint32_t)frame->nbytes);
-  if (writeAll(fd, &wire, ProtocolWireLengthSize) != 0) {
-    return -1;
-  }
   return writeAll(fd, frame->buf, frame->nbytes);
 }
 
 static int readWireFrame(int fd, protocolFrame_t *frame) {
-  uint32_t wire = 0;
-  if (readAll(fd, &wire, ProtocolWireLengthSize) != 0) {
+  long contentNbytes = 0;
+  if (readAll(fd, frame->buf, ProtocolWireLengthSize) != 0) {
     return -1;
   }
-  frame->nbytes = (long)ntohl(wire);
-  if (frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+  contentNbytes = ((long)(unsigned char)frame->buf[0] << 24)
+      | ((long)(unsigned char)frame->buf[1] << 16)
+      | ((long)(unsigned char)frame->buf[2] << 8)
+      | (long)(unsigned char)frame->buf[3];
+  if (contentNbytes <= 0 || contentNbytes > (ProtocolFrameSize - ProtocolWireLengthSize)) {
     return -1;
   }
-  return readAll(fd, frame->buf, frame->nbytes);
+  frame->nbytes = ProtocolWireLengthSize + contentNbytes;
+  return readAll(fd, frame->buf + ProtocolWireLengthSize, contentNbytes);
 }
 
 static void setupPairs(int tunPair[2], int tcpPair[2]) {
@@ -92,8 +90,6 @@ static void testClientWriteRawMsgWritesValidWireFrame(void) {
   protocolFrame_t frame;
   protocolRawMsg_t decoded;
   protocolDecoder_t decoder;
-  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
-  uint32_t wireLen = 0;
   long consumed = 0;
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
@@ -101,17 +97,11 @@ static void testClientWriteRawMsgWritesValidWireFrame(void) {
   rawMsg.nbytes = (long)strlen(rawMsg.buf);
   testAssertTrue(clientWriteRawMsg(tcpPair[0], &rawMsg) == 0, "clientWriteRawMsg should succeed");
 
-  testAssertTrue(readAll(tcpPair[1], &wireLen, ProtocolWireLengthSize) == 0, "read wire length should succeed");
-  frame.nbytes = (long)ntohl(wireLen);
-  testAssertTrue(frame.nbytes > 0 && frame.nbytes <= ProtocolFrameSize, "frame length should be valid");
-  testAssertTrue(readAll(tcpPair[1], frame.buf, frame.nbytes) == 0, "read frame payload should succeed");
-
-  memcpy(wire, &wireLen, ProtocolWireLengthSize);
-  memcpy(wire + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
+  testAssertTrue(readWireFrame(tcpPair[1], &frame) == 0, "read wire frame should succeed");
   protocolDecoderInit(&decoder);
   consumed = 0;
   testAssertTrue(
-      protocolDecodeRaw(&decoder, wire, ProtocolWireLengthSize + frame.nbytes, &consumed, &decoded) == protocolStatusOk,
+      protocolDecodeRaw(&decoder, frame.buf, frame.nbytes, &consumed, &decoded) == protocolStatusOk,
       "raw wire should decode");
   testAssertTrue(decoded.nbytes == rawMsg.nbytes, "decoded nbytes should match");
   testAssertTrue(memcmp(decoded.buf, rawMsg.buf, (size_t)rawMsg.nbytes) == 0, "decoded payload should match");
@@ -126,8 +116,6 @@ static void testClientWriteSecureMsgWritesDecodablePayload(void) {
   protocolFrame_t frame;
   protocolMessage_t decoded;
   protocolDecoder_t decoder;
-  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
-  uint32_t wireLen = 0;
   long consumed = 0;
   const char payload[] = "hello";
 
@@ -137,17 +125,11 @@ static void testClientWriteSecureMsgWritesDecodablePayload(void) {
   msg.nbytes = (long)sizeof(payload);
   testAssertTrue(clientWriteSecureMsg(tcpPair[0], &msg, testClientKey) == 0, "clientWriteSecureMsg should succeed");
 
-  testAssertTrue(readAll(tcpPair[1], &wireLen, ProtocolWireLengthSize) == 0, "read wire length should succeed");
-  frame.nbytes = (long)ntohl(wireLen);
-  testAssertTrue(frame.nbytes > 0 && frame.nbytes <= ProtocolFrameSize, "frame length should be valid");
-  testAssertTrue(readAll(tcpPair[1], frame.buf, frame.nbytes) == 0, "read frame payload should succeed");
-
-  memcpy(wire, &wireLen, ProtocolWireLengthSize);
-  memcpy(wire + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
+  testAssertTrue(readWireFrame(tcpPair[1], &frame) == 0, "read wire frame should succeed");
   protocolDecoderInit(&decoder);
   consumed = 0;
   testAssertTrue(
-      protocolDecodeSecureMsg(&decoder, testClientKey, wire, ProtocolWireLengthSize + frame.nbytes, &consumed, &decoded)
+      protocolDecodeSecureMsg(&decoder, testClientKey, frame.buf, frame.nbytes, &consumed, &decoded)
           == protocolStatusOk,
       "secure wire should decode");
   testAssertTrue(decoded.type == msg.type, "decoded type should match");
@@ -222,14 +204,10 @@ static void testClientServeConnHandshakeAndStopOnPeerClose(void) {
 
   testAssertTrue(readWireFrame(tcpPair[1], &claimFrame) == 0, "server should receive claim");
   {
-    unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
-    uint32_t wireLen = htonl((uint32_t)claimFrame.nbytes);
-    memcpy(wire, &wireLen, ProtocolWireLengthSize);
-    memcpy(wire + ProtocolWireLengthSize, claimFrame.buf, (size_t)claimFrame.nbytes);
     protocolDecoderInit(&decoder);
     consumed = 0;
     testAssertTrue(
-        protocolDecodeRaw(&decoder, wire, ProtocolWireLengthSize + claimFrame.nbytes, &consumed, &claimMsg)
+        protocolDecodeRaw(&decoder, claimFrame.buf, claimFrame.nbytes, &consumed, &claimMsg)
             == protocolStatusOk,
         "server should decode claim");
   }
@@ -244,14 +222,10 @@ static void testClientServeConnHandshakeAndStopOnPeerClose(void) {
 
   testAssertTrue(readWireFrame(tcpPair[1], &helloFrame) == 0, "server should receive hello");
   {
-    unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
-    uint32_t wireLen = htonl((uint32_t)helloFrame.nbytes);
-    memcpy(wire, &wireLen, ProtocolWireLengthSize);
-    memcpy(wire + ProtocolWireLengthSize, helloFrame.buf, (size_t)helloFrame.nbytes);
     protocolDecoderInit(&decoder);
     consumed = 0;
     testAssertTrue(
-        protocolDecodeSecureMsg(&decoder, testClientKey, wire, ProtocolWireLengthSize + helloFrame.nbytes, &consumed, &helloMsg)
+        protocolDecodeSecureMsg(&decoder, testClientKey, helloFrame.buf, helloFrame.nbytes, &consumed, &helloMsg)
             == protocolStatusOk,
         "server should decode hello");
   }

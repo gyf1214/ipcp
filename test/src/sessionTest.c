@@ -1,6 +1,5 @@
 #include "sessionTest.h"
 
-#include <arpa/inet.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -82,10 +81,8 @@ static long writeSecureWire(
   protocolStatus_t status = protocolEncodeSecureMsg(&msg, key, &frame);
   testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
 
-  uint32_t wireLen = htonl((uint32_t)frame.nbytes);
-  memcpy(outBuf, &wireLen, ProtocolWireLengthSize);
-  memcpy(outBuf + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
-  return ProtocolWireLengthSize + frame.nbytes;
+  memcpy(outBuf, frame.buf, (size_t)frame.nbytes);
+  return frame.nbytes;
 }
 
 static void setupSplitPollersFixture(splitPollersFixture_t *poller, int tunPair[2], int tcpPair[2]) {
@@ -329,7 +326,7 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   int tunPair[2];
   int tcpPair[2];
   sessionStats_t stats;
-  char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  char wire[ProtocolFrameSize];
   long wireNbytes;
 
   memset(key, 0x22, sizeof(key));
@@ -368,7 +365,7 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
   splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
-  char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  char wire[ProtocolFrameSize];
   long wireNbytes;
 
   memset(key, 0x23, sizeof(key));
@@ -391,7 +388,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   int tunPair[2];
   int tcpPair[2];
   char payload[] = "tun-payload";
-  char out[ProtocolWireLengthSize + ProtocolFrameSize];
+  char out[ProtocolFrameSize];
   long nbytes;
   protocolDecoder_t decoder;
   protocolMessage_t msg;
@@ -431,7 +428,7 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
-  char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  char wire[ProtocolFrameSize];
   long wireNbytes;
   char out[128];
   char payload[] = "tcp-payload";

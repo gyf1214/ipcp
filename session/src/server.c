@@ -687,7 +687,6 @@ static bool preAuthDecodeClaim(preAuthConn_t *conn, bool *outReady) {
 static bool preAuthQueueChallenge(preAuthConn_t *conn) {
   protocolRawMsg_t rawMsg;
   protocolFrame_t frame;
-  uint32_t wireLength = 0;
 
   randombytes_buf(conn->serverNonce, sizeof(conn->serverNonce));
   rawMsg.nbytes = ProtocolNonceSize;
@@ -695,11 +694,9 @@ static bool preAuthQueueChallenge(preAuthConn_t *conn) {
   if (protocolEncodeRaw(&rawMsg, &frame) != protocolStatusOk) {
     return false;
   }
-  wireLength = htonl((uint32_t)frame.nbytes);
-  memcpy(conn->authWriteBuf, &wireLength, ProtocolWireLengthSize);
-  memcpy(conn->authWriteBuf + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
+  memcpy(conn->authWriteBuf, frame.buf, (size_t)frame.nbytes);
   conn->authWriteOffset = 0;
-  conn->authWriteNbytes = ProtocolWireLengthSize + frame.nbytes;
+  conn->authWriteNbytes = frame.nbytes;
   return true;
 }
 

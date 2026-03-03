@@ -1,12 +1,13 @@
 #pragma once
 
-#define ProtocolFrameSize 4096
+#define ProtocolFrameSize 4096 /* max total wire-frame bytes (header + content) */
 #define ProtocolWireLengthSize 4
 #define ProtocolPskSize 32
 #define ProtocolNonceSize 24
 #define ProtocolAuthTagSize 16
 
 typedef struct {
+  /* Buffer always starts at wire header (4-byte big-endian content length). */
   long nbytes;
   char buf[ProtocolFrameSize];
 } protocolFrame_t;
@@ -15,7 +16,6 @@ typedef struct {
   protocolFrame_t frame;
   long offset;
   int hasFrame;
-  unsigned char header[ProtocolWireLengthSize];
 } protocolDecoder_t;
 
 typedef enum {

@@ -1,6 +1,5 @@
 #include "sessionInternal.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -49,45 +48,37 @@ static int readAll(int fd, void *buf, long nbytes) {
 }
 
 static int readWireFrame(int fd, protocolFrame_t *frame) {
-  uint32_t wire = 0;
+  long contentNbytes = 0;
   if (frame == NULL) {
     return -1;
   }
-  if (readAll(fd, &wire, ProtocolWireLengthSize) != 0) {
+  if (readAll(fd, frame->buf, ProtocolWireLengthSize) != 0) {
     return -1;
   }
-  frame->nbytes = (long)ntohl(wire);
-  if (frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
+  contentNbytes = ((long)(unsigned char)frame->buf[0] << 24)
+      | ((long)(unsigned char)frame->buf[1] << 16)
+      | ((long)(unsigned char)frame->buf[2] << 8)
+      | (long)(unsigned char)frame->buf[3];
+  if (contentNbytes <= 0 || contentNbytes > (ProtocolFrameSize - ProtocolWireLengthSize)) {
     return -1;
   }
-  return readAll(fd, frame->buf, frame->nbytes);
+  frame->nbytes = ProtocolWireLengthSize + contentNbytes;
+  return readAll(fd, frame->buf + ProtocolWireLengthSize, contentNbytes);
 }
 
 static int decodeRawWireFrame(const protocolFrame_t *frame, protocolRawMsg_t *msg) {
   protocolDecoder_t decoder;
-  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
-  uint32_t wireLen = 0;
   long consumed = 0;
 
   if (frame == NULL || msg == NULL || frame->nbytes <= 0 || frame->nbytes > ProtocolFrameSize) {
     return -1;
   }
 
-  wireLen = htonl((uint32_t)frame->nbytes);
-  memcpy(wire, &wireLen, ProtocolWireLengthSize);
-  memcpy(wire + ProtocolWireLengthSize, frame->buf, (size_t)frame->nbytes);
-
   protocolDecoderInit(&decoder);
-  if (protocolDecodeRaw(
-          &decoder,
-          wire,
-          ProtocolWireLengthSize + frame->nbytes,
-          &consumed,
-          msg)
-      != protocolStatusOk) {
+  if (protocolDecodeRaw(&decoder, frame->buf, frame->nbytes, &consumed, msg) != protocolStatusOk) {
     return -1;
   }
-  return consumed == ProtocolWireLengthSize + frame->nbytes ? 0 : -1;
+  return consumed == frame->nbytes ? 0 : -1;
 }
 
 static int clientRunPreAuthHandshake(
@@ -129,16 +120,11 @@ static int clientRunPreAuthHandshake(
 
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg) {
   protocolFrame_t frame;
-  uint32_t wireNbytes = 0;
 
   if (fd < 0 || msg == NULL || msg->buf == NULL || msg->nbytes <= 0) {
     return -1;
   }
   if (protocolEncodeRaw(msg, &frame) != protocolStatusOk) {
-    return -1;
-  }
-  wireNbytes = htonl((uint32_t)frame.nbytes);
-  if (writeAll(fd, &wireNbytes, ProtocolWireLengthSize) != 0) {
     return -1;
   }
   return writeAll(fd, frame.buf, frame.nbytes);
@@ -147,16 +133,11 @@ int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg) {
 int clientWriteSecureMsg(
     int fd, const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize]) {
   protocolFrame_t frame;
-  uint32_t wireNbytes = 0;
 
   if (fd < 0 || msg == NULL || msg->buf == NULL || msg->nbytes <= 0 || key == NULL) {
     return -1;
   }
   if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
-    return -1;
-  }
-  wireNbytes = htonl((uint32_t)frame.nbytes);
-  if (writeAll(fd, &wireNbytes, ProtocolWireLengthSize) != 0) {
     return -1;
   }
   return writeAll(fd, frame.buf, frame.nbytes);
