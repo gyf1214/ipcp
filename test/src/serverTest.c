@@ -23,6 +23,38 @@ static const unsigned char claim2[] = {10, 0, 0, 2};
 static const unsigned char claim3[] = {10, 0, 0, 3};
 static const unsigned char claim4[] = {10, 0, 0, 4};
 
+static int fakeLookup(
+    void *ctx,
+    const unsigned char *claim,
+    long claimNbytes,
+    unsigned char key[ProtocolPskSize],
+    int *outActiveSlot) {
+  (void)ctx;
+  (void)claim;
+  (void)claimNbytes;
+  (void)key;
+  (void)outActiveSlot;
+  return 0;
+}
+
+static void testServerServeMultiClientRejectsInvalidArgs(void) {
+  testAssertTrue(
+      serverServeMultiClient(-1, -1, fakeLookup, NULL, "tun", 5000, &testHeartbeatCfg, 2, 2) < 0,
+      "server runtime should reject invalid fds");
+  testAssertTrue(
+      serverServeMultiClient(1, 2, NULL, NULL, "tun", 5000, &testHeartbeatCfg, 2, 2) < 0,
+      "server runtime should reject null lookup callback");
+  testAssertTrue(
+      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, NULL, 2, 2) < 0,
+      "server runtime should reject null heartbeat config");
+  testAssertTrue(
+      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, &testHeartbeatCfg, 0, 2) < 0,
+      "server runtime should reject non-positive max session count");
+  testAssertTrue(
+      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, &testHeartbeatCfg, 2, 0) < 0,
+      "server runtime should reject non-positive max pre-auth session count");
+}
+
 static void testServerAddRemoveAndReuseSlots(void) {
   server_t runtime;
   int slot0;
@@ -161,6 +193,7 @@ static void testServerRoundRobinRetryCursorRotates(void) {
 }
 
 void runServerTests(void) {
+  testServerServeMultiClientRejectsInvalidArgs();
   testServerAddRemoveAndReuseSlots();
   testServerRejectsBeyondMaxSessions();
   testServerFindSlotByFdAndPickEgress();

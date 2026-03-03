@@ -1,7 +1,15 @@
 #pragma once
 
 #include "protocol.h"
+#include "session.h"
 
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg);
 int clientWriteSecureMsg(
     int fd, const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize]);
+int clientServeConn(
+    int tunFd,
+    int connFd,
+    const unsigned char *claim,
+    long claimNbytes,
+    const unsigned char key[ProtocolPskSize],
+    const sessionHeartbeatConfig_t *heartbeatCfg);

@@ -62,29 +62,6 @@ static ioEvent_t waitSplitPollers(splitPollersFixture_t *poller, int timeoutMs) 
   return ioPollersWait(&poller->tunPoller, &poller->tcpPoller, timeoutMs);
 }
 
-static int fakeLookup(
-    void *ctx,
-    const unsigned char *claim,
-    long claimNbytes,
-    unsigned char key[ProtocolPskSize],
-    int *outActiveSlot) {
-  static const unsigned char claimA[] = {10, 0, 0, 2};
-  static const unsigned char claimB[] = {10, 0, 0, 3};
-  (void)ctx;
-  if (claim == NULL || claimNbytes <= 0 || key == NULL || outActiveSlot == NULL) {
-    return -1;
-  }
-  if (claimNbytes == (long)sizeof(claimA) && memcmp(claim, claimA, sizeof(claimA)) == 0) {
-    *outActiveSlot = 0;
-  } else if (claimNbytes == (long)sizeof(claimB) && memcmp(claim, claimB, sizeof(claimB)) == 0) {
-    *outActiveSlot = 1;
-  } else {
-    return -1;
-  }
-  memcpy(key, testServerKey, ProtocolPskSize);
-  return 0;
-}
-
 static long long fakeNow(void *ctx) {
   (void)ctx;
   return fakeNowMs;
@@ -542,24 +519,6 @@ static void testSessionCreateRejectsInvalidHeartbeatConfig(void) {
   testAssertTrue(session == NULL, "session create should fail when timeout is not greater than interval");
 }
 
-static void testSessionServeMultiClientRejectsInvalidArgs(void) {
-  testAssertTrue(
-      sessionServeMultiClient(-1, -1, fakeLookup, NULL, "tun", 5000, &defaultHeartbeatCfg, 2, 2) < 0,
-      "server runtime should reject invalid fds");
-  testAssertTrue(
-      sessionServeMultiClient(1, 2, NULL, NULL, "tun", 5000, &defaultHeartbeatCfg, 2, 2) < 0,
-      "server runtime should reject null lookup callback");
-  testAssertTrue(
-      sessionServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, NULL, 2, 2) < 0,
-      "server runtime should reject null heartbeat config");
-  testAssertTrue(
-      sessionServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, &defaultHeartbeatCfg, 0, 2) < 0,
-      "server runtime should reject non-positive max session count");
-  testAssertTrue(
-      sessionServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, &defaultHeartbeatCfg, 2, 0) < 0,
-      "server runtime should reject non-positive max pre-auth session count");
-}
-
 static void testSharedTunWriteInterestIsRuntimeOwned(void) {
   server_t runtime;
   int tunPair[2];
@@ -842,7 +801,6 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
 void runSessionTests(void) {
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
-  testSessionServeMultiClientRejectsInvalidArgs();
   testSessionApiSmoke();
   testSessionInitSeedsModeAndTimestamps();
   testSessionResetClearsPendingAndPauseFlags();

@@ -162,7 +162,7 @@ int clientWriteSecureMsg(
   return writeAll(fd, frame.buf, frame.nbytes);
 }
 
-int sessionServeClient(
+int clientServeConn(
     int tunFd,
     int connFd,
     const unsigned char *claim,

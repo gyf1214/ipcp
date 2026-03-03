@@ -1,10 +1,16 @@
 #include "server.h"
 
+#include <arpa/inet.h>
+#include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <time.h>
 #include <unistd.h>
+#include <sodium.h>
+
+#include "log.h"
 
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
@@ -564,4 +570,575 @@ bool serverPromoteToActiveSlot(server_t *runtime, int preAuthSlot) {
     return false;
   }
   return serverRemovePreAuthConn(runtime, preAuthSlot);
+}
+
+static bool serverEpollCtl(int epollFd, int op, int fd, unsigned int events) {
+  struct epoll_event event;
+  memset(&event, 0, sizeof(event));
+  event.events = events;
+  event.data.fd = fd;
+  return epoll_ctl(epollFd, op, fd, &event) == 0;
+}
+
+static int isValidTunClaim(const unsigned char *claim, long claimNbytes) {
+  return claim != NULL && claimNbytes == 4;
+}
+
+static int isValidTapClaim(const unsigned char *claim, long claimNbytes) {
+  return claim != NULL && claimNbytes == 6;
+}
+
+typedef enum {
+  preAuthStateWaitClaim = 0,
+  preAuthStateSendChallenge,
+  preAuthStateWaitHello,
+} preAuthState_t;
+
+static bool serverClosePreAuthConn(server_t *runtime, int preAuthSlot) {
+  int connFd = -1;
+  preAuthConn_t *conn = serverPreAuthAt(runtime, preAuthSlot);
+  if (conn == NULL) {
+    return false;
+  }
+  connFd = conn->connFd;
+  (void)serverEpollCtl(runtime->epollFd, EPOLL_CTL_DEL, connFd, 0);
+  close(connFd);
+  return serverRemovePreAuthConn(runtime, preAuthSlot);
+}
+
+static bool serverSetPreAuthWriteEnabled(server_t *runtime, int connFd, bool writeEnabled) {
+  unsigned int events = EPOLLIN | EPOLLRDHUP;
+  if (writeEnabled) {
+    events |= EPOLLOUT;
+  }
+  return serverEpollCtl(runtime->epollFd, EPOLL_CTL_MOD, connFd, events);
+}
+
+static bool preAuthReadIntoCarry(preAuthConn_t *conn) {
+  long nbytes = 0;
+  ioStatus_t status;
+
+  if (conn->tcpReadCarryNbytes >= (long)sizeof(conn->tcpReadCarryBuf)) {
+    return false;
+  }
+  status = ioTcpRead(
+      conn->connFd,
+      conn->tcpReadCarryBuf + conn->tcpReadCarryNbytes,
+      (long)sizeof(conn->tcpReadCarryBuf) - conn->tcpReadCarryNbytes,
+      &nbytes);
+  if (status == ioStatusWouldBlock) {
+    return true;
+  }
+  if (status != ioStatusOk || nbytes <= 0) {
+    return false;
+  }
+  conn->tcpReadCarryNbytes += nbytes;
+  return true;
+}
+
+static void preAuthDropConsumedCarry(preAuthConn_t *conn, long consumedNbytes) {
+  long remaining;
+  if (consumedNbytes <= 0) {
+    return;
+  }
+  if (consumedNbytes >= conn->tcpReadCarryNbytes) {
+    conn->tcpReadCarryNbytes = 0;
+    return;
+  }
+  remaining = conn->tcpReadCarryNbytes - consumedNbytes;
+  memmove(conn->tcpReadCarryBuf, conn->tcpReadCarryBuf + consumedNbytes, (size_t)remaining);
+  conn->tcpReadCarryNbytes = remaining;
+}
+
+static bool preAuthDecodeClaim(preAuthConn_t *conn, bool *outReady) {
+  protocolRawMsg_t rawMsg;
+  long offset = 0;
+
+  *outReady = false;
+  while (offset < conn->tcpReadCarryNbytes) {
+    long consumed = 0;
+    protocolStatus_t status = protocolDecodeRaw(
+        &conn->decoder,
+        conn->tcpReadCarryBuf + offset,
+        conn->tcpReadCarryNbytes - offset,
+        &consumed,
+        &rawMsg);
+    if (status == protocolStatusBadFrame) {
+      return false;
+    }
+    if (consumed <= 0) {
+      break;
+    }
+    offset += consumed;
+    if (status == protocolStatusOk) {
+      if (rawMsg.nbytes <= 0 || rawMsg.nbytes > SessionClaimSize) {
+        return false;
+      }
+      memcpy(conn->claim, rawMsg.buf, (size_t)rawMsg.nbytes);
+      conn->claimNbytes = rawMsg.nbytes;
+      *outReady = true;
+      break;
+    }
+  }
+  preAuthDropConsumedCarry(conn, offset);
+  return true;
+}
+
+static bool preAuthQueueChallenge(preAuthConn_t *conn) {
+  protocolRawMsg_t rawMsg;
+  protocolFrame_t frame;
+  uint32_t wireLength = 0;
+
+  randombytes_buf(conn->serverNonce, sizeof(conn->serverNonce));
+  rawMsg.nbytes = ProtocolNonceSize;
+  rawMsg.buf = (const char *)conn->serverNonce;
+  if (protocolEncodeRaw(&rawMsg, &frame) != protocolStatusOk) {
+    return false;
+  }
+  wireLength = htonl((uint32_t)frame.nbytes);
+  memcpy(conn->authWriteBuf, &wireLength, ProtocolWireLengthSize);
+  memcpy(conn->authWriteBuf + ProtocolWireLengthSize, frame.buf, (size_t)frame.nbytes);
+  conn->authWriteOffset = 0;
+  conn->authWriteNbytes = ProtocolWireLengthSize + frame.nbytes;
+  return true;
+}
+
+static bool preAuthFlushChallenge(preAuthConn_t *conn) {
+  while (conn->authWriteNbytes > 0) {
+    ssize_t wrote =
+        write(conn->connFd, conn->authWriteBuf + conn->authWriteOffset, (size_t)conn->authWriteNbytes);
+    if (wrote > 0) {
+      conn->authWriteOffset += (long)wrote;
+      conn->authWriteNbytes -= (long)wrote;
+      continue;
+    }
+    if (wrote == 0) {
+      return false;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return true;
+    }
+    return false;
+  }
+  conn->authWriteOffset = 0;
+  return true;
+}
+
+static bool preAuthDecodeHello(preAuthConn_t *conn, bool *outReady) {
+  protocolMessage_t msg;
+  long offset = 0;
+
+  *outReady = false;
+  while (offset < conn->tcpReadCarryNbytes) {
+    long consumed = 0;
+    protocolStatus_t status = protocolDecodeSecureMsg(
+        &conn->decoder,
+        conn->resolvedKey,
+        conn->tcpReadCarryBuf + offset,
+        conn->tcpReadCarryNbytes - offset,
+        &consumed,
+        &msg);
+    if (status == protocolStatusBadFrame) {
+      return false;
+    }
+    if (consumed <= 0) {
+      break;
+    }
+    offset += consumed;
+    if (status == protocolStatusOk) {
+      if (msg.type != protocolMsgClientHello || msg.nbytes != ProtocolNonceSize * 2) {
+        return false;
+      }
+      if (memcmp(msg.buf, conn->serverNonce, ProtocolNonceSize) != 0) {
+        return false;
+      }
+      *outReady = true;
+      break;
+    }
+  }
+  preAuthDropConsumedCarry(conn, offset);
+  return true;
+}
+
+static bool serverDispatchPreAuth(
+    server_t *runtime,
+    int preAuthSlot,
+    ioEvent_t event,
+    const char *ifModeLabel,
+    sessionServerResolveClaimFn_t resolveClaimFn,
+    void *resolveClaimCtx) {
+  preAuthConn_t *conn;
+  long long nowMs;
+
+  conn = serverPreAuthAt(runtime, preAuthSlot);
+  if (conn == NULL || resolveClaimFn == NULL || ifModeLabel == NULL) {
+    return false;
+  }
+
+  nowMs = serverNowMs(runtime);
+  if (nowMs < 0) {
+    return false;
+  }
+  if (nowMs >= conn->authDeadlineMs) {
+    return serverClosePreAuthConn(runtime, preAuthSlot);
+  }
+
+  if (conn->authState == preAuthStateWaitClaim && event == ioEventTcpRead) {
+    bool claimReady = false;
+
+    if (!preAuthReadIntoCarry(conn)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    if (!preAuthDecodeClaim(conn, &claimReady)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    if (!claimReady) {
+      return true;
+    }
+
+    if ((strcmp(ifModeLabel, "tun") == 0 && !isValidTunClaim(conn->claim, conn->claimNbytes))
+        || (strcmp(ifModeLabel, "tap") == 0 && !isValidTapClaim(conn->claim, conn->claimNbytes))) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    if (resolveClaimFn(resolveClaimCtx, conn->claim, conn->claimNbytes, conn->resolvedKey, &conn->resolvedActiveSlot)
+        != 0) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    if (conn->resolvedActiveSlot < 0 || conn->resolvedActiveSlot >= runtime->maxActiveSessions) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    if (!preAuthQueueChallenge(conn)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    conn->authState = preAuthStateSendChallenge;
+    if (!serverSetPreAuthWriteEnabled(runtime, conn->connFd, true)) {
+      return false;
+    }
+  }
+
+  if (conn->authState == preAuthStateSendChallenge && (event == ioEventTcpWrite || event == ioEventTimeout)) {
+    if (!preAuthFlushChallenge(conn)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    if (conn->authWriteNbytes == 0) {
+      conn->authState = preAuthStateWaitHello;
+      if (!serverSetPreAuthWriteEnabled(runtime, conn->connFd, false)) {
+        return false;
+      }
+    }
+  }
+
+  if (conn->authState == preAuthStateWaitHello && event == ioEventTcpRead) {
+    bool helloReady = false;
+    int activeSlot;
+    int activeConnFd;
+    protocolDecoder_t helloDecoder;
+    char helloCarryBuf[ProtocolFrameSize];
+    long helloCarryNbytes = 0;
+    session_t *activeSession;
+
+    if (!preAuthReadIntoCarry(conn)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    if (!preAuthDecodeHello(conn, &helloReady)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    if (!helloReady) {
+      return true;
+    }
+    if (serverHasActiveClaim(runtime, conn->claim, conn->claimNbytes)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    helloDecoder = conn->decoder;
+    helloCarryNbytes = conn->tcpReadCarryNbytes;
+    if (helloCarryNbytes > 0) {
+      memcpy(helloCarryBuf, conn->tcpReadCarryBuf, (size_t)helloCarryNbytes);
+    }
+    activeSlot = conn->resolvedActiveSlot;
+    if (!serverPromoteToActiveSlot(runtime, preAuthSlot)) {
+      return serverClosePreAuthConn(runtime, preAuthSlot);
+    }
+    activeSession = serverSessionAt(runtime, activeSlot);
+    if (activeSession == NULL
+        || !sessionPromoteFromPreAuth(
+            activeSession, &helloDecoder, helloCarryNbytes > 0 ? helloCarryBuf : NULL, helloCarryNbytes)) {
+      int failedConnFd = serverConnFdAt(runtime, activeSlot);
+      if (failedConnFd >= 0) {
+        close(failedConnFd);
+      }
+      (void)serverRemoveClient(runtime, activeSlot);
+      return false;
+    }
+    activeConnFd = serverConnFdAt(runtime, activeSlot);
+    runtime->activeConns[activeSlot].tcpPoller.epollFd = runtime->epollFd;
+    if (!serverEpollCtl(runtime->epollFd, EPOLL_CTL_MOD, activeConnFd, runtime->activeConns[activeSlot].tcpPoller.events)) {
+      close(activeConnFd);
+      (void)serverRemoveClient(runtime, activeSlot);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static bool serverDispatchClient(server_t *runtime, int slot, ioEvent_t event) {
+  session_t *session = serverSessionAt(runtime, slot);
+  int connFd = serverConnFdAt(runtime, slot);
+  const unsigned char *key = serverKeyAt(runtime, slot);
+  if (session == NULL || connFd < 0) {
+    return false;
+  }
+  if (key == NULL) {
+    return false;
+  }
+
+  if (sessionStep(
+          session, &runtime->activeConns[slot].tcpPoller, &runtime->tunPoller, event, key)
+      == sessionStepStop) {
+    (void)serverEpollCtl(runtime->epollFd, EPOLL_CTL_DEL, connFd, 0);
+    close(connFd);
+    return serverRemoveClient(runtime, slot);
+  }
+  return true;
+}
+
+static bool serverTickAllClients(server_t *runtime) {
+  int slot;
+  for (slot = 0; slot < runtime->maxActiveSessions; slot++) {
+    if (!runtime->activeConns[slot].active) {
+      continue;
+    }
+    if (!serverDispatchClient(runtime, slot, ioEventTimeout)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool serverTickPreAuth(
+    server_t *runtime,
+    const char *ifModeLabel,
+    sessionServerResolveClaimFn_t resolveClaimFn,
+    void *resolveClaimCtx) {
+  int slot;
+
+  for (slot = 0; slot < runtime->maxPreAuthSessions; slot++) {
+    preAuthConn_t *conn = serverPreAuthAt(runtime, slot);
+    if (conn == NULL) {
+      continue;
+    }
+    if (!serverDispatchPreAuth(runtime, slot, ioEventTimeout, ifModeLabel, resolveClaimFn, resolveClaimCtx)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int serverServeMultiClient(
+    int tunFd,
+    int listenFd,
+    sessionServerResolveClaimFn_t resolveClaimFn,
+    void *resolveClaimCtx,
+    const char *ifModeLabel,
+    int authTimeoutMs,
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    int maxActiveSessions,
+    int maxPreAuthSessions) {
+  server_t runtime;
+  struct epoll_event events[16];
+  int epollFd = -1;
+  int rc = -1;
+  int i;
+
+  if (tunFd < 0
+      || listenFd < 0
+      || resolveClaimFn == NULL
+      || ifModeLabel == NULL
+      || authTimeoutMs <= 0
+      || heartbeatCfg == NULL
+      || maxActiveSessions <= 0
+      || maxPreAuthSessions <= 0) {
+    return -1;
+  }
+  if (!serverInit(
+          &runtime,
+          tunFd,
+          listenFd,
+          maxActiveSessions,
+          maxPreAuthSessions,
+          heartbeatCfg,
+          NULL,
+          NULL)) {
+    return -1;
+  }
+
+  epollFd = epoll_create1(0);
+  if (epollFd < 0) {
+    serverDeinit(&runtime);
+    return -1;
+  }
+  runtime.epollFd = epollFd;
+  runtime.tunPoller.epollFd = epollFd;
+
+  if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, listenFd, EPOLLIN | EPOLLRDHUP)
+      || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, runtime.tunPoller.events)) {
+    goto cleanup;
+  }
+
+  while (1) {
+    int n = epoll_wait(epollFd, events, (int)(sizeof(events) / sizeof(events[0])), 200);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+
+    for (i = 0; i < n; i++) {
+      int fd = events[i].data.fd;
+      unsigned int ev = events[i].events;
+
+      if (fd == listenFd) {
+        while (1) {
+          int connFd = -1;
+          char clientIp[256];
+          int clientPort = 0;
+          ioStatus_t status = ioTcpAcceptNonBlocking(listenFd, &connFd, clientIp, sizeof(clientIp), &clientPort);
+          long long nowMs;
+          int preAuthSlot;
+          if (status == ioStatusWouldBlock) {
+            break;
+          }
+          if (status != ioStatusOk) {
+            goto cleanup;
+          }
+          logf("connected with %s:%d", clientIp, clientPort);
+          nowMs = serverNowMs(&runtime);
+          if (nowMs < 0) {
+            close(connFd);
+            goto cleanup;
+          }
+          preAuthSlot = serverCreatePreAuthConn(&runtime, connFd, nowMs + authTimeoutMs);
+          if (preAuthSlot < 0) {
+            close(connFd);
+            continue;
+          }
+          if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, connFd, EPOLLIN | EPOLLRDHUP)) {
+            close(connFd);
+            (void)serverRemovePreAuthConn(&runtime, preAuthSlot);
+            goto cleanup;
+          }
+        }
+        continue;
+      }
+
+      {
+        int preAuthSlot = serverFindPreAuthSlotByFd(&runtime, fd);
+        if (preAuthSlot >= 0) {
+          if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+            if (!serverClosePreAuthConn(&runtime, preAuthSlot)) {
+              goto cleanup;
+            }
+            continue;
+          }
+          if ((ev & EPOLLIN) != 0
+              && !serverDispatchPreAuth(
+                  &runtime, preAuthSlot, ioEventTcpRead, ifModeLabel, resolveClaimFn, resolveClaimCtx)) {
+            goto cleanup;
+          }
+          if ((ev & EPOLLOUT) != 0
+              && !serverDispatchPreAuth(
+                  &runtime, preAuthSlot, ioEventTcpWrite, ifModeLabel, resolveClaimFn, resolveClaimCtx)) {
+            goto cleanup;
+          }
+          continue;
+        }
+      }
+
+      if (fd == tunFd) {
+        if ((ev & EPOLLIN) != 0) {
+          int connFd = serverPickEgressClient(&runtime);
+          int slot = serverFindSlotByFd(&runtime, connFd);
+          if (slot >= 0 && !serverDispatchClient(&runtime, slot, ioEventTunRead)) {
+            goto cleanup;
+          }
+        }
+        if ((ev & EPOLLOUT) != 0) {
+          if (!serverServiceTunWriteEvent(&runtime)) {
+            goto cleanup;
+          }
+          if (ioTunQueuedBytes(&runtime.tunPoller) <= IoPollerLowWatermark) {
+            if (serverRetryBlockedTunRoundRobin(&runtime) < 0) {
+              goto cleanup;
+            }
+            if (!serverSyncTunWriteInterest(&runtime)) {
+              goto cleanup;
+            }
+          }
+        }
+        if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+          goto cleanup;
+        }
+        continue;
+      }
+
+      {
+        int slot = serverFindSlotByFd(&runtime, fd);
+        if (slot < 0) {
+          (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, fd, 0);
+          close(fd);
+          continue;
+        }
+        if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
+          (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, fd, 0);
+          close(fd);
+          (void)serverRemoveClient(&runtime, slot);
+          continue;
+        }
+        if ((ev & EPOLLIN) != 0 && !serverDispatchClient(&runtime, slot, ioEventTcpRead)) {
+          goto cleanup;
+        }
+        if ((ev & EPOLLOUT) != 0) {
+          if (!ioTcpServiceWriteEvent(&runtime.activeConns[slot].tcpPoller)) {
+            goto cleanup;
+          }
+          if (!serverDispatchClient(&runtime, slot, ioEventTcpWrite)) {
+            goto cleanup;
+          }
+        }
+      }
+    }
+
+    if (!serverTickAllClients(&runtime)) {
+      goto cleanup;
+    }
+    if (!serverTickPreAuth(&runtime, ifModeLabel, resolveClaimFn, resolveClaimCtx)) {
+      goto cleanup;
+    }
+  }
+
+cleanup:
+  for (i = 0; i < runtime.maxActiveSessions; i++) {
+    int connFd = serverConnFdAt(&runtime, i);
+    if (connFd >= 0) {
+      (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, connFd, 0);
+      close(connFd);
+    }
+  }
+  for (i = 0; i < runtime.maxPreAuthSessions; i++) {
+    preAuthConn_t *conn = serverPreAuthAt(&runtime, i);
+    if (conn != NULL && conn->connFd >= 0) {
+      (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, conn->connFd, 0);
+      close(conn->connFd);
+      (void)serverRemovePreAuthConn(&runtime, i);
+    }
+  }
+  serverDeinit(&runtime);
+  if (epollFd >= 0) {
+    close(epollFd);
+  }
+  return rc;
 }

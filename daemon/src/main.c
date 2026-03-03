@@ -70,7 +70,7 @@ static int listenTcp(
 
   lookupCtx.store = keyStore;
   lookupCtx.ifMode = ifMode;
-  if (sessionServeMultiClient(
+  if (sessionRunServer(
           tunFd,
           listenFd,
           serverLookupByClaim,
@@ -119,7 +119,7 @@ static int connTcp(
   }
   logf("connected to %s:%d", remoteIP, port);
 
-  if (sessionServeClient(tunFd, connFd, claim, claimNbytes, key, heartbeatCfg) != 0) {
+  if (sessionRunClient(tunFd, connFd, claim, claimNbytes, key, heartbeatCfg) != 0) {
     errf("client session failed");
     goto cleanup;
   }

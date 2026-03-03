@@ -62,7 +62,7 @@ sessionStepResult_t sessionStep(
     ioTunPoller_t *tunPoller,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]);
-int sessionServeMultiClient(
+int sessionRunServer(
     int tunFd,
     int listenFd,
     sessionServerResolveClaimFn_t resolveClaimFn,
@@ -72,7 +72,7 @@ int sessionServeMultiClient(
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxActiveSessions,
     int maxPreAuthSessions);
-int sessionServeClient(
+int sessionRunClient(
     int tunFd,
     int connFd,
     const unsigned char *claim,

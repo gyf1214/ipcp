@@ -10,7 +10,6 @@
 
 #include "protocol.h"
 #include "client.h"
-#include "session.h"
 #include "testAssert.h"
 
 static unsigned char testClientKey[ProtocolPskSize] = {
@@ -81,10 +80,10 @@ static void setupPairs(int tunPair[2], int tcpPair[2]) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
 }
 
-static void testSessionServeClientRejectsInvalidArgs(void) {
+static void testClientServeConnRejectsInvalidArgs(void) {
   testAssertTrue(
-      sessionServeClient(-1, -1, NULL, 0, NULL, &heartbeatCfg) != 0,
-      "sessionServeClient should reject invalid args");
+      clientServeConn(-1, -1, NULL, 0, NULL, &heartbeatCfg) != 0,
+      "clientServeConn should reject invalid args");
 }
 
 static void testClientWriteRawMsgWritesValidWireFrame(void) {
@@ -159,7 +158,7 @@ static void testClientWriteSecureMsgWritesDecodablePayload(void) {
   close(tcpPair[1]);
 }
 
-static void testSessionServeClientFailsOnInvalidChallengeLength(void) {
+static void testClientServeConnFailsOnInvalidChallengeLength(void) {
   int tunPair[2];
   int tcpPair[2];
   pid_t pid;
@@ -174,7 +173,7 @@ static void testSessionServeClientFailsOnInvalidChallengeLength(void) {
   if (pid == 0) {
     close(tunPair[1]);
     close(tcpPair[1]);
-    _exit(sessionServeClient(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
+    _exit(clientServeConn(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
   }
 
   close(tunPair[0]);
@@ -193,7 +192,7 @@ static void testSessionServeClientFailsOnInvalidChallengeLength(void) {
   testAssertTrue(WEXITSTATUS(status) == 1, "client should fail on invalid challenge length");
 }
 
-static void testSessionServeClientHandshakeAndStopOnPeerClose(void) {
+static void testClientServeConnHandshakeAndStopOnPeerClose(void) {
   int tunPair[2];
   int tcpPair[2];
   pid_t pid;
@@ -215,7 +214,7 @@ static void testSessionServeClientHandshakeAndStopOnPeerClose(void) {
   if (pid == 0) {
     close(tunPair[1]);
     close(tcpPair[1]);
-    _exit(sessionServeClient(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
+    _exit(clientServeConn(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
   }
 
   close(tunPair[0]);
@@ -270,7 +269,7 @@ static void testSessionServeClientHandshakeAndStopOnPeerClose(void) {
 void runClientTests(void) {
   testClientWriteRawMsgWritesValidWireFrame();
   testClientWriteSecureMsgWritesDecodablePayload();
-  testSessionServeClientRejectsInvalidArgs();
-  testSessionServeClientFailsOnInvalidChallengeLength();
-  testSessionServeClientHandshakeAndStopOnPeerClose();
+  testClientServeConnRejectsInvalidArgs();
+  testClientServeConnFailsOnInvalidChallengeLength();
+  testClientServeConnHandshakeAndStopOnPeerClose();
 }
