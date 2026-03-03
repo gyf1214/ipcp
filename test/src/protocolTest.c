@@ -18,7 +18,7 @@ static protocolStatus_t decodeSecureFrameForTest(
     const unsigned char key[ProtocolPskSize],
     protocolMessage_t *msg) {
   protocolDecoder_t decoder;
-  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  unsigned char wire[ProtocolFrameSize];
   long consumed = 0;
   long wireNbytes = writeWireFrame(frame, wire);
 
@@ -108,7 +108,7 @@ void testRawDecodeSplitFrame() {
   protocolStatus_t status = protocolEncodeRaw(&in, &frame);
   testAssertTrue(status == protocolStatusOk, "raw encode should succeed");
 
-  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  unsigned char wire[ProtocolFrameSize];
   long wireNbytes = writeWireFrame(&frame, wire);
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
@@ -173,7 +173,7 @@ void testSecureDecodeSplitFrame() {
   protocolStatus_t status = protocolEncodeSecureMsg(&in, key, &frame);
   testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
 
-  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  unsigned char wire[ProtocolFrameSize];
   long wireNbytes = writeWireFrame(&frame, wire);
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
@@ -278,7 +278,7 @@ void testDecodeUsesFixedBigEndianLengthHeader() {
   protocolStatus_t status = protocolEncodeSecureMsg(&in, key, &secureFrame);
   testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
 
-  unsigned char raw[ProtocolWireLengthSize + ProtocolFrameSize];
+  unsigned char raw[ProtocolFrameSize];
   long rawNbytes = writeWireFrame(&secureFrame, raw);
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
@@ -305,7 +305,7 @@ void testSecureDecodeRejectsTamper() {
   testAssertTrue(status == protocolStatusOk, "secure encode should succeed");
   frame.buf[frame.nbytes - 1] ^= 0x1;
 
-  unsigned char wire[ProtocolWireLengthSize + ProtocolFrameSize];
+  unsigned char wire[ProtocolFrameSize];
   long wireNbytes = writeWireFrame(&frame, wire);
   protocolDecoder_t decoder;
   protocolDecoderInit(&decoder);
