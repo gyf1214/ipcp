@@ -1,12 +1,12 @@
 # ipcp
 
-`ipcp` is an IP tunnel over TCP: a Linux TUN-to-TCP tunnel daemon with a small custom framing protocol, authenticated encryption, and heartbeat-based liveness checks.
+`ipcp` is an L2/L3 tunnel over TCP: a Linux TUN/TAP-to-TCP tunnel daemon with a small custom framing protocol, authenticated encryption, and heartbeat-based liveness checks.
 
 ## Features
 
 - Linux TUN/TAP integration for IP- or Ethernet-layer tunneling
 - Client and server modes in the same daemon (`ipcpd`)
-- Moves IP packets between TUN and a TCP connection
+- Moves IP packets or Ethernet frames between TUN/TAP and a TCP connection
 - Server mode supports concurrent client sessions in one process
 - Wraps traffic in protocol frames with typed messages
 - Authenticated encryption on every frame (nonce + ciphertext + MAC)
@@ -17,7 +17,7 @@
 - VPN-style private link between two hosts over TCP
 - NAT/firewall bypass where direct IP routing is not possible
 - Reverse tunnel setups where an inside host dials out to expose internal connectivity
-- General-purpose encrypted L3 transport over existing TCP reachability
+- General-purpose encrypted L2/L3 transport over existing TCP reachability
 
 ## Build
 
@@ -84,7 +84,7 @@ Prerequisites:
 
 Notes:
 
-- The container route keeps namespace/TUN setup isolated from host networking by using the container runtime's default network namespace behavior.
+- The container route keeps namespace and TUN/TAP setup isolated from host networking by using the container runtime's default network namespace behavior.
 
 ## What Is Produced
 
@@ -194,7 +194,7 @@ Run:
 ## Runtime Notes
 
 - Requires Linux with `/dev/net/tun`
-- `ipcpd` does not inherently require root; TUN create/manage operations require appropriate privileges (typically `CAP_NET_ADMIN`, often via root or pre-provisioned device ownership)
+- `ipcpd` does not inherently require root; TUN/TAP create/manage operations require appropriate privileges (typically `CAP_NET_ADMIN`, often via root or pre-provisioned device ownership)
 - `if_mode: "tun"` uses L3 packets (`IFF_TUN`); `if_mode: "tap"` uses Ethernet frames (`IFF_TAP`)
 - TAP mode requires assigning/linking the TAP interface according to your L2/L3 topology; default MTU (`1500`) is usually a safe starting point for both modes
 - Interface IP assignment and routing are environment-specific and should be configured separately with `ip` tooling
