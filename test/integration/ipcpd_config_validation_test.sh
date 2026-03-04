@@ -254,22 +254,6 @@ cat > "$tmpDir/server-tap-credentials-missing-mac.json" <<JSON
 }
 JSON
 
-cat > "$tmpDir/server-tap-unexpected-subnet.json" <<JSON
-{
-  "mode": "server",
-  "if_name": "tap0",
-  "if_mode": "tap",
-  "listen_ip": "0.0.0.0",
-  "listen_port": 46000,
-  "auth_timeout_ms": 5000,
-  "max_pre_auth_sessions": 8,
-  "tun_subnet": "10.250.0.0/24",
-  "credentials": [
-    { "tap_mac": "02:11:22:33:44:55", "key_file": "/tmp/none.key" }
-  ]
-}
-JSON
-
 cat > "$tmpDir/client-tun-invalid-claim-format.json" <<JSON
 {
   "mode": "client",
@@ -309,7 +293,6 @@ run_expect_invalid_config "$tmpDir/server-tun-missing-subnet.json"
 run_expect_invalid_config "$tmpDir/server-tun-bad-subnet.json"
 run_expect_invalid_config "$tmpDir/server-tun-malformed-subnet.json"
 run_expect_invalid_config "$tmpDir/server-tap-credentials-missing-mac.json"
-run_expect_invalid_config "$tmpDir/server-tap-unexpected-subnet.json"
 run_expect_invalid_config "$tmpDir/client-tun-invalid-claim-format.json"
 run_expect_invalid_config "$tmpDir/client-tap-invalid-claim-format.json"
 run_expect_invalid_secret "$tmpDir/missing-if-mode-defaults-to-tun.json"

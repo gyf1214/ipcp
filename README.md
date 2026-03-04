@@ -129,7 +129,6 @@ Supported schema:
   - `if_mode: "tun"` requires top-level `tun_subnet` CIDR (for example `10.250.0.0/24`)
   - `if_mode: "tun"` entries use `tun_ip` + `key_file`
   - `if_mode: "tap"` entries use `tap_mac` + `key_file`
-  - `tun_subnet` is rejected when `if_mode: "tap"`
   - Top-level server `key_file` is not accepted
 
 ### Secret file

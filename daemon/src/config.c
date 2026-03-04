@@ -308,11 +308,7 @@ static int parseServerConfig(const cJSON *root, daemonConfig_t *cfg) {
     if (parseTunSubnet(root, cfg) != 0) {
       return -1;
     }
-  } else if (cfg->ifMode == configIfModeTap) {
-    if (cJSON_GetObjectItemCaseSensitive(root, "tun_subnet") != NULL) {
-      return -1;
-    }
-  } else {
+  } else if (cfg->ifMode != configIfModeTap) {
     return -1;
   }
   return 0;
