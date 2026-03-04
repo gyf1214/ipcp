@@ -39,7 +39,9 @@ static packetParseStatus_t parseTunIpv4(
     return packetParseStatusOk;
   }
   if (destination[0] == 0xff && destination[1] == 0xff && destination[2] == 0xff && destination[3] == 0xff) {
-    outDestination->classification = packetDestinationDropBroadcast;
+    memcpy(outDestination->claim, destination, 4);
+    outDestination->claimNbytes = 4;
+    outDestination->classification = packetDestinationBroadcastL3Candidate;
     return packetParseStatusOk;
   }
 
@@ -76,7 +78,7 @@ static packetParseStatus_t parseTapEthernet(
       && destination[3] == 0xff
       && destination[4] == 0xff
       && destination[5] == 0xff) {
-    outDestination->classification = packetDestinationDropBroadcast;
+    outDestination->classification = packetDestinationBroadcastL2;
     return packetParseStatusOk;
   }
   if ((destination[0] & 0x01) != 0) {

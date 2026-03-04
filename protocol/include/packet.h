@@ -9,8 +9,9 @@ typedef enum {
 
 typedef enum {
   packetDestinationOk = 0,
+  packetDestinationBroadcastL2,
+  packetDestinationBroadcastL3Candidate,
   packetDestinationDropMulticast,
-  packetDestinationDropBroadcast,
   packetDestinationDropMalformed,
 } packetDestinationClass_t;
 

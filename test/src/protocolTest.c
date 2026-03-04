@@ -760,7 +760,14 @@ void testPacketParseTunClassifiesMulticastAndBroadcast(void) {
 
   status = packetParseDestination(packetParseModeTunIpv4, broadcastPacket, sizeof(broadcastPacket), &destination);
   testAssertTrue(status == packetParseStatusOk, "broadcast packet parse should succeed");
-  testAssertTrue(destination.classification == packetDestinationDropBroadcast, "broadcast destination should drop");
+  testAssertTrue(
+      destination.classification == packetDestinationBroadcastL3Candidate,
+      "broadcast destination should classify as tun broadcast candidate");
+  testAssertTrue(destination.claimNbytes == 4, "tun broadcast candidate should retain 4-byte destination");
+  testAssertTrue(
+      destination.claim[0] == 255 && destination.claim[1] == 255 && destination.claim[2] == 255
+          && destination.claim[3] == 255,
+      "tun broadcast candidate bytes should match destination ip");
 }
 
 void testPacketParseTapEthernetDestination(void) {
@@ -830,7 +837,7 @@ void testPacketParseTapClassifiesBroadcastMulticastAndMalformed(void) {
 
   status = packetParseDestination(packetParseModeTapEthernet, broadcastFrame, sizeof(broadcastFrame), &destination);
   testAssertTrue(status == packetParseStatusOk, "tap broadcast parse should succeed");
-  testAssertTrue(destination.classification == packetDestinationDropBroadcast, "tap broadcast should drop");
+  testAssertTrue(destination.classification == packetDestinationBroadcastL2, "tap broadcast should classify as L2");
 
   status = packetParseDestination(packetParseModeTapEthernet, malformedFrame, sizeof(malformedFrame), &destination);
   testAssertTrue(status == packetParseStatusOk, "tap malformed parse should succeed");
