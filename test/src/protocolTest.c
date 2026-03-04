@@ -4,6 +4,7 @@
 #include <sodium.h>
 
 #include "log.h"
+#include "packet.h"
 #include "protocol.h"
 #include "protocolInternal.h"
 #include "testAssert.h"
@@ -688,6 +689,154 @@ void testMessageDecodeUsesFixedBigEndianLengthHeader() {
   testAssertTrue(memcmp(msg.buf, "xyz", 3) == 0, "decoded payload should match");
 }
 
+void testPacketParseTunIpv4Destination(void) {
+  unsigned char packet[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      10, 0, 0, 2,
+  };
+  packetDestination_t destination;
+  packetParseStatus_t status = packetParseDestination(packetParseModeTunIpv4, packet, sizeof(packet), &destination);
+  unsigned char expected[] = {10, 0, 0, 2};
+
+  testAssertTrue(status == packetParseStatusOk, "tun ipv4 parser should succeed");
+  testAssertTrue(destination.classification == packetDestinationOk, "unicast packet should be routable");
+  testAssertTrue(destination.claimNbytes == 4, "tun destination claim should be 4 bytes");
+  testAssertTrue(memcmp(destination.claim, expected, sizeof(expected)) == 0, "tun destination claim should match");
+}
+
+void testPacketParseTunIpv4DestinationWithPiHeader(void) {
+  unsigned char packet[] = {
+      0x00, 0x00, 0x08, 0x00,
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      10, 0, 0, 2,
+  };
+  packetDestination_t destination;
+  packetParseStatus_t status = packetParseDestination(packetParseModeTunIpv4, packet, sizeof(packet), &destination);
+  unsigned char expected[] = {10, 0, 0, 2};
+
+  testAssertTrue(status == packetParseStatusOk, "tun parser should accept packet info header");
+  testAssertTrue(destination.classification == packetDestinationOk, "pi-prefixed unicast packet should be routable");
+  testAssertTrue(destination.claimNbytes == 4, "tun destination claim should be 4 bytes");
+  testAssertTrue(memcmp(destination.claim, expected, sizeof(expected)) == 0, "tun destination claim should match");
+}
+
+void testPacketParseTunRejectsMalformed(void) {
+  unsigned char shortPacket[] = {0x45, 0x00, 0x00, 0x14, 0x00, 0x00};
+  packetDestination_t destination;
+  packetParseStatus_t status =
+      packetParseDestination(packetParseModeTunIpv4, shortPacket, sizeof(shortPacket), &destination);
+
+  testAssertTrue(status == packetParseStatusOk, "malformed packet parse should return classification");
+  testAssertTrue(destination.classification == packetDestinationDropMalformed, "short ipv4 packet should drop malformed");
+  testAssertTrue(destination.claimNbytes == 0, "malformed packet should not expose claim");
+}
+
+void testPacketParseTunClassifiesMulticastAndBroadcast(void) {
+  unsigned char multicastPacket[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      224, 1, 2, 3,
+  };
+  unsigned char broadcastPacket[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      255, 255, 255, 255,
+  };
+  packetDestination_t destination;
+  packetParseStatus_t status =
+      packetParseDestination(packetParseModeTunIpv4, multicastPacket, sizeof(multicastPacket), &destination);
+  testAssertTrue(status == packetParseStatusOk, "multicast packet parse should succeed");
+  testAssertTrue(destination.classification == packetDestinationDropMulticast, "multicast destination should drop");
+
+  status = packetParseDestination(packetParseModeTunIpv4, broadcastPacket, sizeof(broadcastPacket), &destination);
+  testAssertTrue(status == packetParseStatusOk, "broadcast packet parse should succeed");
+  testAssertTrue(destination.classification == packetDestinationDropBroadcast, "broadcast destination should drop");
+}
+
+void testPacketParseTapEthernetDestination(void) {
+  unsigned char frame[] = {
+      0x02, 0x00, 0x5e, 0x10, 0x20, 0x30,
+      0x02, 0x00, 0x5e, 0x00, 0x00, 0x01,
+      0x08, 0x00,
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      10, 0, 0, 2,
+  };
+  unsigned char expected[] = {0x02, 0x00, 0x5e, 0x10, 0x20, 0x30};
+  packetDestination_t destination;
+  packetParseStatus_t status = packetParseDestination(packetParseModeTapEthernet, frame, sizeof(frame), &destination);
+
+  testAssertTrue(status == packetParseStatusOk, "tap ethernet parser should succeed");
+  testAssertTrue(destination.classification == packetDestinationOk, "tap unicast frame should be routable");
+  testAssertTrue(destination.claimNbytes == 6, "tap destination claim should be 6 bytes");
+  testAssertTrue(
+      memcmp(destination.claim, expected, sizeof(expected)) == 0,
+      "tap destination claim should match destination mac");
+}
+
+void testPacketParseTapEthernetDestinationWithPiHeader(void) {
+  unsigned char frame[] = {
+      0x00, 0x00, 0x08, 0x00,
+      0x02, 0x00, 0x5e, 0x10, 0x20, 0x30,
+      0x02, 0x00, 0x5e, 0x00, 0x00, 0x01,
+      0x08, 0x00,
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      10, 0, 0, 2,
+  };
+  unsigned char expected[] = {0x02, 0x00, 0x5e, 0x10, 0x20, 0x30};
+  packetDestination_t destination;
+  packetParseStatus_t status = packetParseDestination(packetParseModeTapEthernet, frame, sizeof(frame), &destination);
+
+  testAssertTrue(status == packetParseStatusOk, "tap parser should accept packet info header");
+  testAssertTrue(destination.classification == packetDestinationOk, "pi-prefixed tap unicast frame should be routable");
+  testAssertTrue(destination.claimNbytes == 6, "tap destination claim should be 6 bytes");
+  testAssertTrue(
+      memcmp(destination.claim, expected, sizeof(expected)) == 0,
+      "tap destination claim should match destination mac");
+}
+
+void testPacketParseTapClassifiesBroadcastMulticastAndMalformed(void) {
+  unsigned char multicastFrame[] = {
+      0x01, 0x00, 0x5e, 0x10, 0x20, 0x30,
+      0x02, 0x00, 0x5e, 0x00, 0x00, 0x01,
+      0x08, 0x00,
+  };
+  unsigned char broadcastFrame[] = {
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+      0x02, 0x00, 0x5e, 0x00, 0x00, 0x01,
+      0x08, 0x00,
+  };
+  unsigned char malformedFrame[] = {0x00, 0x01, 0x02, 0x03, 0x04};
+  packetDestination_t destination;
+  packetParseStatus_t status =
+      packetParseDestination(packetParseModeTapEthernet, multicastFrame, sizeof(multicastFrame), &destination);
+  testAssertTrue(status == packetParseStatusOk, "tap multicast parse should succeed");
+  testAssertTrue(destination.classification == packetDestinationDropMulticast, "tap multicast should drop");
+
+  status = packetParseDestination(packetParseModeTapEthernet, broadcastFrame, sizeof(broadcastFrame), &destination);
+  testAssertTrue(status == packetParseStatusOk, "tap broadcast parse should succeed");
+  testAssertTrue(destination.classification == packetDestinationDropBroadcast, "tap broadcast should drop");
+
+  status = packetParseDestination(packetParseModeTapEthernet, malformedFrame, sizeof(malformedFrame), &destination);
+  testAssertTrue(status == packetParseStatusOk, "tap malformed parse should succeed");
+  testAssertTrue(destination.classification == packetDestinationDropMalformed, "short ethernet frame should drop");
+}
+
 void runProtocolTests(void) {
   testAssertTrue(sodium_init() >= 0, "sodium init should succeed");
   testRawEncode();
@@ -723,4 +872,11 @@ void runProtocolTests(void) {
   testMessageRejectInvalidSizeTypeCombo();
   testMessageEncodeUsesFixedBigEndianLengthHeader();
   testMessageDecodeUsesFixedBigEndianLengthHeader();
+  testPacketParseTunIpv4Destination();
+  testPacketParseTunIpv4DestinationWithPiHeader();
+  testPacketParseTunRejectsMalformed();
+  testPacketParseTunClassifiesMulticastAndBroadcast();
+  testPacketParseTapEthernetDestination();
+  testPacketParseTapEthernetDestinationWithPiHeader();
+  testPacketParseTapClassifiesBroadcastMulticastAndMalformed();
 }
