@@ -112,6 +112,25 @@ wait_for_interface() {
   return 1
 }
 
+read_rx_packets() {
+  local ns="$1"
+  local ifName="$2"
+  local deadline=$((SECONDS + 10))
+  local value=""
+
+  while (( SECONDS < deadline )); do
+    if value="$(
+      ns_exec "$ns" sh -lc "ip -s link show dev '$ifName' 2>/dev/null | awk '/RX:/{getline; print \$1; exit}'"
+    )" && [[ -n "$value" ]]; then
+      echo "$value"
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  return 1
+}
+
 cleanup() {
   local status="$1"
   set +e
@@ -299,6 +318,23 @@ if ! ns_exec "$clientNsB" timeout 8 ping -c 2 -W 1 10.250.0.1 >/dev/null 2>&1; t
 fi
 if ! ns_exec "$serverNs" timeout 8 ping -I tun0 -c 2 -W 1 10.250.0.3 >/dev/null 2>&1; then
   echo "expected server to ping client B over tun" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+
+rxA0="$(read_rx_packets "$clientNsA" tun0)"
+rxB0="$(read_rx_packets "$clientNsB" tun0)"
+ns_exec "$serverNs" timeout 8 ping -I tun0 -b -c 3 -W 1 10.250.0.255 >/dev/null 2>&1 || true
+sleep 1
+rxA1="$(read_rx_packets "$clientNsA" tun0)"
+rxB1="$(read_rx_packets "$clientNsB" tun0)"
+if [[ "$rxA1" -le "$rxA0" ]]; then
+  echo "expected client A to receive server broadcast fanout packets" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+if [[ "$rxB1" -le "$rxB0" ]]; then
+  echo "expected client B to receive server broadcast fanout packets" >&2
   dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
   exit 1
 fi
