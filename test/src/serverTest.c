@@ -40,19 +40,19 @@ static int fakeLookup(
 
 static void testServerServeMultiClientRejectsInvalidArgs(void) {
   testAssertTrue(
-      serverServeMultiClient(-1, -1, fakeLookup, NULL, "tun", 5000, &testHeartbeatCfg, 2, 2) < 0,
+      serverServeMultiClient(-1, -1, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
       "server runtime should reject invalid fds");
   testAssertTrue(
-      serverServeMultiClient(1, 2, NULL, NULL, "tun", 5000, &testHeartbeatCfg, 2, 2) < 0,
+      serverServeMultiClient(1, 2, NULL, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
       "server runtime should reject null lookup callback");
   testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, NULL, 2, 2) < 0,
+      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, NULL, 2, 2) < 0,
       "server runtime should reject null heartbeat config");
   testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, &testHeartbeatCfg, 0, 2) < 0,
+      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 0, 2) < 0,
       "server runtime should reject non-positive max session count");
   testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", 5000, &testHeartbeatCfg, 2, 0) < 0,
+      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 0) < 0,
       "server runtime should reject non-positive max pre-auth session count");
 }
 

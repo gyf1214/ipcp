@@ -224,6 +224,22 @@ cat > "$tmpDir/server-tun-bad-subnet.json" <<JSON
 }
 JSON
 
+cat > "$tmpDir/server-tun-malformed-subnet.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "tun",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "auth_timeout_ms": 5000,
+  "max_pre_auth_sessions": 8,
+  "tun_subnet": "10.250.0/24",
+  "credentials": [
+    { "tun_ip": "10.0.0.2", "key_file": "/tmp/none.key" }
+  ]
+}
+JSON
+
 cat > "$tmpDir/server-tap-credentials-missing-mac.json" <<JSON
 {
   "mode": "server",
@@ -291,6 +307,7 @@ run_expect_invalid_config "$tmpDir/server-missing-max-pre-auth.json"
 run_expect_invalid_config "$tmpDir/server-tun-credentials-missing-ip.json"
 run_expect_invalid_config "$tmpDir/server-tun-missing-subnet.json"
 run_expect_invalid_config "$tmpDir/server-tun-bad-subnet.json"
+run_expect_invalid_config "$tmpDir/server-tun-malformed-subnet.json"
 run_expect_invalid_config "$tmpDir/server-tap-credentials-missing-mac.json"
 run_expect_invalid_config "$tmpDir/server-tap-unexpected-subnet.json"
 run_expect_invalid_config "$tmpDir/client-tun-invalid-claim-format.json"

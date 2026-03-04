@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <arpa/inet.h>
 #include <sodium.h>
 
@@ -176,6 +177,60 @@ static int parseMacClaim(const char *s, unsigned char out[SessionClaimSize], lon
   return 0;
 }
 
+static int parseTunSubnet(const cJSON *root, daemonConfig_t *cfg) {
+  const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, "tun_subnet");
+  char subnet[ConfigTextSize];
+  char *slash = NULL;
+  char *end = NULL;
+  long prefix = 0;
+  struct in_addr networkAddr;
+  uint32_t networkHost = 0;
+  uint32_t maskHost = 0;
+  uint32_t broadcastHost = 0;
+  uint32_t networkNet = 0;
+  uint32_t broadcastNet = 0;
+
+  if (!cJSON_IsString(value) || value->valuestring == NULL) {
+    return -1;
+  }
+  if (strlen(value->valuestring) >= sizeof(subnet)) {
+    return -1;
+  }
+  memcpy(subnet, value->valuestring, strlen(value->valuestring) + 1);
+  slash = strchr(subnet, '/');
+  if (slash == NULL) {
+    return -1;
+  }
+  *slash = '\0';
+  if (inet_pton(AF_INET, subnet, &networkAddr) != 1) {
+    return -1;
+  }
+  prefix = strtol(slash + 1, &end, 10);
+  if (slash[1] == '\0' || end == NULL || *end != '\0' || prefix < 0 || prefix > 32) {
+    return -1;
+  }
+
+  networkHost = ntohl(networkAddr.s_addr);
+  if (prefix == 0) {
+    maskHost = 0;
+  } else {
+    maskHost = 0xffffffffu << (32 - (unsigned int)prefix);
+  }
+  if ((networkHost & ~maskHost) != 0) {
+    return -1;
+  }
+
+  broadcastHost = networkHost | ~maskHost;
+  networkNet = htonl(networkHost & maskHost);
+  broadcastNet = htonl(broadcastHost);
+
+  cfg->tunSubnet.enabled = true;
+  cfg->tunSubnet.prefix = (int)prefix;
+  memcpy(cfg->tunSubnet.network, &networkNet, sizeof(cfg->tunSubnet.network));
+  memcpy(cfg->tunSubnet.broadcast, &broadcastNet, sizeof(cfg->tunSubnet.broadcast));
+  return 0;
+}
+
 static int parseServerCredentials(const cJSON *root, daemonConfig_t *cfg) {
   const cJSON *list = cJSON_GetObjectItemCaseSensitive(root, "credentials");
   int count = 0;
@@ -247,6 +302,17 @@ static int parseServerConfig(const cJSON *root, daemonConfig_t *cfg) {
     return -1;
   }
   if (parseServerCredentials(root, cfg) != 0) {
+    return -1;
+  }
+  if (cfg->ifMode == configIfModeTun) {
+    if (parseTunSubnet(root, cfg) != 0) {
+      return -1;
+    }
+  } else if (cfg->ifMode == configIfModeTap) {
+    if (cJSON_GetObjectItemCaseSensitive(root, "tun_subnet") != NULL) {
+      return -1;
+    }
+  } else {
     return -1;
   }
   return 0;

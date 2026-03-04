@@ -1041,6 +1041,7 @@ int serverServeMultiClient(
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
     const char *ifModeLabel,
+    const sessionTunSubnet_t *tunSubnet,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxActiveSessions,
@@ -1071,6 +1072,9 @@ int serverServeMultiClient(
           NULL,
           NULL)) {
     return -1;
+  }
+  if (tunSubnet != NULL) {
+    runtime.tunSubnet = *tunSubnet;
   }
 
   epollFd = epoll_create1(0);

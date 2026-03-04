@@ -54,6 +54,7 @@ struct server_t {
   int maxPreAuthSessions;
   int preAuthCount;
   preAuthConn_t *preAuthConns;
+  sessionTunSubnet_t tunSubnet;
   sessionHeartbeatConfig_t heartbeatCfg;
   sessionNowMsFn_t nowMsFn;
   void *nowCtx;
@@ -116,6 +117,7 @@ int serverServeMultiClient(
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
     const char *ifModeLabel,
+    const sessionTunSubnet_t *tunSubnet,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxActiveSessions,
