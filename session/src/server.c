@@ -949,6 +949,71 @@ static bool serverDispatchTunIngressToSlot(
   return true;
 }
 
+static bool serverTunDestinationIsLimitedBroadcast(const packetDestination_t *destination) {
+  return destination != NULL
+      && destination->claimNbytes == 4
+      && destination->claim[0] == 255
+      && destination->claim[1] == 255
+      && destination->claim[2] == 255
+      && destination->claim[3] == 255;
+}
+
+static bool serverTunDestinationMatchesDirectedBroadcast(
+    const server_t *runtime, const packetDestination_t *destination) {
+  return runtime != NULL
+      && destination != NULL
+      && runtime->tunSubnet.enabled
+      && destination->claimNbytes == 4
+      && memcmp(destination->claim, runtime->tunSubnet.broadcast, 4) == 0;
+}
+
+static bool serverWouldOverflowClientQueue(
+    const activeConn_t *conn, const void *payload, long payloadNbytes) {
+  protocolMessage_t msg;
+  protocolFrame_t frame;
+  long used;
+
+  if (conn == NULL || payload == NULL || payloadNbytes <= 0) {
+    return true;
+  }
+
+  msg.type = protocolMsgData;
+  msg.nbytes = payloadNbytes;
+  msg.buf = (const char *)payload;
+  if (protocolEncodeSecureMsg(&msg, conn->key, &frame) != protocolStatusOk) {
+    return true;
+  }
+
+  used = conn->tcpPoller.outOffset + conn->tcpPoller.outNbytes;
+  if (used + frame.nbytes > IoPollerQueueCapacity && conn->tcpPoller.outOffset > 0) {
+    used = conn->tcpPoller.outNbytes;
+  }
+  return used + frame.nbytes > IoPollerQueueCapacity;
+}
+
+static bool serverFanoutTunIngressToAll(
+    server_t *runtime, const void *payload, long payloadNbytes) {
+  int slot;
+
+  if (runtime == NULL || payload == NULL || payloadNbytes <= 0) {
+    return false;
+  }
+
+  for (slot = 0; slot < runtime->maxActiveSessions; slot++) {
+    if (!runtime->activeConns[slot].active) {
+      continue;
+    }
+    if (serverWouldOverflowClientQueue(&runtime->activeConns[slot], payload, payloadNbytes)) {
+      continue;
+    }
+    if (!serverDispatchTunIngressToSlot(runtime, slot, payload, payloadNbytes)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool serverRouteTunIngressPacket(server_t *runtime, const char *ifModeLabel, const void *packet, long packetNbytes) {
   packetParseMode_t mode;
   packetDestination_t destination;
@@ -970,6 +1035,26 @@ bool serverRouteTunIngressPacket(server_t *runtime, const char *ifModeLabel, con
   parseStatus = packetParseDestination(mode, packet, packetNbytes, &destination);
   if (parseStatus != packetParseStatusOk) {
     return false;
+  }
+  if (destination.classification == packetDestinationDropMalformed
+      || destination.classification == packetDestinationDropMulticast) {
+    return true;
+  }
+  if (destination.classification == packetDestinationBroadcastL2) {
+    return serverFanoutTunIngressToAll(runtime, packet, packetNbytes);
+  }
+  if (mode == packetParseModeTunIpv4) {
+    if (destination.classification == packetDestinationBroadcastL3Candidate) {
+      if (serverTunDestinationIsLimitedBroadcast(&destination)
+          || serverTunDestinationMatchesDirectedBroadcast(runtime, &destination)) {
+        return serverFanoutTunIngressToAll(runtime, packet, packetNbytes);
+      }
+      return true;
+    }
+    if (destination.classification == packetDestinationOk
+        && serverTunDestinationMatchesDirectedBroadcast(runtime, &destination)) {
+      return serverFanoutTunIngressToAll(runtime, packet, packetNbytes);
+    }
   }
   if (destination.classification != packetDestinationOk) {
     return true;

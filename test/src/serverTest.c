@@ -288,13 +288,6 @@ static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(v
       10, 0, 0, 1,
       224, 1, 2, 3,
   };
-  unsigned char broadcast[] = {
-      0x45, 0x00, 0x00, 0x14,
-      0x00, 0x00, 0x00, 0x00,
-      0x40, 0x11, 0x00, 0x00,
-      10, 0, 0, 1,
-      255, 255, 255, 255,
-  };
   unsigned char malformed[] = {0x45, 0x00, 0x00, 0x14};
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp socketpair should be created");
@@ -305,13 +298,174 @@ static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(v
 
   testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", unmatched, sizeof(unmatched)), "unmatched route should not fail");
   testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
-  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", broadcast, sizeof(broadcast)), "broadcast drop should not fail");
   testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", malformed, sizeof(malformed)), "malformed drop should not fail");
   testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue to any client");
 
   serverDeinit(&runtime);
   close(tcpPairA[0]);
   close(tcpPairA[1]);
+  close(tunPair[0]);
+  close(tunPair[1]);
+}
+
+static void testServerFanoutTapBroadcastToAllClients(void) {
+  server_t runtime;
+  int tunPair[2];
+  int tcpPairA[2];
+  int tcpPairB[2];
+  unsigned char tapBroadcast[] = {
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+      0x02, 0x00, 0x5e, 0x00, 0x00, 0x01,
+      0x08, 0x00,
+  };
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
+  testAssertTrue(serverInit(&runtime, tunPair[0], 62, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
+  testAssertTrue(serverAddClient(&runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+
+  testAssertTrue(
+      serverRouteTunIngressPacket(&runtime, "tap", tapBroadcast, sizeof(tapBroadcast)),
+      "tap broadcast fanout should not fail");
+  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive tap broadcast");
+  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive tap broadcast");
+
+  serverDeinit(&runtime);
+  close(tcpPairA[0]);
+  close(tcpPairA[1]);
+  close(tcpPairB[0]);
+  close(tcpPairB[1]);
+  close(tunPair[0]);
+  close(tunPair[1]);
+}
+
+static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
+  server_t runtime;
+  int tunPair[2];
+  int tcpPairA[2];
+  int tcpPairB[2];
+  unsigned char directedBroadcast[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 250, 0, 1,
+      10, 250, 0, 255,
+  };
+  unsigned char limitedBroadcast[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 250, 0, 1,
+      255, 255, 255, 255,
+  };
+  unsigned char nonMatchingDirected[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 250, 0, 1,
+      10, 251, 0, 255,
+  };
+  unsigned char multicast[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 250, 0, 1,
+      224, 1, 2, 3,
+  };
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
+  testAssertTrue(serverInit(&runtime, tunPair[0], 63, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  runtime.tunSubnet.enabled = true;
+  runtime.tunSubnet.prefix = 24;
+  runtime.tunSubnet.broadcast[0] = 10;
+  runtime.tunSubnet.broadcast[1] = 250;
+  runtime.tunSubnet.broadcast[2] = 0;
+  runtime.tunSubnet.broadcast[3] = 255;
+  testAssertTrue(serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
+  testAssertTrue(serverAddClient(&runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+
+  testAssertTrue(
+      serverRouteTunIngressPacket(&runtime, "tun", directedBroadcast, sizeof(directedBroadcast)),
+      "directed broadcast fanout should not fail");
+  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive directed broadcast");
+  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive directed broadcast");
+
+  runtime.activeConns[0].tcpPoller.outNbytes = 0;
+  runtime.activeConns[1].tcpPoller.outNbytes = 0;
+  testAssertTrue(
+      serverRouteTunIngressPacket(&runtime, "tun", limitedBroadcast, sizeof(limitedBroadcast)),
+      "limited broadcast fanout should not fail");
+  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive limited broadcast");
+  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive limited broadcast");
+
+  runtime.activeConns[0].tcpPoller.outNbytes = 0;
+  runtime.activeConns[1].tcpPoller.outNbytes = 0;
+  testAssertTrue(
+      serverRouteTunIngressPacket(&runtime, "tun", nonMatchingDirected, sizeof(nonMatchingDirected)),
+      "non-matching directed broadcast should not fail");
+  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
+  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
+
+  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
+  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes == 0, "multicast should not queue client A");
+  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes == 0, "multicast should not queue client B");
+
+  serverDeinit(&runtime);
+  close(tcpPairA[0]);
+  close(tcpPairA[1]);
+  close(tcpPairB[0]);
+  close(tcpPairB[1]);
+  close(tunPair[0]);
+  close(tunPair[1]);
+}
+
+static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
+  server_t runtime;
+  int tunPair[2];
+  int tcpPairA[2];
+  int tcpPairB[2];
+  unsigned char limitedBroadcast[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 250, 0, 1,
+      255, 255, 255, 255,
+  };
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
+  testAssertTrue(serverInit(&runtime, tunPair[0], 64, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  runtime.tunSubnet.enabled = true;
+  runtime.tunSubnet.prefix = 24;
+  runtime.tunSubnet.broadcast[0] = 10;
+  runtime.tunSubnet.broadcast[1] = 250;
+  runtime.tunSubnet.broadcast[2] = 0;
+  runtime.tunSubnet.broadcast[3] = 255;
+  testAssertTrue(serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
+  testAssertTrue(serverAddClient(&runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+
+  runtime.activeConns[0].tcpPoller.outOffset = 0;
+  runtime.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
+
+  testAssertTrue(
+      serverRouteTunIngressPacket(&runtime, "tun", limitedBroadcast, sizeof(limitedBroadcast)),
+      "broadcast fanout with saturation should not fail");
+  testAssertTrue(
+      runtime.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity,
+      "saturated client queue should remain unchanged");
+  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes > 0, "non-saturated client should still receive broadcast");
+  testAssertTrue(!serverHasPendingTunToTcp(&runtime), "broadcast best-effort skip should not set shared pending packet");
+
+  serverDeinit(&runtime);
+  close(tcpPairA[0]);
+  close(tcpPairA[1]);
+  close(tcpPairB[0]);
+  close(tcpPairB[1]);
   close(tunPair[0]);
   close(tunPair[1]);
 }
@@ -326,4 +480,7 @@ void runServerTests(void) {
   testServerRoundRobinRetryCursorRotates();
   testServerRoutesTunIngressByClaimMatch();
   testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed();
+  testServerFanoutTapBroadcastToAllClients();
+  testServerFanoutTunBroadcastsBySubnetPolicy();
+  testServerBroadcastFanoutSkipsSaturatedClient();
 }
