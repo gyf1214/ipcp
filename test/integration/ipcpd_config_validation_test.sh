@@ -193,6 +193,37 @@ cat > "$tmpDir/server-tun-credentials-missing-ip.json" <<JSON
 }
 JSON
 
+cat > "$tmpDir/server-tun-missing-subnet.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "tun",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "auth_timeout_ms": 5000,
+  "max_pre_auth_sessions": 8,
+  "credentials": [
+    { "tun_ip": "10.0.0.2", "key_file": "/tmp/none.key" }
+  ]
+}
+JSON
+
+cat > "$tmpDir/server-tun-bad-subnet.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tun0",
+  "if_mode": "tun",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "auth_timeout_ms": 5000,
+  "max_pre_auth_sessions": 8,
+  "tun_subnet": "10.250.0.0/40",
+  "credentials": [
+    { "tun_ip": "10.0.0.2", "key_file": "/tmp/none.key" }
+  ]
+}
+JSON
+
 cat > "$tmpDir/server-tap-credentials-missing-mac.json" <<JSON
 {
   "mode": "server",
@@ -203,6 +234,22 @@ cat > "$tmpDir/server-tap-credentials-missing-mac.json" <<JSON
   "auth_timeout_ms": 5000,
   "credentials": [
     { "tun_ip": "10.0.0.2", "key_file": "/tmp/none.key" }
+  ]
+}
+JSON
+
+cat > "$tmpDir/server-tap-unexpected-subnet.json" <<JSON
+{
+  "mode": "server",
+  "if_name": "tap0",
+  "if_mode": "tap",
+  "listen_ip": "0.0.0.0",
+  "listen_port": 46000,
+  "auth_timeout_ms": 5000,
+  "max_pre_auth_sessions": 8,
+  "tun_subnet": "10.250.0.0/24",
+  "credentials": [
+    { "tap_mac": "02:11:22:33:44:55", "key_file": "/tmp/none.key" }
   ]
 }
 JSON
@@ -242,7 +289,10 @@ run_expect_invalid_config "$tmpDir/server-missing-auth-timeout.json"
 run_expect_invalid_config "$tmpDir/server-bad-auth-timeout.json"
 run_expect_invalid_config "$tmpDir/server-missing-max-pre-auth.json"
 run_expect_invalid_config "$tmpDir/server-tun-credentials-missing-ip.json"
+run_expect_invalid_config "$tmpDir/server-tun-missing-subnet.json"
+run_expect_invalid_config "$tmpDir/server-tun-bad-subnet.json"
 run_expect_invalid_config "$tmpDir/server-tap-credentials-missing-mac.json"
+run_expect_invalid_config "$tmpDir/server-tap-unexpected-subnet.json"
 run_expect_invalid_config "$tmpDir/client-tun-invalid-claim-format.json"
 run_expect_invalid_config "$tmpDir/client-tap-invalid-claim-format.json"
 run_expect_invalid_secret "$tmpDir/missing-if-mode-defaults-to-tun.json"
