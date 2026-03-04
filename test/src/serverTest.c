@@ -6,6 +6,7 @@
 
 #include <string.h>
 
+#include "packet.h"
 #include "server.h"
 #include "testAssert.h"
 
@@ -121,6 +122,41 @@ static void testServerFindSlotByFdAndPickEgress(void) {
   serverDeinit(&runtime);
 }
 
+static void testServerFindSlotByClaim(void) {
+  server_t runtime;
+  int slot0;
+  int slot1;
+  unsigned char mismatchLenClaim[] = {10, 0, 0};
+  unsigned char unknownClaim[] = {10, 0, 0, 99};
+
+  testAssertTrue(
+      serverInit(&runtime, 35, 36, 3, 3, &testHeartbeatCfg, NULL, NULL),
+      "runtime init should succeed");
+  slot0 = serverAddClient(&runtime, 0, 350, testKey, claim2, sizeof(claim2));
+  slot1 = serverAddClient(&runtime, 1, 351, testKey, claim3, sizeof(claim3));
+  testAssertTrue(slot0 == 0 && slot1 == 1, "runtime should allocate slots for claim tests");
+
+  testAssertTrue(
+      serverFindSlotByClaim(&runtime, claim2, sizeof(claim2)) == slot0,
+      "claim lookup should return exact matching slot");
+  testAssertTrue(
+      serverFindSlotByClaim(&runtime, claim3, sizeof(claim3)) == slot1,
+      "claim lookup should return second matching slot");
+  testAssertTrue(
+      serverFindSlotByClaim(&runtime, unknownClaim, sizeof(unknownClaim)) < 0,
+      "unknown claim should not match");
+  testAssertTrue(
+      serverFindSlotByClaim(&runtime, mismatchLenClaim, sizeof(mismatchLenClaim)) < 0,
+      "claim length mismatch should not match");
+
+  testAssertTrue(serverRemoveClient(&runtime, slot0), "remove slot 0 should succeed");
+  testAssertTrue(
+      serverFindSlotByClaim(&runtime, claim2, sizeof(claim2)) < 0,
+      "inactive slot should be ignored for claim lookup");
+
+  serverDeinit(&runtime);
+}
+
 static void testServerSharedTunInterestTracksGlobalQueue(void) {
   server_t runtime;
   int tunPair[2];
@@ -192,11 +228,102 @@ static void testServerRoundRobinRetryCursorRotates(void) {
   serverDeinit(&runtime);
 }
 
+static void testServerRoutesTunIngressByClaimMatch(void) {
+  server_t runtime;
+  int tunPair[2];
+  int tcpPairA[2];
+  int tcpPairB[2];
+  unsigned char payload[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      10, 0, 0, 3,
+  };
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
+  testAssertTrue(serverInit(&runtime, tunPair[0], 60, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(
+      serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
+      "slot A should be added");
+  testAssertTrue(
+      serverAddClient(&runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1,
+      "slot B should be added");
+
+  testAssertTrue(
+      serverRouteTunIngressPacket(&runtime, "tun", payload, sizeof(payload)),
+      "tun ingress routing should succeed for matching claim");
+  testAssertTrue(
+      runtime.activeConns[0].tcpPoller.outNbytes == 0,
+      "non-matching client should have no queued tcp bytes");
+  testAssertTrue(
+      runtime.activeConns[1].tcpPoller.outNbytes > 0,
+      "matching client should have queued encrypted frame bytes");
+
+  serverDeinit(&runtime);
+  close(tcpPairA[0]);
+  close(tcpPairA[1]);
+  close(tcpPairB[0]);
+  close(tcpPairB[1]);
+  close(tunPair[0]);
+  close(tunPair[1]);
+}
+
+static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(void) {
+  server_t runtime;
+  int tunPair[2];
+  int tcpPairA[2];
+  unsigned char unmatched[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      10, 0, 0, 99,
+  };
+  unsigned char multicast[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      224, 1, 2, 3,
+  };
+  unsigned char broadcast[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 1,
+      255, 255, 255, 255,
+  };
+  unsigned char malformed[] = {0x45, 0x00, 0x00, 0x14};
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp socketpair should be created");
+  testAssertTrue(serverInit(&runtime, tunPair[0], 61, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(
+      serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
+      "slot A should be added");
+
+  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", unmatched, sizeof(unmatched)), "unmatched route should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", broadcast, sizeof(broadcast)), "broadcast drop should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", malformed, sizeof(malformed)), "malformed drop should not fail");
+  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue to any client");
+
+  serverDeinit(&runtime);
+  close(tcpPairA[0]);
+  close(tcpPairA[1]);
+  close(tunPair[0]);
+  close(tunPair[1]);
+}
+
 void runServerTests(void) {
   testServerServeMultiClientRejectsInvalidArgs();
   testServerAddRemoveAndReuseSlots();
   testServerRejectsBeyondMaxSessions();
   testServerFindSlotByFdAndPickEgress();
+  testServerFindSlotByClaim();
   testServerSharedTunInterestTracksGlobalQueue();
   testServerRoundRobinRetryCursorRotates();
+  testServerRoutesTunIngressByClaimMatch();
+  testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed();
 }

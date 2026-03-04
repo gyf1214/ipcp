@@ -11,6 +11,7 @@
 #include <sodium.h>
 
 #include "log.h"
+#include "packet.h"
 
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
@@ -213,6 +214,28 @@ int serverFindSlotByFd(const server_t *runtime, int connFd) {
 
   for (i = 0; i < runtime->maxActiveSessions; i++) {
     if (runtime->activeConns[i].active && runtime->activeConns[i].connFd == connFd) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+int serverFindSlotByClaim(const server_t *runtime, const unsigned char *claim, long claimNbytes) {
+  int i;
+
+  if (runtime == NULL || runtime->activeConns == NULL || claim == NULL || claimNbytes <= 0) {
+    return -1;
+  }
+
+  for (i = 0; i < runtime->maxActiveSessions; i++) {
+    if (!runtime->activeConns[i].active) {
+      continue;
+    }
+    if (runtime->activeConns[i].claimNbytes != claimNbytes) {
+      continue;
+    }
+    if (memcmp(runtime->activeConns[i].claim, claim, (size_t)claimNbytes) == 0) {
       return i;
     }
   }
@@ -885,21 +908,99 @@ static bool serverDispatchClient(server_t *runtime, int slot, ioEvent_t event) {
   session_t *session = serverSessionAt(runtime, slot);
   int connFd = serverConnFdAt(runtime, slot);
   const unsigned char *key = serverKeyAt(runtime, slot);
+  sessionStepResult_t stepResult;
+
   if (session == NULL || connFd < 0) {
     return false;
   }
   if (key == NULL) {
     return false;
   }
+  if (event == ioEventTunRead) {
+    return false;
+  }
 
-  if (sessionStep(
-          session, &runtime->activeConns[slot].tcpPoller, &runtime->tunPoller, event, key)
+  stepResult =
+      sessionHandleConnEvent(session, &runtime->activeConns[slot].tcpPoller, &runtime->tunPoller, event, key);
+  if (stepResult == sessionStepStop) {
+    (void)serverEpollCtl(runtime->epollFd, EPOLL_CTL_DEL, connFd, 0);
+    close(connFd);
+    return serverRemoveClient(runtime, slot);
+  }
+  return true;
+}
+
+static bool serverDispatchTunIngressToSlot(
+    server_t *runtime, int slot, const void *payload, long payloadNbytes) {
+  session_t *session = serverSessionAt(runtime, slot);
+  int connFd = serverConnFdAt(runtime, slot);
+  const unsigned char *key = serverKeyAt(runtime, slot);
+
+  if (session == NULL || connFd < 0 || key == NULL) {
+    return false;
+  }
+  if (sessionHandleTunIngressPayload(
+          session, &runtime->activeConns[slot].tcpPoller, &runtime->tunPoller, key, payload, payloadNbytes)
       == sessionStepStop) {
     (void)serverEpollCtl(runtime->epollFd, EPOLL_CTL_DEL, connFd, 0);
     close(connFd);
     return serverRemoveClient(runtime, slot);
   }
   return true;
+}
+
+bool serverRouteTunIngressPacket(server_t *runtime, const char *ifModeLabel, const void *packet, long packetNbytes) {
+  packetParseMode_t mode;
+  packetDestination_t destination;
+  packetParseStatus_t parseStatus;
+  int slot;
+
+  if (runtime == NULL || ifModeLabel == NULL || packet == NULL || packetNbytes <= 0) {
+    return false;
+  }
+
+  if (strcmp(ifModeLabel, "tun") == 0) {
+    mode = packetParseModeTunIpv4;
+  } else if (strcmp(ifModeLabel, "tap") == 0) {
+    mode = packetParseModeTapEthernet;
+  } else {
+    return false;
+  }
+
+  parseStatus = packetParseDestination(mode, packet, packetNbytes, &destination);
+  if (parseStatus != packetParseStatusOk) {
+    return false;
+  }
+  if (destination.classification != packetDestinationOk) {
+    return true;
+  }
+
+  slot = serverFindSlotByClaim(runtime, destination.claim, destination.claimNbytes);
+  if (slot < 0) {
+    return true;
+  }
+  return serverDispatchTunIngressToSlot(runtime, slot, packet, packetNbytes);
+}
+
+static bool serverHandleTunRead(server_t *runtime, const char *ifModeLabel) {
+  char packet[ProtocolFrameSize];
+  long packetNbytes = 0;
+  long maxPayload = protocolMaxPlaintextSize() - ((long)sizeof(unsigned char) + ProtocolWireLengthSize);
+  ioStatus_t status;
+
+  if (runtime == NULL || ifModeLabel == NULL || maxPayload <= 0 || maxPayload > (long)sizeof(packet)) {
+    return false;
+  }
+
+  status = ioTunRead(runtime->tunPoller.tunFd, packet, maxPayload, &packetNbytes);
+  if (status == ioStatusWouldBlock) {
+    return true;
+  }
+  if (status != ioStatusOk) {
+    return false;
+  }
+
+  return serverRouteTunIngressPacket(runtime, ifModeLabel, packet, packetNbytes);
 }
 
 static bool serverTickAllClients(server_t *runtime) {
@@ -1057,9 +1158,7 @@ int serverServeMultiClient(
 
       if (fd == tunFd) {
         if ((ev & EPOLLIN) != 0) {
-          int connFd = serverPickEgressClient(&runtime);
-          int slot = serverFindSlotByFd(&runtime, connFd);
-          if (slot >= 0 && !serverDispatchClient(&runtime, slot, ioEventTunRead)) {
+          if (!serverHandleTunRead(&runtime, ifModeLabel)) {
             goto cleanup;
           }
         }

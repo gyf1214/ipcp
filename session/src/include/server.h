@@ -80,6 +80,7 @@ int serverAddClient(
 bool serverRemoveClient(server_t *runtime, int slot);
 
 int serverFindSlotByFd(const server_t *runtime, int connFd);
+int serverFindSlotByClaim(const server_t *runtime, const unsigned char *claim, long claimNbytes);
 int serverFindPreAuthSlotByFd(const server_t *runtime, int connFd);
 int serverPickEgressClient(const server_t *runtime);
 int serverClientCount(const server_t *runtime);
@@ -102,6 +103,7 @@ session_t *serverSessionAt(server_t *runtime, int slot);
 int serverConnFdAt(const server_t *runtime, int slot);
 const unsigned char *serverKeyAt(const server_t *runtime, int slot);
 bool serverHasActiveClaim(const server_t *runtime, const unsigned char *claim, long claimNbytes);
+bool serverRouteTunIngressPacket(server_t *runtime, const char *ifModeLabel, const void *packet, long packetNbytes);
 
 int serverCreatePreAuthConn(server_t *runtime, int connFd, long long authDeadlineMs);
 bool serverRemovePreAuthConn(server_t *runtime, int preAuthSlot);

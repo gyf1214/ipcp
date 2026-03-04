@@ -455,6 +455,74 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
+static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
+  unsigned char key[ProtocolPskSize];
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  const char payload[] = "split-entry";
+  session_t *clientSession;
+  session_t *serverSession;
+  protocolDecoder_t decoder;
+  protocolMessage_t decodedMsg;
+  long consumed = 0;
+
+  memset(key, 0x60, sizeof(key));
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+
+  clientSession = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  serverSession = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(clientSession != NULL && serverSession != NULL, "sessions should be created");
+
+  testAssertTrue(
+      sessionHandleTunIngressPayload(
+          clientSession, &poller.tcpPoller, &poller.tunPoller, key, payload, (long)sizeof(payload) - 1)
+      == sessionStepContinue,
+      "tun payload entrypoint should queue encrypted tcp frame");
+  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should be available");
+  testAssertTrue(ioTcpServiceWriteEvent(&poller.tcpPoller), "tcp write service should flush queued data");
+
+  protocolDecoderInit(&decoder);
+  testAssertTrue(
+      ioTcpRead(tcpPair[1], poller.tcpPoller.outBuf, sizeof(poller.tcpPoller.outBuf), &consumed) == ioStatusOk,
+      "peer tcp should read encrypted frame");
+  testAssertTrue(consumed > 0, "peer tcp should receive encrypted bytes");
+
+  {
+    long frameConsumed = 0;
+    protocolStatus_t status =
+        protocolDecodeSecureMsg(&decoder, key, poller.tcpPoller.outBuf, consumed, &frameConsumed, &decodedMsg);
+    testAssertTrue(status == protocolStatusOk, "encoded tun payload should decode as secure message");
+    testAssertTrue(decodedMsg.type == protocolMsgData, "decoded message should be data");
+    testAssertTrue(decodedMsg.nbytes == (long)sizeof(payload) - 1, "decoded payload length should match");
+    testAssertTrue(memcmp(decodedMsg.buf, payload, sizeof(payload) - 1) == 0, "decoded payload bytes should match");
+  }
+
+  {
+    char inboundWire[ProtocolFrameSize];
+    long inboundNbytes = writeSecureWire(
+        key, protocolMsgData, "event-path", (long)strlen("event-path"), inboundWire);
+    testAssertTrue(write(tcpPair[1], inboundWire, (size_t)inboundNbytes) == inboundNbytes, "peer tcp write should succeed");
+  }
+  testAssertTrue(
+      sessionHandleConnEvent(serverSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key)
+      == sessionStepContinue,
+      "conn event entrypoint should process tcp read");
+  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTunWrite, "tun write event should be available");
+  testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "tun write service should flush queued frame");
+
+  {
+    char received[128];
+    ssize_t nread = read(tunPair[1], received, sizeof(received));
+    testAssertTrue(nread == (ssize_t)strlen("event-path"), "tun peer should receive decoded payload");
+    testAssertTrue(memcmp(received, "event-path", strlen("event-path")) == 0, "tun peer payload should match");
+  }
+
+  sessionDestroy(serverSession);
+  sessionDestroy(clientSession);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+}
+
 static void testBackpressurePauseAndResumeFlow(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
@@ -809,6 +877,7 @@ void runSessionTests(void) {
   testClientRejectsInboundHeartbeatRequest();
   testSessionTunReadQueuesEncryptedTcpFrame();
   testSessionTcpReadQueuesTunWrite();
+  testSessionSplitEntrypointsForTunPayloadAndConnEvents();
   testBackpressurePauseAndResumeFlow();
   testSharedTunWriteInterestIsRuntimeOwned();
   testServerTunOverflowDisablesTunEpollinGlobally();

@@ -661,29 +661,12 @@ bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller, io
   return serviceBackpressure(tcpPoller, tunPoller, session, ioEventTimeout);
 }
 
-sessionStepResult_t sessionStep(
+static sessionStepResult_t sessionFinalizeStep(
     session_t *session,
     ioTcpPoller_t *tcpPoller,
     ioTunPoller_t *tunPoller,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]) {
-  bool result = true;
-  if (session == NULL || tcpPoller == NULL || tunPoller == NULL || key == NULL) {
-    return sessionStepStop;
-  }
-  if (event == ioEventError) {
-    return sessionStepStop;
-  }
-
-  if (event == ioEventTunRead) {
-    result = pipeTun(tcpPoller, tunPoller, key, session);
-  } else if (event == ioEventTcpRead) {
-    result = pipeTcp(tcpPoller, tunPoller, key, session);
-  }
-  if (!result) {
-    return sessionStepStop;
-  }
-
   if (!serviceBackpressure(tcpPoller, tunPoller, session, event)) {
     logf("backpressure handling failure");
     return sessionStepStop;
@@ -695,6 +678,75 @@ sessionStepResult_t sessionStep(
   }
 
   return sessionStepContinue;
+}
+
+sessionStepResult_t sessionHandleTunIngressPayload(
+    session_t *session,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    const unsigned char key[ProtocolPskSize],
+    const void *payload,
+    long payloadNbytes) {
+  protocolMessage_t msg;
+  queueResult_t result;
+
+  if (session == NULL
+      || tcpPoller == NULL
+      || tunPoller == NULL
+      || key == NULL
+      || payload == NULL
+      || payloadNbytes <= 0) {
+    return sessionStepStop;
+  }
+
+  msg.type = protocolMsgData;
+  msg.nbytes = payloadNbytes;
+  msg.buf = (const char *)payload;
+  result = sendMessage(tcpPoller, tunPoller, key, session, &msg);
+  if (result == queueResultError) {
+    return sessionStepStop;
+  }
+  if (result == queueResultQueued && !session->isServer) {
+    session->lastDataSentMs = sessionNowMs(session);
+  }
+
+  return sessionFinalizeStep(session, tcpPoller, tunPoller, ioEventTunRead, key);
+}
+
+sessionStepResult_t sessionHandleConnEvent(
+    session_t *session,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    ioEvent_t event,
+    const unsigned char key[ProtocolPskSize]) {
+  if (session == NULL || tcpPoller == NULL || tunPoller == NULL || key == NULL) {
+    return sessionStepStop;
+  }
+  if (event == ioEventError || event == ioEventTunRead) {
+    return sessionStepStop;
+  }
+  if (event == ioEventTcpRead && !pipeTcp(tcpPoller, tunPoller, key, session)) {
+    return sessionStepStop;
+  }
+  return sessionFinalizeStep(session, tcpPoller, tunPoller, event, key);
+}
+
+sessionStepResult_t sessionStep(
+    session_t *session,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    ioEvent_t event,
+    const unsigned char key[ProtocolPskSize]) {
+  if (event == ioEventTunRead) {
+    if (session == NULL || tcpPoller == NULL || tunPoller == NULL || key == NULL) {
+      return sessionStepStop;
+    }
+    if (!pipeTun(tcpPoller, tunPoller, key, session)) {
+      return sessionStepStop;
+    }
+    return sessionFinalizeStep(session, tcpPoller, tunPoller, event, key);
+  }
+  return sessionHandleConnEvent(session, tcpPoller, tunPoller, event, key);
 }
 
 int sessionRunServer(

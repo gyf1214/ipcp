@@ -44,6 +44,19 @@ bool sessionPromoteFromPreAuth(
     long carryNbytes);
 bool sessionHasPendingTunEgress(const session_t *session);
 bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller);
+sessionStepResult_t sessionHandleTunIngressPayload(
+    session_t *session,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    const unsigned char key[ProtocolPskSize],
+    const void *payload,
+    long payloadNbytes);
+sessionStepResult_t sessionHandleConnEvent(
+    session_t *session,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    ioEvent_t event,
+    const unsigned char key[ProtocolPskSize]);
 sessionStepResult_t sessionStep(
     session_t *session,
     ioTcpPoller_t *tcpPoller,
