@@ -315,7 +315,7 @@ assert_clients_running_for 8 "$clientNsA" "$clientNsB" "$clientLogA" "$clientLog
 stop_ns_ipcpd "$clientNsA"
 kill_wait "$clientPidA"
 clientPidA=""
-sleep 22
+sleep 2
 ns_exec "$clientNsC" ./daemon/target/ipcpd "$clientConfigC" >"$clientLogC" 2>&1 &
 clientPidC="$!"
 if ! wait_for_interface "$clientNsC" tun0; then
