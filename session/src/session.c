@@ -439,48 +439,38 @@ static bool pipeTcp(
 
 static bool heartbeatTick(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, const unsigned char key[ProtocolPskSize], session_t *session) {
+  server_t *runtime = sessionServer(session);
+  client_t *client = sessionClient(session);
   long long now = sessionNowMs(session);
   long long timeoutMs = heartbeatTimeoutMs(session);
 
   if (session->isServer) {
-    if (now - session->lastValidInboundMs >= timeoutMs) {
+    bool ok = runtime != NULL
+        ? serverHeartbeatTick(runtime, now, session->lastValidInboundMs, timeoutMs)
+        : (now - session->lastValidInboundMs < timeoutMs);
+    if (!ok) {
       logf("server heartbeat timeout");
       return false;
     }
     return true;
   }
 
-  if (!session->heartbeatPending) {
-    bool idleSend = now - session->lastDataSentMs >= session->heartbeatIntervalMs;
-    bool idleRecv = now - session->lastDataRecvMs >= session->heartbeatIntervalMs;
-    bool intervalElapsed = now - session->lastHeartbeatReqMs >= session->heartbeatIntervalMs;
-    if (idleSend && idleRecv && intervalElapsed) {
-      protocolMessage_t req;
-      sessionQueueResult_t result;
-      req.type = protocolMsgHeartbeatReq;
-      req.nbytes = 0;
-      req.buf = NULL;
-      result = sendMessage(tcpPoller, tunPoller, key, session, &req);
-      if (result == sessionQueueResultError) {
-        return false;
-      }
-      if (result == sessionQueueResultBlocked) {
-        return true;
-      }
-
-      session->heartbeatPending = true;
-      session->heartbeatSentMs = now;
-      session->lastHeartbeatReqMs = now;
-      dbgf("sent heartbeat request");
-    }
-  }
-
-  if (session->heartbeatPending && now - session->heartbeatSentMs >= timeoutMs) {
-    logf("client heartbeat timeout waiting for ack");
-    return false;
-  }
-
-  return true;
+  return clientHeartbeatTick(
+      client,
+      tcpPoller,
+      tunPoller,
+      &session->heartbeatPending,
+      now,
+      session->heartbeatIntervalMs,
+      (int)timeoutMs,
+      &session->heartbeatSentMs,
+      &session->lastHeartbeatReqMs,
+      session->lastDataSentMs,
+      session->lastDataRecvMs,
+      &session->tunReadPaused,
+      &session->tcpWritePendingNbytes,
+      session->tcpWritePendingBuf,
+      key);
 }
 
 session_t *sessionCreate(

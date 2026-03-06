@@ -160,6 +160,63 @@ sessionQueueResult_t clientHandleInboundMessage(
   return sessionQueueResultError;
 }
 
+bool clientHeartbeatTick(
+    client_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    bool *heartbeatPending,
+    long long nowMs,
+    int intervalMs,
+    int timeoutMs,
+    long long *heartbeatSentMs,
+    long long *lastHeartbeatReqMs,
+    long long lastDataSentMs,
+    long long lastDataRecvMs,
+    bool *tunReadPaused,
+    long *tcpWritePendingNbytes,
+    char tcpWritePendingBuf[ProtocolFrameSize],
+    const unsigned char key[ProtocolPskSize]) {
+  if (heartbeatPending == NULL || heartbeatSentMs == NULL || lastHeartbeatReqMs == NULL || tunReadPaused == NULL
+      || tcpWritePendingNbytes == NULL || tcpWritePendingBuf == NULL || key == NULL) {
+    return false;
+  }
+
+  if (!*heartbeatPending) {
+    bool idleSend = nowMs - lastDataSentMs >= intervalMs;
+    bool idleRecv = nowMs - lastDataRecvMs >= intervalMs;
+    bool intervalElapsed = nowMs - *lastHeartbeatReqMs >= intervalMs;
+    if (idleSend && idleRecv && intervalElapsed) {
+      protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
+      sessionQueueResult_t result = clientSendMessage(
+          runtime,
+          tcpPoller,
+          tunPoller,
+          tunReadPaused,
+          tcpWritePendingNbytes,
+          tcpWritePendingBuf,
+          key,
+          &req);
+      if (result == sessionQueueResultError) {
+        return false;
+      }
+      if (result == sessionQueueResultBlocked) {
+        return true;
+      }
+      *heartbeatPending = true;
+      *heartbeatSentMs = nowMs;
+      *lastHeartbeatReqMs = nowMs;
+      dbgf("sent heartbeat request");
+    }
+  }
+
+  if (*heartbeatPending && nowMs - *heartbeatSentMs >= timeoutMs) {
+    logf("client heartbeat timeout waiting for ack");
+    return false;
+  }
+
+  return true;
+}
+
 static int writeAll(int fd, const void *buf, long nbytes) {
   long offset = 0;
   while (offset < nbytes) {

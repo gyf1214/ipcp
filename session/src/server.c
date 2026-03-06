@@ -580,6 +580,11 @@ sessionQueueResult_t serverHandleInboundMessage(
   return sessionQueueResultError;
 }
 
+bool serverHeartbeatTick(server_t *runtime, long long nowMs, long long lastValidInboundMs, long long timeoutMs) {
+  (void)runtime;
+  return nowMs - lastValidInboundMs < timeoutMs;
+}
+
 session_t *serverSessionAt(server_t *runtime, int slot) {
   if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return NULL;

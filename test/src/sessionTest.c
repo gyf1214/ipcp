@@ -1017,6 +1017,51 @@ static void testRoleInboundAdaptersDispatchToServerAndClientHandlers(void) {
   close(serverTcpPair[1]);
 }
 
+static void testRoleHeartbeatDelegatesToServerAndClientHandlers(void) {
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  client_t clientRuntime;
+  bool heartbeatPending = false;
+  long long heartbeatSentMs = 0;
+  long long lastHeartbeatReqMs = 0;
+  bool tunReadPaused = false;
+  long tcpWritePendingNbytes = 0;
+  char tcpWritePendingBuf[ProtocolFrameSize];
+  bool ok;
+
+  testAssertTrue(serverHeartbeatTick(NULL, 8999, 0, 9000), "server heartbeat should allow pre-timeout interval");
+  testAssertTrue(!serverHeartbeatTick(NULL, 9000, 0, 9000), "server heartbeat should stop at timeout boundary");
+
+  memset(tcpWritePendingBuf, 0, sizeof(tcpWritePendingBuf));
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  clientRuntime.tunPoller = &poller.tunPoller;
+  clientRuntime.tcpPoller = &poller.tcpPoller;
+
+  ok = clientHeartbeatTick(
+      &clientRuntime,
+      &poller.tcpPoller,
+      &poller.tunPoller,
+      &heartbeatPending,
+      6000,
+      defaultHeartbeatCfg.intervalMs,
+      defaultHeartbeatCfg.timeoutMs,
+      &heartbeatSentMs,
+      &lastHeartbeatReqMs,
+      0,
+      0,
+      &tunReadPaused,
+      &tcpWritePendingNbytes,
+      tcpWritePendingBuf,
+      testServerKey);
+  testAssertTrue(ok, "client heartbeat tick should continue");
+  testAssertTrue(heartbeatPending, "client heartbeat handler should set pending when request queues");
+  testAssertTrue(heartbeatSentMs == 6000, "client heartbeat handler should capture send timestamp");
+  testAssertTrue(lastHeartbeatReqMs == 6000, "client heartbeat handler should capture last request timestamp");
+
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+}
+
 void runSessionTests(void) {
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
@@ -1040,4 +1085,5 @@ void runSessionTests(void) {
   testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin();
   testRoleQueueAdaptersDispatchToServerAndClientApis();
   testRoleInboundAdaptersDispatchToServerAndClientHandlers();
+  testRoleHeartbeatDelegatesToServerAndClientHandlers();
 }
