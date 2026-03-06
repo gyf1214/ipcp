@@ -217,6 +217,78 @@ bool clientHeartbeatTick(
   return true;
 }
 
+bool clientServiceBackpressure(
+    client_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    ioEvent_t event,
+    bool *tunReadPaused,
+    bool *tcpReadPaused,
+    long *tcpWritePendingNbytes,
+    char tcpWritePendingBuf[ProtocolFrameSize],
+    long *tunWritePendingNbytes,
+    char tunWritePendingBuf[ProtocolFrameSize]) {
+  long queued;
+  (void)runtime;
+  (void)event;
+
+  if (tcpPoller == NULL || tunPoller == NULL || tunReadPaused == NULL || tcpReadPaused == NULL
+      || tcpWritePendingNbytes == NULL || tcpWritePendingBuf == NULL || tunWritePendingNbytes == NULL
+      || tunWritePendingBuf == NULL) {
+    return false;
+  }
+
+  if (*tcpWritePendingNbytes > 0) {
+    if (ioTcpWrite(tcpPoller, tcpWritePendingBuf, *tcpWritePendingNbytes)) {
+      *tcpWritePendingNbytes = 0;
+    } else {
+      queued = ioTcpQueuedBytes(tcpPoller);
+      if (queued < 0 || queued + *tcpWritePendingNbytes <= IoPollerQueueCapacity) {
+        return false;
+      }
+    }
+  }
+
+  if (*tunWritePendingNbytes > 0) {
+    if (ioTunWrite(tunPoller, tunWritePendingBuf, *tunWritePendingNbytes)) {
+      *tunWritePendingNbytes = 0;
+    } else {
+      queued = ioTunQueuedBytes(tunPoller);
+      if (queued < 0 || queued + *tunWritePendingNbytes <= IoPollerQueueCapacity) {
+        return false;
+      }
+    }
+  }
+
+  if (*tcpReadPaused && *tunWritePendingNbytes == 0) {
+    queued = ioTunQueuedBytes(tunPoller);
+    if (queued < 0) {
+      return false;
+    }
+    if (queued <= IoPollerLowWatermark) {
+      if (!ioTcpSetReadEnabled(tcpPoller, true)) {
+        return false;
+      }
+      *tcpReadPaused = false;
+    }
+  }
+
+  if (*tunReadPaused && *tcpWritePendingNbytes == 0) {
+    queued = ioTcpQueuedBytes(tcpPoller);
+    if (queued < 0) {
+      return false;
+    }
+    if (queued <= IoPollerLowWatermark) {
+      if (!ioTunSetReadEnabled(tunPoller, true)) {
+        return false;
+      }
+      *tunReadPaused = false;
+    }
+  }
+
+  return true;
+}
+
 static int writeAll(int fd, const void *buf, long nbytes) {
   long offset = 0;
   while (offset < nbytes) {

@@ -1062,6 +1062,64 @@ static void testRoleHeartbeatDelegatesToServerAndClientHandlers(void) {
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
+static void testRoleBackpressureDispatchesToServerAndClientServices(void) {
+  server_t serverRuntime;
+  client_t clientRuntime;
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  int serverTunPair[2];
+  int serverTcpPair[2];
+  int slot;
+  bool clientTunReadPaused = false;
+  bool clientTcpReadPaused = false;
+  long clientTcpPendingNbytes = 0;
+  long clientTunPendingNbytes = 0;
+  char clientTcpPendingBuf[ProtocolFrameSize];
+  char clientTunPendingBuf[ProtocolFrameSize];
+
+  memset(clientTcpPendingBuf, 0, sizeof(clientTcpPendingBuf));
+  memset(clientTunPendingBuf, 0, sizeof(clientTunPendingBuf));
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  clientRuntime.tunPoller = &poller.tunPoller;
+  clientRuntime.tcpPoller = &poller.tcpPoller;
+  testAssertTrue(
+      clientServiceBackpressure(
+          &clientRuntime,
+          &poller.tcpPoller,
+          &poller.tunPoller,
+          ioEventTimeout,
+          &clientTunReadPaused,
+          &clientTcpReadPaused,
+          &clientTcpPendingNbytes,
+          clientTcpPendingBuf,
+          &clientTunPendingNbytes,
+          clientTunPendingBuf),
+      "client backpressure service should succeed without pending bytes");
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTunPair) == 0, "server tun pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTcpPair) == 0, "server tcp pair should be created");
+  testAssertTrue(
+      serverInit(&serverRuntime, serverTunPair[0], 82, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
+      "server runtime init should succeed");
+  slot = serverAddClient(&serverRuntime, 0, serverTcpPair[0], testServerKey, testClaim2, sizeof(testClaim2));
+  testAssertTrue(slot == 0, "server client should be added");
+  testAssertTrue(
+      serverServiceBackpressure(
+          &serverRuntime,
+          &serverRuntime.activeConns[slot].tcpPoller,
+          &serverRuntime.tunPoller,
+          ioEventTimeout),
+      "server backpressure service should succeed without pending bytes");
+
+  serverDeinit(&serverRuntime);
+  close(serverTunPair[0]);
+  close(serverTunPair[1]);
+  close(serverTcpPair[0]);
+  close(serverTcpPair[1]);
+}
+
 void runSessionTests(void) {
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
@@ -1086,4 +1144,5 @@ void runSessionTests(void) {
   testRoleQueueAdaptersDispatchToServerAndClientApis();
   testRoleInboundAdaptersDispatchToServerAndClientHandlers();
   testRoleHeartbeatDelegatesToServerAndClientHandlers();
+  testRoleBackpressureDispatchesToServerAndClientServices();
 }

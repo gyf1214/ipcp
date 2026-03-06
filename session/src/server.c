@@ -585,6 +585,42 @@ bool serverHeartbeatTick(server_t *runtime, long long nowMs, long long lastValid
   return nowMs - lastValidInboundMs < timeoutMs;
 }
 
+bool serverServiceBackpressure(server_t *runtime, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioEvent_t event) {
+  long queued;
+  (void)tunPoller;
+
+  if (runtime == NULL || tcpPoller == NULL) {
+    return false;
+  }
+
+  if (serverHasPendingTunToTcp(runtime)) {
+    int ownerSlot = serverPendingTunToTcpOwner(runtime);
+    int slot = serverFindSlotByFd(runtime, tcpPoller->tcpFd);
+    if (slot < 0) {
+      return false;
+    }
+    if (event == ioEventTcpWrite && slot == ownerSlot) {
+      serverPendingRetry_t retry = serverRetryPendingTunToTcp(runtime, ownerSlot, tcpPoller);
+      if (retry == serverPendingRetryError) {
+        return false;
+      }
+    }
+  }
+
+  if (serverHasPendingTunToTcp(runtime)) {
+    return true;
+  }
+
+  queued = ioTcpQueuedBytes(tcpPoller);
+  if (queued < 0) {
+    return false;
+  }
+  if (queued > IoPollerLowWatermark) {
+    return true;
+  }
+  return serverSetTunReadEnabled(runtime, true);
+}
+
 session_t *serverSessionAt(server_t *runtime, int slot) {
   if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return NULL;
