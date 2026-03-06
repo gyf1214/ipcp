@@ -1,5 +1,6 @@
 #include "sessionInternal.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,7 @@ static server_t *sessionServer(session_t *session) {
   if (session == NULL || !session->isServer) {
     return NULL;
   }
+  assert(session->runtime != NULL);
   return (server_t *)session->runtime;
 }
 
@@ -60,7 +62,22 @@ static client_t *sessionClient(session_t *session) {
   if (session == NULL || session->isServer) {
     return NULL;
   }
+  assert(session->runtime != NULL);
   return (client_t *)session->runtime;
+}
+
+static server_t *sessionServerMaybe(session_t *session) {
+  if (session == NULL || !session->isServer || session->runtime == NULL) {
+    return NULL;
+  }
+  return sessionServer(session);
+}
+
+static client_t *sessionClientMaybe(session_t *session) {
+  if (session == NULL || session->isServer || session->runtime == NULL) {
+    return NULL;
+  }
+  return sessionClient(session);
 }
 
 static long messageHeaderSize(void) {
@@ -69,8 +86,8 @@ static long messageHeaderSize(void) {
 
 static bool serviceBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, ioEvent_t event) {
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
+  server_t *runtime = sessionServerMaybe(session);
+  client_t *client = sessionClientMaybe(session);
 
   if (runtime != NULL) {
     long queued;
@@ -113,8 +130,8 @@ static bool pipeTun(
   ioStatus_t status;
   protocolMessage_t msg;
   sessionQueueResult_t result;
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
+  server_t *runtime = sessionServerMaybe(session);
+  client_t *client = sessionClientMaybe(session);
 
   if (maxPayload <= 0) {
     return false;
@@ -172,8 +189,8 @@ static bool pipeTcpBytes(
   protocolMessage_t msg;
   protocolStatus_t status;
   sessionQueueResult_t result;
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
+  server_t *runtime = sessionServerMaybe(session);
+  client_t *client = sessionClientMaybe(session);
   long long now = sessionNowMs(session);
 
   while (offset < k) {
@@ -358,7 +375,6 @@ void sessionSetClient(session_t *session, client_t *runtime) {
     return;
   }
   session->runtime = runtime;
-  (void)sessionClient(session);
 }
 
 bool sessionPromoteFromPreAuth(
@@ -400,8 +416,8 @@ static sessionStepResult_t sessionFinalizeStep(
     ioTunPoller_t *tunPoller,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]) {
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
+  server_t *runtime = sessionServerMaybe(session);
+  client_t *client = sessionClientMaybe(session);
   long long now = sessionNowMs(session);
   long long timeoutMs = heartbeatTimeoutMs(session);
 
@@ -463,11 +479,11 @@ sessionStepResult_t sessionHandleTunIngressPayload(
   msg.type = protocolMsgData;
   msg.nbytes = payloadNbytes;
   msg.buf = (const char *)payload;
-  if (sessionServer(session) != NULL) {
-    result = serverSendMessage(sessionServer(session), tcpPoller, key, &msg);
+  if (sessionServerMaybe(session) != NULL) {
+    result = serverSendMessage(sessionServerMaybe(session), tcpPoller, key, &msg);
   } else {
     result = clientSendMessage(
-        sessionClient(session),
+        sessionClientMaybe(session),
         tcpPoller,
         tunPoller,
         &session->tunReadPaused,
