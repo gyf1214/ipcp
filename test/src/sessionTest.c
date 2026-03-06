@@ -360,6 +360,34 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
+static void testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds(void) {
+  unsigned char key[ProtocolPskSize];
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  sessionStats_t stats;
+  char fill[IoPollerQueueCapacity];
+
+  memset(key, 0x24, sizeof(key));
+  memset(fill, 'h', sizeof(fill));
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  fakeNowMs = 0;
+  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+
+  testAssertTrue(ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity), "prefill tcp queue should succeed");
+  fakeNowMs = 6000;
+  testAssertTrue(
+      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
+      "client heartbeat tick should continue when request enqueue is blocked");
+  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
+  testAssertTrue(!stats.heartbeatPending, "heartbeat should remain non-pending when req enqueue is blocked");
+  testAssertTrue(stats.tcpWritePendingNbytes > 0, "blocked heartbeat request should be retained as pending tcp write");
+
+  sessionDestroy(session);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+}
+
 static void testClientRejectsInboundHeartbeatRequest(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
@@ -874,6 +902,7 @@ void runSessionTests(void) {
   testClientHeartbeatTimeoutUsesConfiguredTimeout();
   testServerHeartbeatTimeoutUsesConfiguredTimeout();
   testClientHeartbeatRequestAndAckFlow();
+  testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds();
   testClientRejectsInboundHeartbeatRequest();
   testSessionTunReadQueuesEncryptedTcpFrame();
   testSessionTcpReadQueuesTunWrite();

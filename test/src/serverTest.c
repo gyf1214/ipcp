@@ -228,6 +228,50 @@ static void testServerRoundRobinRetryCursorRotates(void) {
   serverDeinit(&runtime);
 }
 
+static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
+  server_t runtime;
+  int tunPair[2];
+  int tcpPair[2];
+  unsigned char payload[] = "pending-owner-payload";
+  serverPendingRetry_t retry;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
+  testAssertTrue(serverInit(&runtime, tunPair[0], 52, 1, 1, &testHeartbeatCfg, NULL, NULL), "runtime init should succeed");
+  testAssertTrue(serverAddClient(&runtime, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "slot should be added");
+
+  runtime.activeConns[0].tcpPoller.outOffset = 0;
+  runtime.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
+
+  testAssertTrue(
+      serverStorePendingTunToTcp(&runtime, 0, payload, (long)sizeof(payload)),
+      "storing pending tun-to-tcp payload should succeed");
+  testAssertTrue(serverHasPendingTunToTcp(&runtime), "runtime should report pending tun-to-tcp payload");
+  testAssertTrue(serverPendingTunToTcpOwner(&runtime) == 0, "runtime should record pending owner slot");
+  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "runtime should disable tun epollin while pending is active");
+
+  retry = serverRetryPendingTunToTcp(&runtime, 1, &runtime.activeConns[0].tcpPoller);
+  testAssertTrue(retry == serverPendingRetryBlocked, "non-owner retry should be blocked");
+  testAssertTrue(serverHasPendingTunToTcp(&runtime), "non-owner retry should not consume pending payload");
+
+  runtime.activeConns[0].tcpPoller.outOffset = 0;
+  runtime.activeConns[0].tcpPoller.outNbytes = 0;
+  retry = serverRetryPendingTunToTcp(&runtime, 0, &runtime.activeConns[0].tcpPoller);
+  testAssertTrue(retry == serverPendingRetryQueued, "owner retry should queue pending payload");
+  testAssertTrue(!serverHasPendingTunToTcp(&runtime), "owner retry should clear pending payload");
+
+  testAssertTrue(
+      serverSetTunReadEnabled(&runtime, true),
+      "read interest should be re-enabled after pending payload clears");
+  testAssertTrue((runtime.tunPoller.events & EPOLLIN) != 0, "runtime should enable tun epollin when requested");
+
+  serverDeinit(&runtime);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+  close(tunPair[0]);
+  close(tunPair[1]);
+}
+
 static void testServerRoutesTunIngressByClaimMatch(void) {
   server_t runtime;
   int tunPair[2];
@@ -478,6 +522,7 @@ void runServerTests(void) {
   testServerFindSlotByClaim();
   testServerSharedTunInterestTracksGlobalQueue();
   testServerRoundRobinRetryCursorRotates();
+  testServerPendingTunToTcpOwnerControlsRetryAndReadInterest();
   testServerRoutesTunIngressByClaimMatch();
   testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed();
   testServerFanoutTapBroadcastToAllClients();
