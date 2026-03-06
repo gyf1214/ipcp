@@ -176,6 +176,7 @@ int clientServeConn(
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   ioTunPoller_t tunPoller;
   ioTcpPoller_t tcpPoller;
+  client_t runtime;
   ioEvent_t event;
   session_t *session = NULL;
   int epollFd = -1;
@@ -199,12 +200,15 @@ int clientServeConn(
     errf("setup epoll failed: %s", strerror(errno));
     goto cleanup;
   }
+  runtime.tunPoller = &tunPoller;
+  runtime.tcpPoller = &tcpPoller;
 
   session = sessionCreate(false, heartbeatCfg, NULL, NULL);
   if (session == NULL) {
     errf("session setup failed");
     goto cleanup;
   }
+  sessionSetClient(session, &runtime);
 
   while (1) {
     event = ioPollersWait(&tunPoller, &tcpPoller, EPOLL_WAIT_MS);

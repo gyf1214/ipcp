@@ -8,6 +8,7 @@
 
 typedef struct session_t session_t;
 struct server_t;
+struct client_t;
 
 typedef long long (*sessionNowMsFn_t)(void *ctx);
 
@@ -37,6 +38,7 @@ void sessionDestroy(session_t *session);
 void sessionReset(session_t *session);
 bool sessionGetStats(const session_t *session, sessionStats_t *outStats);
 void sessionSetServer(session_t *session, struct server_t *runtime);
+void sessionSetClient(session_t *session, struct client_t *runtime);
 bool sessionPromoteFromPreAuth(
     session_t *session,
     const protocolDecoder_t *decoder,

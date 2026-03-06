@@ -11,7 +11,7 @@
 
 struct session_t {
   bool isServer;
-  server_t *runtime;
+  void *runtime;
   sessionNowMsFn_t nowFn;
   void *nowCtx;
   protocolDecoder_t tcpDecoder;
@@ -55,6 +55,27 @@ static long long heartbeatTimeoutMs(const session_t *session) {
   return session->heartbeatTimeoutMs;
 }
 
+static server_t *sessionServer(session_t *session) {
+  if (session == NULL || !session->isServer) {
+    return NULL;
+  }
+  return (server_t *)session->runtime;
+}
+
+static const server_t *sessionConstServer(const session_t *session) {
+  if (session == NULL || !session->isServer) {
+    return NULL;
+  }
+  return (const server_t *)session->runtime;
+}
+
+static client_t *sessionClient(session_t *session) {
+  if (session == NULL || session->isServer) {
+    return NULL;
+  }
+  return (client_t *)session->runtime;
+}
+
 static long messageHeaderSize(void) {
   return (long)sizeof(unsigned char) + ProtocolWireLengthSize;
 }
@@ -78,7 +99,7 @@ static bool pauseReadSource(
 }
 
 static bool canToggleReadInterest(const session_t *session, ioSource_t source) {
-  if (session != NULL && session->isServer && session->runtime != NULL && source == ioSourceTun) {
+  if (session != NULL && sessionConstServer(session) != NULL && source == ioSourceTun) {
     return false;
   }
   return true;
@@ -98,8 +119,9 @@ static bool pauseReadSourceForSession(
 
 static long queuedBytesForDestination(
     const session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioSource_t destination) {
-  if (session != NULL && session->isServer && session->runtime != NULL && destination == ioSourceTun) {
-    return serverQueuedTunBytes(session->runtime);
+  const server_t *runtime = sessionConstServer(session);
+  if (runtime != NULL && destination == ioSourceTun) {
+    return serverQueuedTunBytes(runtime);
   }
   if (destination == ioSourceTun) {
     return ioTunQueuedBytes(tunPoller);
@@ -148,11 +170,12 @@ static queueResult_t queueTcpWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
   long queued;
   int ownerSlot;
+  server_t *runtime = sessionServer(session);
 
   if (session->tcpWritePendingNbytes > 0) {
     return queueResultBlocked;
   }
-  if (session->isServer && session->runtime != NULL && serverHasPendingTunToTcp(session->runtime)) {
+  if (runtime != NULL && serverHasPendingTunToTcp(runtime)) {
     session->tunReadPaused = true;
     return queueResultBlocked;
   }
@@ -165,12 +188,12 @@ static queueResult_t queueTcpWithBackpressure(
     return queueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
-    if (session->isServer && session->runtime != NULL) {
-      ownerSlot = serverFindSlotByFd(session->runtime, tcpPoller->tcpFd);
+    if (runtime != NULL) {
+      ownerSlot = serverFindSlotByFd(runtime, tcpPoller->tcpFd);
       if (ownerSlot < 0) {
         return queueResultError;
       }
-      if (!serverStorePendingTunToTcp(session->runtime, ownerSlot, data, nbytes)) {
+      if (!serverStorePendingTunToTcp(runtime, ownerSlot, data, nbytes)) {
         return queueResultError;
       }
       session->tunReadPaused = true;
@@ -189,15 +212,16 @@ static queueResult_t queueTcpWithBackpressure(
 static queueResult_t queueTunWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
   long queued;
+  server_t *runtime = sessionServer(session);
 
   if (session->tunWritePendingNbytes > 0) {
     return queueResultBlocked;
   }
-  if (session->isServer && session->runtime != NULL) {
-    if (serverQueueTunWrite(session->runtime, data, nbytes)) {
+  if (runtime != NULL) {
+    if (serverQueueTunWrite(runtime, data, nbytes)) {
       return queueResultQueued;
     }
-    queued = serverQueuedTunBytes(session->runtime);
+    queued = serverQueuedTunBytes(runtime);
   } else if (ioTunWrite(tunPoller, data, nbytes)) {
     return queueResultQueued;
   } else {
@@ -221,18 +245,19 @@ static bool serviceBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, ioEvent_t event) {
   long queued;
   bool serverMode;
+  server_t *runtime = sessionServer(session);
 
-  serverMode = session->isServer && session->runtime != NULL;
+  serverMode = runtime != NULL;
 
-  if (serverMode && serverHasPendingTunToTcp(session->runtime)) {
-    int ownerSlot = serverPendingTunToTcpOwner(session->runtime);
-    int slot = serverFindSlotByFd(session->runtime, tcpPoller->tcpFd);
+  if (serverMode && serverHasPendingTunToTcp(runtime)) {
+    int ownerSlot = serverPendingTunToTcpOwner(runtime);
+    int slot = serverFindSlotByFd(runtime, tcpPoller->tcpFd);
     if (slot < 0) {
       return false;
     }
     if (event == ioEventTcpWrite && slot == ownerSlot) {
       serverPendingRetry_t retry =
-          serverRetryPendingTunToTcp(session->runtime, ownerSlot, tcpPoller);
+          serverRetryPendingTunToTcp(runtime, ownerSlot, tcpPoller);
       if (retry == serverPendingRetryError) {
         return false;
       }
@@ -252,8 +277,8 @@ static bool serviceBackpressure(
 
   if (session->tunWritePendingNbytes > 0) {
     bool queuedTun = false;
-    if (session->isServer && session->runtime != NULL) {
-      queuedTun = serverQueueTunWrite(session->runtime, session->tunWritePendingBuf, session->tunWritePendingNbytes);
+    if (runtime != NULL) {
+      queuedTun = serverQueueTunWrite(runtime, session->tunWritePendingBuf, session->tunWritePendingNbytes);
     } else {
       queuedTun = ioTunWrite(tunPoller, session->tunWritePendingBuf, session->tunWritePendingNbytes);
     }
@@ -274,7 +299,7 @@ static bool serviceBackpressure(
   }
 
   if (serverMode) {
-    if (serverHasPendingTunToTcp(session->runtime)) {
+    if (serverHasPendingTunToTcp(runtime)) {
       session->tunReadPaused = true;
       return true;
     }
@@ -287,7 +312,7 @@ static bool serviceBackpressure(
       session->tunReadPaused = true;
       return true;
     }
-    if (!serverSetTunReadEnabled(session->runtime, true)) {
+    if (!serverSetTunReadEnabled(runtime, true)) {
       return false;
     }
     session->tunReadPaused = false;
@@ -570,7 +595,7 @@ void sessionDestroy(session_t *session) {
 void sessionReset(session_t *session) {
   long long now;
   bool isServer;
-  server_t *runtime;
+  void *runtime;
   sessionNowMsFn_t nowFn;
   void *nowCtx;
   int heartbeatIntervalMs;
@@ -622,10 +647,18 @@ bool sessionGetStats(const session_t *session, sessionStats_t *outStats) {
 }
 
 void sessionSetServer(session_t *session, server_t *runtime) {
-  if (session == NULL) {
+  if (session == NULL || !session->isServer) {
     return;
   }
   session->runtime = runtime;
+}
+
+void sessionSetClient(session_t *session, client_t *runtime) {
+  if (session == NULL || session->isServer) {
+    return;
+  }
+  session->runtime = runtime;
+  (void)sessionClient(session);
 }
 
 bool sessionPromoteFromPreAuth(

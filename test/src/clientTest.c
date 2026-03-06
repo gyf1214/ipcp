@@ -9,6 +9,7 @@
 
 #include "protocol.h"
 #include "client.h"
+#include "sessionInternal.h"
 #include "testAssert.h"
 
 static unsigned char testClientKey[ProtocolPskSize] = {
@@ -281,6 +282,19 @@ static void testClientServeConnHandshakeAndStopOnPeerClose(void) {
   testAssertTrue(WEXITSTATUS(status) == 0, "client should return success when peer closes after handshake");
 }
 
+static void testClientSessionRuntimeWiringAcceptsClientContext(void) {
+  session_t *session = sessionCreate(false, &heartbeatCfg, NULL, NULL);
+  client_t runtime = {0};
+  sessionStats_t stats;
+
+  testAssertTrue(session != NULL, "session create should succeed");
+  sessionSetClient(session, &runtime);
+  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
+  testAssertTrue(!stats.isServer, "session should remain in client mode after runtime wiring");
+
+  sessionDestroy(session);
+}
+
 void runClientTests(void) {
   testClientWriteRawMsgWritesValidWireFrame();
   testClientReadRawMsgSyncReadsValidWireFrame();
@@ -289,4 +303,5 @@ void runClientTests(void) {
   testClientServeConnRejectsInvalidArgs();
   testClientServeConnFailsOnInvalidChallengeLength();
   testClientServeConnHandshakeAndStopOnPeerClose();
+  testClientSessionRuntimeWiringAcceptsClientContext();
 }

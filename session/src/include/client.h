@@ -3,6 +3,11 @@
 #include "protocol.h"
 #include "sessionInternal.h"
 
+typedef struct client_t {
+  ioTunPoller_t *tunPoller;
+  ioTcpPoller_t *tcpPoller;
+} client_t;
+
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg);
 int clientReadRawMsg(int fd, protocolRawMsg_t *msg);
 int clientWriteSecureMsg(
