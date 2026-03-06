@@ -11,6 +11,88 @@
 
 #define EPOLL_WAIT_MS 200
 
+sessionQueueResult_t clientQueueTcpWithBackpressure(
+    client_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    bool *tunReadPaused,
+    long *tcpWritePendingNbytes,
+    char tcpWritePendingBuf[ProtocolFrameSize],
+    const void *data,
+    long nbytes) {
+  long queued;
+  (void)runtime;
+
+  if (tcpPoller == NULL || tunPoller == NULL || tunReadPaused == NULL || tcpWritePendingNbytes == NULL
+      || tcpWritePendingBuf == NULL || data == NULL || nbytes <= 0) {
+    return sessionQueueResultError;
+  }
+  if (*tcpWritePendingNbytes > 0) {
+    return sessionQueueResultBlocked;
+  }
+  if (ioTcpWrite(tcpPoller, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+
+  queued = ioTcpQueuedBytes(tcpPoller);
+  if (queued < 0) {
+    return sessionQueueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    memcpy(tcpWritePendingBuf, data, (size_t)nbytes);
+    *tcpWritePendingNbytes = nbytes;
+    if (!*tunReadPaused) {
+      if (!ioTunSetReadEnabled(tunPoller, false)) {
+        return sessionQueueResultError;
+      }
+      *tunReadPaused = true;
+    }
+    return sessionQueueResultBlocked;
+  }
+  return sessionQueueResultError;
+}
+
+sessionQueueResult_t clientQueueTunWithBackpressure(
+    client_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    bool *tcpReadPaused,
+    long *tunWritePendingNbytes,
+    char tunWritePendingBuf[ProtocolFrameSize],
+    const void *data,
+    long nbytes) {
+  long queued;
+  (void)runtime;
+
+  if (tcpPoller == NULL || tunPoller == NULL || tcpReadPaused == NULL || tunWritePendingNbytes == NULL
+      || tunWritePendingBuf == NULL || data == NULL || nbytes <= 0) {
+    return sessionQueueResultError;
+  }
+  if (*tunWritePendingNbytes > 0) {
+    return sessionQueueResultBlocked;
+  }
+  if (ioTunWrite(tunPoller, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+
+  queued = ioTunQueuedBytes(tunPoller);
+  if (queued < 0) {
+    return sessionQueueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    memcpy(tunWritePendingBuf, data, (size_t)nbytes);
+    *tunWritePendingNbytes = nbytes;
+    if (!*tcpReadPaused) {
+      if (!ioTcpSetReadEnabled(tcpPoller, false)) {
+        return sessionQueueResultError;
+      }
+      *tcpReadPaused = true;
+    }
+    return sessionQueueResultBlocked;
+  }
+  return sessionQueueResultError;
+}
+
 static int writeAll(int fd, const void *buf, long nbytes) {
   long offset = 0;
   while (offset < nbytes) {

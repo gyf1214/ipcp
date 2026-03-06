@@ -9,6 +9,7 @@
 
 #include "io.h"
 #include "protocol.h"
+#include "client.h"
 #include "server.h"
 #include "sessionInternal.h"
 #include "testAssert.h"
@@ -891,6 +892,69 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   teardownServerForTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
+static void testRoleQueueAdaptersDispatchToServerAndClientApis(void) {
+  server_t serverRuntime;
+  client_t clientRuntime;
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  int serverTunPair[2];
+  int serverTcpPair[2];
+  char fill[IoPollerQueueCapacity];
+  char payload[128];
+  bool clientTunReadPaused = false;
+  long clientTcpPendingNbytes = 0;
+  char clientTcpPendingBuf[ProtocolFrameSize];
+  sessionQueueResult_t result;
+  int serverSlot;
+
+  memset(fill, 'w', sizeof(fill));
+  memset(payload, 'z', sizeof(payload));
+  memset(clientTcpPendingBuf, 0, sizeof(clientTcpPendingBuf));
+
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  clientRuntime.tunPoller = &poller.tunPoller;
+  clientRuntime.tcpPoller = &poller.tcpPoller;
+  testAssertTrue(
+      ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 16),
+      "prefill client tcp queue should succeed");
+  result = clientQueueTcpWithBackpressure(
+      &clientRuntime,
+      &poller.tcpPoller,
+      &poller.tunPoller,
+      &clientTunReadPaused,
+      &clientTcpPendingNbytes,
+      clientTcpPendingBuf,
+      payload,
+      sizeof(payload));
+  testAssertTrue(result == sessionQueueResultBlocked, "client queue api should block on overflow");
+  testAssertTrue(clientTunReadPaused, "client queue api should pause tun reads on overflow");
+  testAssertTrue(clientTcpPendingNbytes > 0, "client queue api should store pending tcp payload");
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTunPair) == 0, "server tun pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTcpPair) == 0, "server tcp pair should be created");
+  testAssertTrue(
+      serverInit(&serverRuntime, serverTunPair[0], 80, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
+      "server runtime init should succeed");
+  serverSlot = serverAddClient(&serverRuntime, 0, serverTcpPair[0], testServerKey, testClaim2, sizeof(testClaim2));
+  testAssertTrue(serverSlot == 0, "server client should be added");
+  testAssertTrue(
+      ioTcpWrite(&serverRuntime.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity - 16),
+      "prefill server tcp queue should succeed");
+  result = serverQueueTcpWithBackpressure(
+      &serverRuntime, &serverRuntime.activeConns[0].tcpPoller, payload, sizeof(payload));
+  testAssertTrue(result == sessionQueueResultBlocked, "server queue api should block on overflow");
+  testAssertTrue(serverHasPendingTunToTcp(&serverRuntime), "server queue api should store runtime pending payload");
+  testAssertTrue(serverPendingTunToTcpOwner(&serverRuntime) == 0, "server pending payload owner should match slot");
+
+  serverDeinit(&serverRuntime);
+  close(serverTunPair[0]);
+  close(serverTunPair[1]);
+  close(serverTcpPair[0]);
+  close(serverTcpPair[1]);
+}
+
 void runSessionTests(void) {
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
@@ -912,4 +976,5 @@ void runSessionTests(void) {
   testServerTunOverflowDisablesTunEpollinGlobally();
   testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark();
   testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin();
+  testRoleQueueAdaptersDispatchToServerAndClientApis();
 }

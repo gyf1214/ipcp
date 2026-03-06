@@ -469,6 +469,58 @@ bool serverDropPendingTunToTcpByOwner(server_t *runtime, int ownerSlot) {
   return serverSetTunReadEnabled(runtime, true);
 }
 
+sessionQueueResult_t serverQueueTcpWithBackpressure(
+    server_t *runtime, ioTcpPoller_t *tcpPoller, const void *data, long nbytes) {
+  long queued;
+  int ownerSlot;
+
+  if (runtime == NULL || tcpPoller == NULL || data == NULL || nbytes <= 0) {
+    return sessionQueueResultError;
+  }
+  if (serverHasPendingTunToTcp(runtime)) {
+    return sessionQueueResultBlocked;
+  }
+  if (ioTcpWrite(tcpPoller, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+
+  queued = ioTcpQueuedBytes(tcpPoller);
+  if (queued < 0) {
+    return sessionQueueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    ownerSlot = serverFindSlotByFd(runtime, tcpPoller->tcpFd);
+    if (ownerSlot < 0) {
+      return sessionQueueResultError;
+    }
+    if (!serverStorePendingTunToTcp(runtime, ownerSlot, data, nbytes)) {
+      return sessionQueueResultError;
+    }
+    return sessionQueueResultBlocked;
+  }
+  return sessionQueueResultError;
+}
+
+sessionQueueResult_t serverQueueTunWithBackpressure(server_t *runtime, const void *data, long nbytes) {
+  long queued;
+
+  if (runtime == NULL || data == NULL || nbytes <= 0) {
+    return sessionQueueResultError;
+  }
+  if (serverQueueTunWrite(runtime, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+
+  queued = serverQueuedTunBytes(runtime);
+  if (queued < 0) {
+    return sessionQueueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    return sessionQueueResultBlocked;
+  }
+  return sessionQueueResultError;
+}
+
 session_t *serverSessionAt(server_t *runtime, int slot) {
   if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return NULL;

@@ -34,12 +34,6 @@ struct session_t {
   char tunWritePendingBuf[ProtocolFrameSize];
 };
 
-typedef enum {
-  queueResultQueued = 0,
-  queueResultBlocked,
-  queueResultError,
-} queueResult_t;
-
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
   (void)ctx;
@@ -80,41 +74,11 @@ static long messageHeaderSize(void) {
   return (long)sizeof(unsigned char) + ProtocolWireLengthSize;
 }
 
-static bool pauseReadSource(
-    ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioSource_t source, bool *paused) {
-  if (*paused) {
-    return true;
-  }
-  if (source == ioSourceTun) {
-    if (!ioTunSetReadEnabled(tunPoller, false)) {
-      return false;
-    }
-  } else {
-    if (!ioTcpSetReadEnabled(tcpPoller, false)) {
-      return false;
-    }
-  }
-  *paused = true;
-  return true;
-}
-
 static bool canToggleReadInterest(const session_t *session, ioSource_t source) {
   if (session != NULL && sessionConstServer(session) != NULL && source == ioSourceTun) {
     return false;
   }
   return true;
-}
-
-static bool pauseReadSourceForSession(
-    session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioSource_t source, bool *paused) {
-  if (*paused) {
-    return true;
-  }
-  if (!canToggleReadInterest(session, source)) {
-    *paused = true;
-    return true;
-  }
-  return pauseReadSource(tcpPoller, tunPoller, source, paused);
 }
 
 static long queuedBytesForDestination(
@@ -166,79 +130,46 @@ static bool maybeResumeReadSource(
   return true;
 }
 
-static queueResult_t queueTcpWithBackpressure(
+static sessionQueueResult_t queueTcpWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
-  long queued;
-  int ownerSlot;
   server_t *runtime = sessionServer(session);
+  client_t *client = sessionClient(session);
 
-  if (session->tcpWritePendingNbytes > 0) {
-    return queueResultBlocked;
-  }
-  if (runtime != NULL && serverHasPendingTunToTcp(runtime)) {
-    session->tunReadPaused = true;
-    return queueResultBlocked;
-  }
-  if (ioTcpWrite(tcpPoller, data, nbytes)) {
-    return queueResultQueued;
-  }
-
-  queued = ioTcpQueuedBytes(tcpPoller);
-  if (queued < 0) {
-    return queueResultError;
-  }
-  if (queued + nbytes > IoPollerQueueCapacity) {
-    if (runtime != NULL) {
-      ownerSlot = serverFindSlotByFd(runtime, tcpPoller->tcpFd);
-      if (ownerSlot < 0) {
-        return queueResultError;
-      }
-      if (!serverStorePendingTunToTcp(runtime, ownerSlot, data, nbytes)) {
-        return queueResultError;
-      }
+  if (runtime != NULL) {
+    sessionQueueResult_t result = serverQueueTcpWithBackpressure(runtime, tcpPoller, data, nbytes);
+    if (result == sessionQueueResultBlocked) {
       session->tunReadPaused = true;
-      return queueResultBlocked;
     }
-    memcpy(session->tcpWritePendingBuf, data, (size_t)nbytes);
-    session->tcpWritePendingNbytes = nbytes;
-    if (!pauseReadSourceForSession(session, tcpPoller, tunPoller, ioSourceTun, &session->tunReadPaused)) {
-      return queueResultError;
-    }
-    return queueResultBlocked;
+    return result;
   }
-  return queueResultError;
+  return clientQueueTcpWithBackpressure(
+      client,
+      tcpPoller,
+      tunPoller,
+      &session->tunReadPaused,
+      &session->tcpWritePendingNbytes,
+      session->tcpWritePendingBuf,
+      data,
+      nbytes);
 }
 
-static queueResult_t queueTunWithBackpressure(
+static sessionQueueResult_t queueTunWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
-  long queued;
   server_t *runtime = sessionServer(session);
+  client_t *client = sessionClient(session);
 
-  if (session->tunWritePendingNbytes > 0) {
-    return queueResultBlocked;
-  }
   if (runtime != NULL) {
-    if (serverQueueTunWrite(runtime, data, nbytes)) {
-      return queueResultQueued;
-    }
-    queued = serverQueuedTunBytes(runtime);
-  } else if (ioTunWrite(tunPoller, data, nbytes)) {
-    return queueResultQueued;
-  } else {
-    queued = ioTunQueuedBytes(tunPoller);
+    return serverQueueTunWithBackpressure(runtime, data, nbytes);
   }
-  if (queued < 0) {
-    return queueResultError;
-  }
-  if (queued + nbytes > IoPollerQueueCapacity) {
-    memcpy(session->tunWritePendingBuf, data, (size_t)nbytes);
-    session->tunWritePendingNbytes = nbytes;
-    if (!pauseReadSourceForSession(session, tcpPoller, tunPoller, ioSourceTcp, &session->tcpReadPaused)) {
-      return queueResultError;
-    }
-    return queueResultBlocked;
-  }
-  return queueResultError;
+  return clientQueueTunWithBackpressure(
+      client,
+      tcpPoller,
+      tunPoller,
+      &session->tcpReadPaused,
+      &session->tunWritePendingNbytes,
+      session->tunWritePendingBuf,
+      data,
+      nbytes);
 }
 
 static bool serviceBackpressure(
@@ -323,7 +254,7 @@ static bool serviceBackpressure(
       session, tcpPoller, tunPoller, ioSourceTun, ioSourceTcp, &session->tunReadPaused, session->tcpWritePendingNbytes);
 }
 
-static queueResult_t sendMessage(
+static sessionQueueResult_t sendMessage(
     ioTcpPoller_t *tcpPoller,
     ioTunPoller_t *tunPoller,
     const unsigned char key[ProtocolPskSize],
@@ -331,7 +262,7 @@ static queueResult_t sendMessage(
     const protocolMessage_t *msg) {
   protocolFrame_t frame;
   if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
-    return queueResultError;
+    return sessionQueueResultError;
   }
   return queueTcpWithBackpressure(tcpPoller, tunPoller, session, frame.buf, frame.nbytes);
 }
@@ -346,7 +277,7 @@ static bool pipeTun(
   long nbytes = 0;
   ioStatus_t status;
   protocolMessage_t msg;
-  queueResult_t result;
+  sessionQueueResult_t result;
 
   if (maxPayload <= 0) {
     return false;
@@ -364,10 +295,10 @@ static bool pipeTun(
   msg.nbytes = nbytes;
   msg.buf = payload;
   result = sendMessage(tcpPoller, tunPoller, key, session, &msg);
-  if (result == queueResultError) {
+  if (result == sessionQueueResultError) {
     return false;
   }
-  if (result == queueResultBlocked) {
+  if (result == sessionQueueResultBlocked) {
     return true;
   }
 
@@ -379,7 +310,7 @@ static bool pipeTun(
   return true;
 }
 
-static queueResult_t handleInboundMessage(
+static sessionQueueResult_t handleInboundMessage(
     ioTcpPoller_t *tcpPoller,
     ioTunPoller_t *tunPoller,
     const unsigned char key[ProtocolPskSize],
@@ -389,48 +320,48 @@ static queueResult_t handleInboundMessage(
   session->lastValidInboundMs = now;
 
   if (msg->type == protocolMsgData) {
-    queueResult_t result = queueTunWithBackpressure(tcpPoller, tunPoller, session, msg->buf, msg->nbytes);
-    if (result != queueResultQueued) {
+    sessionQueueResult_t result = queueTunWithBackpressure(tcpPoller, tunPoller, session, msg->buf, msg->nbytes);
+    if (result != sessionQueueResultQueued) {
       return result;
     }
     if (!session->isServer) {
       session->lastDataRecvMs = now;
     }
     dbgf("received %ld bytes of data", msg->nbytes);
-    return queueResultQueued;
+    return sessionQueueResultQueued;
   }
 
   if (msg->type == protocolMsgHeartbeatReq) {
     protocolMessage_t ack;
-    queueResult_t result;
+    sessionQueueResult_t result;
     if (!session->isServer) {
       logf("unexpected heartbeat request on client");
-      return queueResultError;
+      return sessionQueueResultError;
     }
 
     ack.type = protocolMsgHeartbeatAck;
     ack.nbytes = 0;
     ack.buf = NULL;
     result = sendMessage(tcpPoller, tunPoller, key, session, &ack);
-    if (result != queueResultQueued) {
+    if (result != sessionQueueResultQueued) {
       return result;
     }
     dbgf("heartbeat request received, sent ack");
-    return queueResultQueued;
+    return sessionQueueResultQueued;
   }
 
   if (msg->type == protocolMsgHeartbeatAck) {
     if (session->isServer || !session->heartbeatPending) {
       logf("unexpected heartbeat ack");
-      return queueResultError;
+      return sessionQueueResultError;
     }
 
     session->heartbeatPending = false;
     dbgf("heartbeat ack received");
-    return queueResultQueued;
+    return sessionQueueResultQueued;
   }
 
-  return queueResultError;
+  return sessionQueueResultError;
 }
 
 static bool pipeTcpBytes(
@@ -445,7 +376,7 @@ static bool pipeTcpBytes(
   long consumed = 0;
   protocolMessage_t msg;
   protocolStatus_t status;
-  queueResult_t result;
+  sessionQueueResult_t result;
 
   while (offset < k) {
     consumed = 0;
@@ -465,10 +396,10 @@ static bool pipeTcpBytes(
     }
 
     result = handleInboundMessage(tcpPoller, tunPoller, key, session, &msg);
-    if (result == queueResultError) {
+    if (result == sessionQueueResultError) {
       return false;
     }
-    if (result == queueResultBlocked) {
+    if (result == sessionQueueResultBlocked) {
       break;
     }
   }
@@ -540,15 +471,15 @@ static bool heartbeatTick(
     bool intervalElapsed = now - session->lastHeartbeatReqMs >= session->heartbeatIntervalMs;
     if (idleSend && idleRecv && intervalElapsed) {
       protocolMessage_t req;
-      queueResult_t result;
+      sessionQueueResult_t result;
       req.type = protocolMsgHeartbeatReq;
       req.nbytes = 0;
       req.buf = NULL;
       result = sendMessage(tcpPoller, tunPoller, key, session, &req);
-      if (result == queueResultError) {
+      if (result == sessionQueueResultError) {
         return false;
       }
-      if (result == queueResultBlocked) {
+      if (result == sessionQueueResultBlocked) {
         return true;
       }
 
@@ -721,7 +652,7 @@ sessionStepResult_t sessionHandleTunIngressPayload(
     const void *payload,
     long payloadNbytes) {
   protocolMessage_t msg;
-  queueResult_t result;
+  sessionQueueResult_t result;
 
   if (session == NULL
       || tcpPoller == NULL
@@ -736,10 +667,10 @@ sessionStepResult_t sessionHandleTunIngressPayload(
   msg.nbytes = payloadNbytes;
   msg.buf = (const char *)payload;
   result = sendMessage(tcpPoller, tunPoller, key, session, &msg);
-  if (result == queueResultError) {
+  if (result == sessionQueueResultError) {
     return sessionStepStop;
   }
-  if (result == queueResultQueued && !session->isServer) {
+  if (result == sessionQueueResultQueued && !session->isServer) {
     session->lastDataSentMs = sessionNowMs(session);
   }
 
