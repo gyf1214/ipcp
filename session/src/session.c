@@ -67,48 +67,6 @@ static long messageHeaderSize(void) {
   return (long)sizeof(unsigned char) + ProtocolWireLengthSize;
 }
 
-static __attribute__((unused)) sessionQueueResult_t queueTcpWithBackpressure(
-    ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
-
-  if (runtime != NULL) {
-    sessionQueueResult_t result = serverQueueTcpWithBackpressure(runtime, tcpPoller, data, nbytes);
-    if (result == sessionQueueResultBlocked) {
-      session->tunReadPaused = true;
-    }
-    return result;
-  }
-  return clientQueueTcpWithBackpressure(
-      client,
-      tcpPoller,
-      tunPoller,
-      &session->tunReadPaused,
-      &session->tcpWritePendingNbytes,
-      session->tcpWritePendingBuf,
-      data,
-      nbytes);
-}
-
-static __attribute__((unused)) sessionQueueResult_t queueTunWithBackpressure(
-    ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
-
-  if (runtime != NULL) {
-    return serverQueueTunWithBackpressure(runtime, data, nbytes);
-  }
-  return clientQueueTunWithBackpressure(
-      client,
-      tcpPoller,
-      tunPoller,
-      &session->tcpReadPaused,
-      &session->tunWritePendingNbytes,
-      session->tunWritePendingBuf,
-      data,
-      nbytes);
-}
-
 static bool serviceBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, ioEvent_t event) {
   server_t *runtime = sessionServer(session);
@@ -144,29 +102,6 @@ static bool serviceBackpressure(
       session->tunWritePendingBuf);
 }
 
-static sessionQueueResult_t sendMessage(
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
-    const unsigned char key[ProtocolPskSize],
-    session_t *session,
-    const protocolMessage_t *msg) {
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
-
-  if (runtime != NULL) {
-    return serverSendMessage(runtime, tcpPoller, key, msg);
-  }
-  return clientSendMessage(
-      client,
-      tcpPoller,
-      tunPoller,
-      &session->tunReadPaused,
-      &session->tcpWritePendingNbytes,
-      session->tcpWritePendingBuf,
-      key,
-      msg);
-}
-
 static bool pipeTun(
     ioTcpPoller_t *tcpPoller,
     ioTunPoller_t *tunPoller,
@@ -178,6 +113,8 @@ static bool pipeTun(
   ioStatus_t status;
   protocolMessage_t msg;
   sessionQueueResult_t result;
+  server_t *runtime = sessionServer(session);
+  client_t *client = sessionClient(session);
 
   if (maxPayload <= 0) {
     return false;
@@ -194,7 +131,19 @@ static bool pipeTun(
   msg.type = protocolMsgData;
   msg.nbytes = nbytes;
   msg.buf = payload;
-  result = sendMessage(tcpPoller, tunPoller, key, session, &msg);
+  if (runtime != NULL) {
+    result = serverSendMessage(runtime, tcpPoller, key, &msg);
+  } else {
+    result = clientSendMessage(
+        client,
+        tcpPoller,
+        tunPoller,
+        &session->tunReadPaused,
+        &session->tcpWritePendingNbytes,
+        session->tcpWritePendingBuf,
+        key,
+        &msg);
+  }
   if (result == sessionQueueResultError) {
     return false;
   }
@@ -210,35 +159,6 @@ static bool pipeTun(
   return true;
 }
 
-static sessionQueueResult_t handleInboundMessage(
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
-    const unsigned char key[ProtocolPskSize],
-    session_t *session,
-    const protocolMessage_t *msg) {
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
-  long long now = sessionNowMs(session);
-
-  if (runtime != NULL) {
-    return serverHandleInboundMessage(
-        runtime, tcpPoller, tunPoller, key, &session->heartbeatPending, &session->lastValidInboundMs, msg);
-  }
-  return clientHandleInboundMessage(
-      client,
-      tcpPoller,
-      tunPoller,
-      &session->tcpReadPaused,
-      &session->tunWritePendingNbytes,
-      session->tunWritePendingBuf,
-      &session->heartbeatPending,
-      now,
-      &session->lastValidInboundMs,
-      &session->lastDataRecvMs,
-      key,
-      msg);
-}
-
 static bool pipeTcpBytes(
     ioTcpPoller_t *tcpPoller,
     ioTunPoller_t *tunPoller,
@@ -252,6 +172,9 @@ static bool pipeTcpBytes(
   protocolMessage_t msg;
   protocolStatus_t status;
   sessionQueueResult_t result;
+  server_t *runtime = sessionServer(session);
+  client_t *client = sessionClient(session);
+  long long now = sessionNowMs(session);
 
   while (offset < k) {
     consumed = 0;
@@ -270,7 +193,24 @@ static bool pipeTcpBytes(
       continue;
     }
 
-    result = handleInboundMessage(tcpPoller, tunPoller, key, session, &msg);
+    if (runtime != NULL) {
+      result = serverHandleInboundMessage(
+          runtime, tcpPoller, tunPoller, key, &session->heartbeatPending, &session->lastValidInboundMs, &msg);
+    } else {
+      result = clientHandleInboundMessage(
+          client,
+          tcpPoller,
+          tunPoller,
+          &session->tcpReadPaused,
+          &session->tunWritePendingNbytes,
+          session->tunWritePendingBuf,
+          &session->heartbeatPending,
+          now,
+          &session->lastValidInboundMs,
+          &session->lastDataRecvMs,
+          key,
+          &msg);
+    }
     if (result == sessionQueueResultError) {
       return false;
     }
@@ -325,42 +265,6 @@ static bool pipeTcp(
   }
 
   return true;
-}
-
-static bool heartbeatTick(
-    ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, const unsigned char key[ProtocolPskSize], session_t *session) {
-  server_t *runtime = sessionServer(session);
-  client_t *client = sessionClient(session);
-  long long now = sessionNowMs(session);
-  long long timeoutMs = heartbeatTimeoutMs(session);
-
-  if (session->isServer) {
-    bool ok = runtime != NULL
-        ? serverHeartbeatTick(runtime, now, session->lastValidInboundMs, timeoutMs)
-        : (now - session->lastValidInboundMs < timeoutMs);
-    if (!ok) {
-      logf("server heartbeat timeout");
-      return false;
-    }
-    return true;
-  }
-
-  return clientHeartbeatTick(
-      client,
-      tcpPoller,
-      tunPoller,
-      &session->heartbeatPending,
-      now,
-      session->heartbeatIntervalMs,
-      (int)timeoutMs,
-      &session->heartbeatSentMs,
-      &session->lastHeartbeatReqMs,
-      session->lastDataSentMs,
-      session->lastDataRecvMs,
-      &session->tunReadPaused,
-      &session->tcpWritePendingNbytes,
-      session->tcpWritePendingBuf,
-      key);
 }
 
 session_t *sessionCreate(
@@ -496,12 +400,40 @@ static sessionStepResult_t sessionFinalizeStep(
     ioTunPoller_t *tunPoller,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]) {
+  server_t *runtime = sessionServer(session);
+  client_t *client = sessionClient(session);
+  long long now = sessionNowMs(session);
+  long long timeoutMs = heartbeatTimeoutMs(session);
+
   if (!serviceBackpressure(tcpPoller, tunPoller, session, event)) {
     logf("backpressure handling failure");
     return sessionStepStop;
   }
 
-  if (!heartbeatTick(tcpPoller, tunPoller, key, session)) {
+  if (session->isServer) {
+    bool ok = runtime != NULL
+        ? serverHeartbeatTick(runtime, now, session->lastValidInboundMs, timeoutMs)
+        : (now - session->lastValidInboundMs < timeoutMs);
+    if (!ok) {
+      logf("server heartbeat timeout");
+      return sessionStepStop;
+    }
+  } else if (!clientHeartbeatTick(
+                 client,
+                 tcpPoller,
+                 tunPoller,
+                 &session->heartbeatPending,
+                 now,
+                 session->heartbeatIntervalMs,
+                 (int)timeoutMs,
+                 &session->heartbeatSentMs,
+                 &session->lastHeartbeatReqMs,
+                 session->lastDataSentMs,
+                 session->lastDataRecvMs,
+                 &session->tunReadPaused,
+                 &session->tcpWritePendingNbytes,
+                 session->tcpWritePendingBuf,
+                 key)) {
     logf("heartbeat failure");
     return sessionStepStop;
   }
@@ -531,7 +463,19 @@ sessionStepResult_t sessionHandleTunIngressPayload(
   msg.type = protocolMsgData;
   msg.nbytes = payloadNbytes;
   msg.buf = (const char *)payload;
-  result = sendMessage(tcpPoller, tunPoller, key, session, &msg);
+  if (sessionServer(session) != NULL) {
+    result = serverSendMessage(sessionServer(session), tcpPoller, key, &msg);
+  } else {
+    result = clientSendMessage(
+        sessionClient(session),
+        tcpPoller,
+        tunPoller,
+        &session->tunReadPaused,
+        &session->tcpWritePendingNbytes,
+        session->tcpWritePendingBuf,
+        key,
+        &msg);
+  }
   if (result == sessionQueueResultError) {
     return sessionStepStop;
   }
