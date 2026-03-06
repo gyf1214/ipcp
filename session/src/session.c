@@ -130,7 +130,7 @@ static bool maybeResumeReadSource(
   return true;
 }
 
-static sessionQueueResult_t queueTcpWithBackpressure(
+static __attribute__((unused)) sessionQueueResult_t queueTcpWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
   server_t *runtime = sessionServer(session);
   client_t *client = sessionClient(session);
@@ -153,7 +153,7 @@ static sessionQueueResult_t queueTcpWithBackpressure(
       nbytes);
 }
 
-static sessionQueueResult_t queueTunWithBackpressure(
+static __attribute__((unused)) sessionQueueResult_t queueTunWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
   server_t *runtime = sessionServer(session);
   client_t *client = sessionClient(session);
@@ -260,11 +260,21 @@ static sessionQueueResult_t sendMessage(
     const unsigned char key[ProtocolPskSize],
     session_t *session,
     const protocolMessage_t *msg) {
-  protocolFrame_t frame;
-  if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
-    return sessionQueueResultError;
+  server_t *runtime = sessionServer(session);
+  client_t *client = sessionClient(session);
+
+  if (runtime != NULL) {
+    return serverSendMessage(runtime, tcpPoller, key, msg);
   }
-  return queueTcpWithBackpressure(tcpPoller, tunPoller, session, frame.buf, frame.nbytes);
+  return clientSendMessage(
+      client,
+      tcpPoller,
+      tunPoller,
+      &session->tunReadPaused,
+      &session->tcpWritePendingNbytes,
+      session->tcpWritePendingBuf,
+      key,
+      msg);
 }
 
 static bool pipeTun(
@@ -316,52 +326,27 @@ static sessionQueueResult_t handleInboundMessage(
     const unsigned char key[ProtocolPskSize],
     session_t *session,
     const protocolMessage_t *msg) {
+  server_t *runtime = sessionServer(session);
+  client_t *client = sessionClient(session);
   long long now = sessionNowMs(session);
-  session->lastValidInboundMs = now;
 
-  if (msg->type == protocolMsgData) {
-    sessionQueueResult_t result = queueTunWithBackpressure(tcpPoller, tunPoller, session, msg->buf, msg->nbytes);
-    if (result != sessionQueueResultQueued) {
-      return result;
-    }
-    if (!session->isServer) {
-      session->lastDataRecvMs = now;
-    }
-    dbgf("received %ld bytes of data", msg->nbytes);
-    return sessionQueueResultQueued;
+  if (runtime != NULL) {
+    return serverHandleInboundMessage(
+        runtime, tcpPoller, tunPoller, key, &session->heartbeatPending, &session->lastValidInboundMs, msg);
   }
-
-  if (msg->type == protocolMsgHeartbeatReq) {
-    protocolMessage_t ack;
-    sessionQueueResult_t result;
-    if (!session->isServer) {
-      logf("unexpected heartbeat request on client");
-      return sessionQueueResultError;
-    }
-
-    ack.type = protocolMsgHeartbeatAck;
-    ack.nbytes = 0;
-    ack.buf = NULL;
-    result = sendMessage(tcpPoller, tunPoller, key, session, &ack);
-    if (result != sessionQueueResultQueued) {
-      return result;
-    }
-    dbgf("heartbeat request received, sent ack");
-    return sessionQueueResultQueued;
-  }
-
-  if (msg->type == protocolMsgHeartbeatAck) {
-    if (session->isServer || !session->heartbeatPending) {
-      logf("unexpected heartbeat ack");
-      return sessionQueueResultError;
-    }
-
-    session->heartbeatPending = false;
-    dbgf("heartbeat ack received");
-    return sessionQueueResultQueued;
-  }
-
-  return sessionQueueResultError;
+  return clientHandleInboundMessage(
+      client,
+      tcpPoller,
+      tunPoller,
+      &session->tcpReadPaused,
+      &session->tunWritePendingNbytes,
+      session->tunWritePendingBuf,
+      &session->heartbeatPending,
+      now,
+      &session->lastValidInboundMs,
+      &session->lastDataRecvMs,
+      key,
+      msg);
 }
 
 static bool pipeTcpBytes(

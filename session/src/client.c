@@ -93,6 +93,73 @@ sessionQueueResult_t clientQueueTunWithBackpressure(
   return sessionQueueResultError;
 }
 
+sessionQueueResult_t clientSendMessage(
+    client_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    bool *tunReadPaused,
+    long *tcpWritePendingNbytes,
+    char tcpWritePendingBuf[ProtocolFrameSize],
+    const unsigned char key[ProtocolPskSize],
+    const protocolMessage_t *msg) {
+  protocolFrame_t frame;
+
+  if (key == NULL || msg == NULL) {
+    return sessionQueueResultError;
+  }
+  if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
+    return sessionQueueResultError;
+  }
+  return clientQueueTcpWithBackpressure(
+      runtime, tcpPoller, tunPoller, tunReadPaused, tcpWritePendingNbytes, tcpWritePendingBuf, frame.buf, frame.nbytes);
+}
+
+sessionQueueResult_t clientHandleInboundMessage(
+    client_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    bool *tcpReadPaused,
+    long *tunWritePendingNbytes,
+    char tunWritePendingBuf[ProtocolFrameSize],
+    bool *heartbeatPending,
+    long long nowMs,
+    long long *lastValidInboundMs,
+    long long *lastDataRecvMs,
+    const unsigned char key[ProtocolPskSize],
+    const protocolMessage_t *msg) {
+  (void)key;
+
+  if (heartbeatPending == NULL || lastValidInboundMs == NULL || lastDataRecvMs == NULL || msg == NULL) {
+    return sessionQueueResultError;
+  }
+  *lastValidInboundMs = nowMs;
+
+  if (msg->type == protocolMsgData) {
+    sessionQueueResult_t result = clientQueueTunWithBackpressure(
+        runtime, tcpPoller, tunPoller, tcpReadPaused, tunWritePendingNbytes, tunWritePendingBuf, msg->buf, msg->nbytes);
+    if (result != sessionQueueResultQueued) {
+      return result;
+    }
+    *lastDataRecvMs = nowMs;
+    dbgf("received %ld bytes of data", msg->nbytes);
+    return sessionQueueResultQueued;
+  }
+  if (msg->type == protocolMsgHeartbeatReq) {
+    logf("unexpected heartbeat request on client");
+    return sessionQueueResultError;
+  }
+  if (msg->type == protocolMsgHeartbeatAck) {
+    if (!*heartbeatPending) {
+      logf("unexpected heartbeat ack");
+      return sessionQueueResultError;
+    }
+    *heartbeatPending = false;
+    dbgf("heartbeat ack received");
+    return sessionQueueResultQueued;
+  }
+  return sessionQueueResultError;
+}
+
 static int writeAll(int fd, const void *buf, long nbytes) {
   long offset = 0;
   while (offset < nbytes) {

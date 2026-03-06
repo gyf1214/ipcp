@@ -955,6 +955,68 @@ static void testRoleQueueAdaptersDispatchToServerAndClientApis(void) {
   close(serverTcpPair[1]);
 }
 
+static void testRoleInboundAdaptersDispatchToServerAndClientHandlers(void) {
+  server_t serverRuntime;
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  int serverTunPair[2];
+  int serverTcpPair[2];
+  int slot;
+  bool heartbeatPending = false;
+  long long lastValidInboundMs = 17;
+  long long clientLastDataRecvMs = 0;
+  bool clientTcpReadPaused = false;
+  long clientTunPendingNbytes = 0;
+  char clientTunPendingBuf[ProtocolFrameSize];
+  protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
+  protocolMessage_t data = {.type = protocolMsgData, .nbytes = 5, .buf = "abcde"};
+  sessionQueueResult_t result;
+
+  memset(clientTunPendingBuf, 0, sizeof(clientTunPendingBuf));
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  result = clientHandleInboundMessage(
+      NULL,
+      &poller.tcpPoller,
+      &poller.tunPoller,
+      &clientTcpReadPaused,
+      &clientTunPendingNbytes,
+      clientTunPendingBuf,
+      &heartbeatPending,
+      1000,
+      &lastValidInboundMs,
+      &clientLastDataRecvMs,
+      testServerKey,
+      &data);
+  testAssertTrue(result == sessionQueueResultQueued, "client inbound data should route through client handler");
+  testAssertTrue(lastValidInboundMs == 1000, "client handler should refresh last valid inbound timestamp");
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTunPair) == 0, "server tun pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTcpPair) == 0, "server tcp pair should be created");
+  testAssertTrue(
+      serverInit(&serverRuntime, serverTunPair[0], 81, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
+      "server runtime init should succeed");
+  slot = serverAddClient(&serverRuntime, 0, serverTcpPair[0], testServerKey, testClaim2, sizeof(testClaim2));
+  testAssertTrue(slot == 0, "server client should be added");
+  result = serverHandleInboundMessage(
+      &serverRuntime,
+      &serverRuntime.activeConns[slot].tcpPoller,
+      &serverRuntime.tunPoller,
+      testServerKey,
+      &heartbeatPending,
+      &lastValidInboundMs,
+      &req);
+  testAssertTrue(result == sessionQueueResultQueued, "server inbound heartbeat request should route through server handler");
+  testAssertTrue(lastValidInboundMs > 0, "server handler should refresh last valid inbound timestamp");
+
+  serverDeinit(&serverRuntime);
+  close(serverTunPair[0]);
+  close(serverTunPair[1]);
+  close(serverTcpPair[0]);
+  close(serverTcpPair[1]);
+}
+
 void runSessionTests(void) {
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
@@ -977,4 +1039,5 @@ void runSessionTests(void) {
   testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark();
   testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin();
   testRoleQueueAdaptersDispatchToServerAndClientApis();
+  testRoleInboundAdaptersDispatchToServerAndClientHandlers();
 }

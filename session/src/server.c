@@ -521,6 +521,65 @@ sessionQueueResult_t serverQueueTunWithBackpressure(server_t *runtime, const voi
   return sessionQueueResultError;
 }
 
+sessionQueueResult_t serverSendMessage(
+    server_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    const unsigned char key[ProtocolPskSize],
+    const protocolMessage_t *msg) {
+  protocolFrame_t frame;
+
+  if (key == NULL || msg == NULL) {
+    return sessionQueueResultError;
+  }
+  if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
+    return sessionQueueResultError;
+  }
+  return serverQueueTcpWithBackpressure(runtime, tcpPoller, frame.buf, frame.nbytes);
+}
+
+sessionQueueResult_t serverHandleInboundMessage(
+    server_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    const unsigned char key[ProtocolPskSize],
+    bool *heartbeatPending,
+    long long *lastValidInboundMs,
+    const protocolMessage_t *msg) {
+  long long nowMs;
+  (void)tunPoller;
+  (void)heartbeatPending;
+
+  if (runtime == NULL || tcpPoller == NULL || key == NULL || lastValidInboundMs == NULL || msg == NULL) {
+    return sessionQueueResultError;
+  }
+
+  nowMs = serverNowMs(runtime);
+  *lastValidInboundMs = nowMs;
+
+  if (msg->type == protocolMsgData) {
+    sessionQueueResult_t result = serverQueueTunWithBackpressure(runtime, msg->buf, msg->nbytes);
+    if (result != sessionQueueResultQueued) {
+      return result;
+    }
+    dbgf("received %ld bytes of data", msg->nbytes);
+    return sessionQueueResultQueued;
+  }
+  if (msg->type == protocolMsgHeartbeatReq) {
+    protocolMessage_t ack = {.type = protocolMsgHeartbeatAck, .nbytes = 0, .buf = NULL};
+    sessionQueueResult_t result = serverSendMessage(runtime, tcpPoller, key, &ack);
+    if (result != sessionQueueResultQueued) {
+      return result;
+    }
+    dbgf("heartbeat request received, sent ack");
+    return sessionQueueResultQueued;
+  }
+  if (msg->type == protocolMsgHeartbeatAck) {
+    logf("unexpected heartbeat ack");
+    return sessionQueueResultError;
+  }
+  return sessionQueueResultError;
+}
+
 session_t *serverSessionAt(server_t *runtime, int slot) {
   if (!activeSlotIndexValid(runtime, slot) || !runtime->activeConns[slot].active) {
     return NULL;
