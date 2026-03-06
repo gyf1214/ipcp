@@ -432,13 +432,6 @@ void testRawDecodeFragmentedHeaderBodyKeepsByteContinuity() {
   }
 }
 
-void testGenericLoggingAvailable() {
-  const char *ts = logTimeStr();
-  testAssertTrue(ts != NULL, "logTimeStr should return a string");
-  testAssertTrue(ts[0] != '\0', "logTimeStr should not be empty");
-  logf("generic logging smoke test");
-}
-
 void testEncryptDecryptRoundTrip() {
   unsigned char key[ProtocolPskSize];
   memset(key, 0x2a, sizeof(key));
@@ -865,7 +858,6 @@ void runProtocolTests(void) {
   testSecureDecodeRejectBadArgs();
   testRawDecodeConsumesSingleFrameFromConcatenatedInput();
   testRawDecodeFragmentedHeaderBodyKeepsByteContinuity();
-  testGenericLoggingAvailable();
   testEncryptDecryptRoundTrip();
   testDecryptRejectTamper();
   testSecureMessageRoundTrip();

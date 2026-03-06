@@ -7,6 +7,7 @@
 #include "clientTest.h"
 #include "serverTest.h"
 #include "sessionTest.h"
+#include "logTest.h"
 
 typedef struct {
   const char *name;
@@ -19,6 +20,7 @@ static const suiteEntry_t suites[] = {
     {"client", runClientTests},
     {"server", runServerTests},
     {"session", runSessionTests},
+    {"log", runLogTests},
 };
 
 static int runNamedSuite(const char *name) {
@@ -54,7 +56,7 @@ int main(int argc, char **argv) {
   }
 
   if (status != 0) {
-    fprintf(stderr, "usage: %s [protocol] [io] [client] [server] [session]\n", argv[0]);
+    fprintf(stderr, "usage: %s [protocol] [io] [client] [server] [session] [log]\n", argv[0]);
     return EXIT_FAILURE;
   }
 
