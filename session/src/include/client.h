@@ -6,7 +6,20 @@
 typedef struct client_t {
   ioTunPoller_t *tunPoller;
   ioTcpPoller_t *tcpPoller;
+  bool heartbeatPending;
+  long long heartbeatSentMs;
+  long long lastHeartbeatReqMs;
+  long long lastDataSentMs;
+  long long lastDataRecvMs;
+  int heartbeatIntervalMs;
+  int heartbeatTimeoutMs;
 } client_t;
+
+void clientResetHeartbeatState(
+    client_t *runtime,
+    int heartbeatIntervalMs,
+    int heartbeatTimeoutMs,
+    long long nowMs);
 
 sessionQueueResult_t clientQueueTcpWithBackpressure(
     client_t *runtime,
@@ -34,6 +47,7 @@ sessionQueueResult_t clientSendMessage(
     long *tcpWritePendingNbytes,
     char tcpWritePendingBuf[ProtocolFrameSize],
     const unsigned char key[ProtocolPskSize],
+    long long nowMs,
     const protocolMessage_t *msg);
 sessionQueueResult_t clientHandleInboundMessage(
     client_t *runtime,
@@ -42,24 +56,14 @@ sessionQueueResult_t clientHandleInboundMessage(
     bool *tcpReadPaused,
     long *tunWritePendingNbytes,
     char tunWritePendingBuf[ProtocolFrameSize],
-    bool *heartbeatPending,
     long long nowMs,
     long long *lastValidInboundMs,
-    long long *lastDataRecvMs,
-    const unsigned char key[ProtocolPskSize],
     const protocolMessage_t *msg);
 bool clientHeartbeatTick(
     client_t *runtime,
     ioTcpPoller_t *tcpPoller,
     ioTunPoller_t *tunPoller,
-    bool *heartbeatPending,
     long long nowMs,
-    int intervalMs,
-    int timeoutMs,
-    long long *heartbeatSentMs,
-    long long *lastHeartbeatReqMs,
-    long long lastDataSentMs,
-    long long lastDataRecvMs,
     bool *tunReadPaused,
     long *tcpWritePendingNbytes,
     char tcpWritePendingBuf[ProtocolFrameSize],

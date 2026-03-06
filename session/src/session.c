@@ -19,13 +19,8 @@ struct session_t {
   char tcpReadCarryBuf[ProtocolFrameSize];
   long tcpReadCarryNbytes;
   long long lastValidInboundMs;
-  long long lastDataSentMs;
-  long long lastDataRecvMs;
   int heartbeatIntervalMs;
   int heartbeatTimeoutMs;
-  bool heartbeatPending;
-  long long heartbeatSentMs;
-  long long lastHeartbeatReqMs;
   bool tunReadPaused;
   bool tcpReadPaused;
   long tcpWritePendingNbytes;
@@ -65,6 +60,17 @@ static client_t *sessionClient(session_t *session) {
 
 static long messageHeaderSize(void) {
   return (long)sizeof(unsigned char) + ProtocolWireLengthSize;
+}
+
+static void sessionResetClientHeartbeatState(session_t *session) {
+  if (session == NULL || session->isServer || session->runtime == NULL) {
+    return;
+  }
+  clientResetHeartbeatState(
+      sessionClient(session),
+      session->heartbeatIntervalMs,
+      session->heartbeatTimeoutMs,
+      sessionNowMs(session));
 }
 
 static bool serviceBackpressure(
@@ -112,6 +118,7 @@ static bool pipeTun(
   ioStatus_t status;
   protocolMessage_t msg;
   sessionQueueResult_t result;
+  long long nowMs;
 
   if (maxPayload <= 0) {
     return false;
@@ -125,6 +132,7 @@ static bool pipeTun(
     return false;
   }
 
+  nowMs = sessionNowMs(session);
   msg.type = protocolMsgData;
   msg.nbytes = nbytes;
   msg.buf = payload;
@@ -140,6 +148,7 @@ static bool pipeTun(
         &session->tcpWritePendingNbytes,
         session->tcpWritePendingBuf,
         key,
+        nowMs,
         &msg);
   }
   if (result == sessionQueueResultError) {
@@ -148,11 +157,6 @@ static bool pipeTun(
   if (result == sessionQueueResultBlocked) {
     return true;
   }
-
-  if (!session->isServer) {
-    session->lastDataSentMs = sessionNowMs(session);
-  }
-
   dbgf("sent %ld bytes of data", nbytes);
   return true;
 }
@@ -191,7 +195,7 @@ static bool pipeTcpBytes(
 
     if (session->isServer) {
       result = serverHandleInboundMessage(
-          sessionServer(session), tcpPoller, tunPoller, key, &session->heartbeatPending, &session->lastValidInboundMs, &msg);
+          sessionServer(session), tcpPoller, tunPoller, key, NULL, &session->lastValidInboundMs, &msg);
     } else {
       client_t *client = sessionClient(session);
       result = clientHandleInboundMessage(
@@ -201,11 +205,8 @@ static bool pipeTcpBytes(
           &session->tcpReadPaused,
           &session->tunWritePendingNbytes,
           session->tunWritePendingBuf,
-          &session->heartbeatPending,
           now,
           &session->lastValidInboundMs,
-          &session->lastDataRecvMs,
-          key,
           &msg);
     }
     if (result == sessionQueueResultError) {
@@ -317,9 +318,7 @@ void sessionReset(session_t *session) {
   now = sessionNowMs(session);
   protocolDecoderInit(&session->tcpDecoder);
   session->lastValidInboundMs = now;
-  session->lastDataSentMs = now;
-  session->lastDataRecvMs = now;
-  session->lastHeartbeatReqMs = now;
+  sessionResetClientHeartbeatState(session);
 }
 
 bool sessionGetStats(const session_t *session, sessionStats_t *outStats) {
@@ -330,11 +329,19 @@ bool sessionGetStats(const session_t *session, sessionStats_t *outStats) {
   memset(outStats, 0, sizeof(*outStats));
   outStats->isServer = session->isServer;
   outStats->lastValidInboundMs = session->lastValidInboundMs;
-  outStats->lastDataSentMs = session->lastDataSentMs;
-  outStats->lastDataRecvMs = session->lastDataRecvMs;
-  outStats->heartbeatPending = session->heartbeatPending;
-  outStats->heartbeatSentMs = session->heartbeatSentMs;
-  outStats->lastHeartbeatReqMs = session->lastHeartbeatReqMs;
+  outStats->lastDataSentMs = 0;
+  outStats->lastDataRecvMs = 0;
+  outStats->heartbeatPending = false;
+  outStats->heartbeatSentMs = 0;
+  outStats->lastHeartbeatReqMs = 0;
+  if (!session->isServer && session->runtime != NULL) {
+    const client_t *client = (const client_t *)session->runtime;
+    outStats->lastDataSentMs = client->lastDataSentMs;
+    outStats->lastDataRecvMs = client->lastDataRecvMs;
+    outStats->heartbeatPending = client->heartbeatPending;
+    outStats->heartbeatSentMs = client->heartbeatSentMs;
+    outStats->lastHeartbeatReqMs = client->lastHeartbeatReqMs;
+  }
   outStats->tunReadPaused = session->tunReadPaused;
   outStats->tcpReadPaused = session->tcpReadPaused;
   outStats->tcpWritePendingNbytes = session->tcpWritePendingNbytes;
@@ -355,6 +362,7 @@ void sessionSetClient(session_t *session, client_t *runtime) {
     return;
   }
   session->runtime = runtime;
+  sessionResetClientHeartbeatState(session);
 }
 
 bool sessionPromoteFromPreAuth(
@@ -417,14 +425,7 @@ static sessionStepResult_t sessionFinalizeStep(
             client,
             tcpPoller,
             tunPoller,
-            &session->heartbeatPending,
             now,
-            session->heartbeatIntervalMs,
-            (int)timeoutMs,
-            &session->heartbeatSentMs,
-            &session->lastHeartbeatReqMs,
-            session->lastDataSentMs,
-            session->lastDataRecvMs,
             &session->tunReadPaused,
             &session->tcpWritePendingNbytes,
             session->tcpWritePendingBuf,
@@ -444,8 +445,8 @@ sessionStepResult_t sessionHandleTunIngressPayload(
     const unsigned char key[ProtocolPskSize],
     const void *payload,
     long payloadNbytes) {
-  protocolMessage_t msg;
   sessionQueueResult_t result;
+  long long nowMs;
 
   if (session == NULL
       || tcpPoller == NULL
@@ -456,12 +457,18 @@ sessionStepResult_t sessionHandleTunIngressPayload(
     return sessionStepStop;
   }
 
-  msg.type = protocolMsgData;
-  msg.nbytes = payloadNbytes;
-  msg.buf = (const char *)payload;
+  nowMs = sessionNowMs(session);
   if (session->isServer) {
+    protocolMessage_t msg;
+    msg.type = protocolMsgData;
+    msg.nbytes = payloadNbytes;
+    msg.buf = (const char *)payload;
     result = serverSendMessage(sessionServer(session), tcpPoller, key, &msg);
   } else {
+    protocolMessage_t msg;
+    msg.type = protocolMsgData;
+    msg.nbytes = payloadNbytes;
+    msg.buf = (const char *)payload;
     client_t *client = sessionClient(session);
     result = clientSendMessage(
         client,
@@ -471,13 +478,11 @@ sessionStepResult_t sessionHandleTunIngressPayload(
         &session->tcpWritePendingNbytes,
         session->tcpWritePendingBuf,
         key,
+        nowMs,
         &msg);
   }
   if (result == sessionQueueResultError) {
     return sessionStepStop;
-  }
-  if (result == sessionQueueResultQueued && !session->isServer) {
-    session->lastDataSentMs = sessionNowMs(session);
   }
 
   return sessionFinalizeStep(session, tcpPoller, tunPoller, ioEventTunRead, key);

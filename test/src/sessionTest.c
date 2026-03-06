@@ -198,9 +198,9 @@ static void testSessionInitSeedsModeAndTimestamps(void) {
   testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
   testAssertTrue(!stats.isServer, "session should keep client mode");
   testAssertTrue(stats.lastValidInboundMs == fakeNowMs, "lastValidInboundMs should be seeded");
-  testAssertTrue(stats.lastDataSentMs == fakeNowMs, "lastDataSentMs should be seeded");
-  testAssertTrue(stats.lastDataRecvMs == fakeNowMs, "lastDataRecvMs should be seeded");
-  testAssertTrue(stats.lastHeartbeatReqMs == fakeNowMs, "lastHeartbeatReqMs should be seeded");
+  testAssertTrue(stats.lastDataSentMs == 0, "client data sent timestamp should be unset before runtime wiring");
+  testAssertTrue(stats.lastDataRecvMs == 0, "client data recv timestamp should be unset before runtime wiring");
+  testAssertTrue(stats.lastHeartbeatReqMs == 0, "client heartbeat request timestamp should be unset before runtime wiring");
   sessionDestroy(session);
 }
 

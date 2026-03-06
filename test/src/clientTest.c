@@ -434,9 +434,8 @@ static void testClientInboundHandlerRoutesDataAndRefreshesTimestamp(void) {
   splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
-  bool heartbeatPending = false;
+  client_t runtime;
   long long lastValidInboundMs = 17;
-  long long lastDataRecvMs = 0;
   bool tcpReadPaused = false;
   long tunWritePendingNbytes = 0;
   char tunWritePendingBuf[ProtocolFrameSize];
@@ -446,22 +445,24 @@ static void testClientInboundHandlerRoutesDataAndRefreshesTimestamp(void) {
   memset(tunWritePendingBuf, 0, sizeof(tunWritePendingBuf));
   setupPairs(tunPair, tcpPair);
   testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
+  memset(&runtime, 0, sizeof(runtime));
+  runtime.tunPoller = &poller.tunPoller;
+  runtime.tcpPoller = &poller.tcpPoller;
+  clientResetHeartbeatState(&runtime, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs, 0);
 
   result = clientHandleInboundMessage(
-      NULL,
+      &runtime,
       &poller.tcpPoller,
       &poller.tunPoller,
       &tcpReadPaused,
       &tunWritePendingNbytes,
       tunWritePendingBuf,
-      &heartbeatPending,
       1000,
       &lastValidInboundMs,
-      &lastDataRecvMs,
-      testClientKey,
       &data);
   testAssertTrue(result == sessionQueueResultQueued, "client inbound data should route through client handler");
   testAssertTrue(lastValidInboundMs == 1000, "client handler should refresh last valid inbound timestamp");
+  testAssertTrue(runtime.lastDataRecvMs == 1000, "client handler should refresh client recv timestamp");
 
   teardownSplitPollers(&poller);
   close(tunPair[0]);
@@ -475,9 +476,6 @@ static void testClientHeartbeatTickSetsPendingAndTimestamps(void) {
   int tunPair[2];
   int tcpPair[2];
   client_t runtime;
-  bool heartbeatPending = false;
-  long long heartbeatSentMs = 0;
-  long long lastHeartbeatReqMs = 0;
   bool tunReadPaused = false;
   long tcpWritePendingNbytes = 0;
   char tcpWritePendingBuf[ProtocolFrameSize];
@@ -488,27 +486,21 @@ static void testClientHeartbeatTickSetsPendingAndTimestamps(void) {
   testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
   runtime.tunPoller = &poller.tunPoller;
   runtime.tcpPoller = &poller.tcpPoller;
+  clientResetHeartbeatState(&runtime, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs, 0);
 
   ok = clientHeartbeatTick(
       &runtime,
       &poller.tcpPoller,
       &poller.tunPoller,
-      &heartbeatPending,
       6000,
-      heartbeatCfg.intervalMs,
-      heartbeatCfg.timeoutMs,
-      &heartbeatSentMs,
-      &lastHeartbeatReqMs,
-      0,
-      0,
       &tunReadPaused,
       &tcpWritePendingNbytes,
       tcpWritePendingBuf,
       testClientKey);
   testAssertTrue(ok, "client heartbeat tick should continue");
-  testAssertTrue(heartbeatPending, "client heartbeat handler should set pending when request queues");
-  testAssertTrue(heartbeatSentMs == 6000, "client heartbeat handler should capture send timestamp");
-  testAssertTrue(lastHeartbeatReqMs == 6000, "client heartbeat handler should capture last request timestamp");
+  testAssertTrue(runtime.heartbeatPending, "client heartbeat handler should set pending when request queues");
+  testAssertTrue(runtime.heartbeatSentMs == 6000, "client heartbeat handler should capture send timestamp");
+  testAssertTrue(runtime.lastHeartbeatReqMs == 6000, "client heartbeat handler should capture last request timestamp");
 
   teardownSplitPollers(&poller);
   close(tunPair[0]);
