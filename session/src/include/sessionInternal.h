@@ -17,6 +17,12 @@ typedef enum {
   sessionStepStop,
 } sessionStepResult_t;
 
+typedef enum {
+  sessionQueueResultQueued = 0,
+  sessionQueueResultBlocked,
+  sessionQueueResultError,
+} sessionQueueResult_t;
+
 typedef struct {
   bool isServer;
   long long lastValidInboundMs;

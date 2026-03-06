@@ -99,6 +99,24 @@ bool serverStorePendingTunToTcp(server_t *runtime, int ownerSlot, const void *da
 serverPendingRetry_t serverRetryPendingTunToTcp(
     server_t *runtime, int ownerSlot, ioTcpPoller_t *ownerPoller);
 bool serverDropPendingTunToTcpByOwner(server_t *runtime, int ownerSlot);
+sessionQueueResult_t serverQueueTcpWithBackpressure(
+    server_t *runtime, ioTcpPoller_t *tcpPoller, const void *data, long nbytes);
+sessionQueueResult_t serverQueueTunWithBackpressure(server_t *runtime, const void *data, long nbytes);
+sessionQueueResult_t serverSendMessage(
+    server_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    const unsigned char key[ProtocolPskSize],
+    const protocolMessage_t *msg);
+sessionQueueResult_t serverHandleInboundMessage(
+    server_t *runtime,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    const unsigned char key[ProtocolPskSize],
+    bool *heartbeatPending,
+    long long *lastValidInboundMs,
+    const protocolMessage_t *msg);
+bool serverHeartbeatTick(server_t *runtime, long long nowMs, long long lastValidInboundMs, long long timeoutMs);
+bool serverServiceBackpressure(server_t *runtime, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioEvent_t event);
 
 session_t *serverSessionAt(server_t *runtime, int slot);
 int serverConnFdAt(const server_t *runtime, int slot);
