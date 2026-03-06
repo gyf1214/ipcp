@@ -1,10 +1,12 @@
 #include "sessionTest.h"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "io.h"
@@ -104,15 +106,6 @@ static sessionStepResult_t runSessionStep(session_t *session, splitPollersFixtur
   return sessionStep(session, &poller->tcpPoller, &poller->tunPoller, event, key);
 }
 
-static sessionStepResult_t runSessionStepSplit(
-    session_t *session,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
-    ioEvent_t event,
-    const unsigned char key[ProtocolPskSize]) {
-  return sessionStep(session, tcpPoller, tunPoller, event, key);
-}
-
 static sessionStepResult_t runSessionStepWithSuppressedStderr(
     session_t *session,
     splitPollersFixture_t *poller,
@@ -137,11 +130,63 @@ static sessionStepResult_t runSessionStepWithSuppressedStderr(
   return result;
 }
 
+static void wireClientSessionRuntime(session_t *session, splitPollersFixture_t *poller, client_t *runtime) {
+  memset(runtime, 0, sizeof(*runtime));
+  runtime->tunPoller = &poller->tunPoller;
+  runtime->tcpPoller = &poller->tcpPoller;
+  sessionSetClient(session, runtime);
+}
+
+static void wireServerSessionRuntime(session_t *session, server_t *runtime, splitPollersFixture_t *poller) {
+  memset(runtime, 0, sizeof(*runtime));
+  testAssertTrue(
+      serverInit(runtime, poller->tunPoller.tunFd, poller->tcpPoller.tcpFd, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
+      "server runtime init should succeed");
+  runtime->tunPoller.epollFd = poller->tunPoller.epollFd;
+  runtime->tunPoller.events = poller->tunPoller.events;
+  sessionSetServer(session, runtime);
+}
+
+static void assertSessionStepAbortsWhenRuntimeMissing(bool isServer) {
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  unsigned char key[ProtocolPskSize];
+  pid_t pid;
+  int status = 0;
+
+  memset(key, 0x7a, sizeof(key));
+  fakeNowMs = 0;
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  pid = fork();
+  testAssertTrue(pid >= 0, "fork should succeed");
+  if (pid == 0) {
+    session_t *session = sessionCreate(isServer, &defaultHeartbeatCfg, fakeNow, NULL);
+    testAssertTrue(session != NULL, "session create should succeed");
+    (void)runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key);
+    sessionDestroy(session);
+    _exit(0);
+  }
+
+  testAssertTrue(waitpid(pid, &status, 0) == pid, "waitpid should succeed");
+  testAssertTrue(WIFSIGNALED(status), "child should terminate via signal");
+  testAssertTrue(WTERMSIG(status) == SIGABRT, "child should abort on missing runtime");
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+}
+
 static void testSessionApiSmoke(void) {
   const session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   testAssertTrue(sessionApiSmoke(), "session smoke api should return true");
   sessionDestroy((session_t *)session);
+}
+
+static void testSessionServerRoleAssertsOnMissingRuntime(void) {
+  assertSessionStepAbortsWhenRuntimeMissing(true);
+}
+
+static void testSessionClientRoleAssertsOnMissingRuntime(void) {
+  assertSessionStepAbortsWhenRuntimeMissing(false);
 }
 
 static void testSessionInitSeedsModeAndTimestamps(void) {
@@ -162,6 +207,7 @@ static void testSessionInitSeedsModeAndTimestamps(void) {
 static void testSessionResetClearsPendingAndPauseFlags(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
+  client_t clientRuntime;
   int tunPair[2];
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
@@ -176,6 +222,7 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
+  wireClientSessionRuntime(session, &poller, &clientRuntime);
 
   testAssertTrue(
       ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 32),
@@ -198,222 +245,10 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
-static void testServerHeartbeatTimeoutStopsSession(void) {
-  unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-
-  memset(key, 0x11, sizeof(key));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  fakeNowMs = 0;
-  session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-
-  fakeNowMs = 15000;
-  testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key) == sessionStepStop,
-      "server should stop after heartbeat timeout");
-
-  sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-}
-
-static void testClientHeartbeatUsesConfiguredInterval(void) {
-  unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  sessionStats_t stats;
-  sessionHeartbeatConfig_t heartbeatCfg = {
-      .intervalMs = 2000,
-      .timeoutMs = 6000,
-  };
-
-  memset(key, 0x31, sizeof(key));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  fakeNowMs = 0;
-  session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-
-  fakeNowMs = 1999;
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
-      "client should continue before configured heartbeat interval");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(!stats.heartbeatPending, "heartbeat should not be pending before configured interval");
-
-  fakeNowMs = 2000;
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
-      "client should send heartbeat at configured interval");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.heartbeatPending, "heartbeat should be pending at configured interval");
-
-  sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-}
-
-static void testClientHeartbeatTimeoutUsesConfiguredTimeout(void) {
-  unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  sessionStats_t stats;
-  sessionHeartbeatConfig_t heartbeatCfg = {
-      .intervalMs = 2000,
-      .timeoutMs = 6000,
-  };
-
-  memset(key, 0x32, sizeof(key));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  fakeNowMs = 0;
-  session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-
-  fakeNowMs = 2000;
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
-      "client should send heartbeat request");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.heartbeatPending, "heartbeat request should be pending");
-
-  fakeNowMs = 7999;
-  testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key) == sessionStepContinue,
-      "client should continue before configured timeout");
-
-  fakeNowMs = 8000;
-  testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key) == sessionStepStop,
-      "client should stop at configured timeout");
-
-  sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-}
-
-static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
-  unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  sessionHeartbeatConfig_t heartbeatCfg = {
-      .intervalMs = 3000,
-      .timeoutMs = 9000,
-  };
-
-  memset(key, 0x33, sizeof(key));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  fakeNowMs = 0;
-  session_t *session = sessionCreate(true, &heartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-
-  fakeNowMs = 8999;
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
-      "server should continue before configured timeout");
-  fakeNowMs = 9000;
-  testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key) == sessionStepStop,
-      "server should stop at configured timeout");
-
-  sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-}
-
-static void testClientHeartbeatRequestAndAckFlow(void) {
-  unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  sessionStats_t stats;
-  char wire[ProtocolFrameSize];
-  long wireNbytes;
-
-  memset(key, 0x22, sizeof(key));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  fakeNowMs = 0;
-  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
-      "client should continue before heartbeat interval");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(!stats.heartbeatPending, "heartbeat should not be pending before idle interval");
-
-  fakeNowMs = 6000;
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
-      "client should stay alive when sending heartbeat request");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.heartbeatPending, "heartbeat should become pending after idle interval");
-
-  wireNbytes = writeSecureWire(key, protocolMsgHeartbeatAck, NULL, 0, wire);
-  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
-      "client should continue after heartbeat ack");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(!stats.heartbeatPending, "heartbeat pending should clear after ack");
-
-  sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-}
-
-static void testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds(void) {
-  unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  sessionStats_t stats;
-  char fill[IoPollerQueueCapacity];
-
-  memset(key, 0x24, sizeof(key));
-  memset(fill, 'h', sizeof(fill));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  fakeNowMs = 0;
-  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-
-  testAssertTrue(ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity), "prefill tcp queue should succeed");
-  fakeNowMs = 6000;
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
-      "client heartbeat tick should continue when request enqueue is blocked");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(!stats.heartbeatPending, "heartbeat should remain non-pending when req enqueue is blocked");
-  testAssertTrue(stats.tcpWritePendingNbytes > 0, "blocked heartbeat request should be retained as pending tcp write");
-
-  sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-}
-
-static void testClientRejectsInboundHeartbeatRequest(void) {
-  unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  char wire[ProtocolFrameSize];
-  long wireNbytes;
-
-  memset(key, 0x23, sizeof(key));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-  wireNbytes = writeSecureWire(key, protocolMsgHeartbeatReq, NULL, 0, wire);
-  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
-  testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &poller, ioEventTcpRead, key) == sessionStepStop,
-      "client should stop on inbound heartbeat request");
-
-  sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-}
-
 static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
+  client_t clientRuntime;
   int tunPair[2];
   int tcpPair[2];
   char payload[] = "tun-payload";
@@ -427,6 +262,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
+  wireClientSessionRuntime(session, &poller, &clientRuntime);
 
   testAssertTrue(write(tunPair[1], payload, strlen(payload)) == (long)strlen(payload), "tun write should succeed");
   testAssertTrue(
@@ -455,6 +291,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
 static void testSessionTcpReadQueuesTunWrite(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
+  server_t serverRuntime;
   int tunPair[2];
   int tcpPair[2];
   char wire[ProtocolFrameSize];
@@ -466,21 +303,22 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
+  wireServerSessionRuntime(session, &serverRuntime, &poller);
 
   wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)strlen(payload), wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
       "tcp read event should continue");
+  testAssertTrue(ioTunServiceWriteEvent(&serverRuntime.tunPoller), "server tun write service should flush payload");
 
-  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTunWrite, "tun write event should be available");
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTunWrite, key) == sessionStepContinue,
-      "tun write event should continue");
-  testAssertTrue(read(tunPair[1], out, sizeof(out)) == (long)strlen(payload), "tun peer should receive payload");
+      recv(tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (long)strlen(payload),
+      "tun peer should receive payload");
   testAssertTrue(memcmp(out, payload, strlen(payload)) == 0, "tun payload should match");
 
   sessionDestroy(session);
+  serverDeinit(&serverRuntime);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
@@ -492,6 +330,8 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
   const char payload[] = "split-entry";
   session_t *clientSession;
   session_t *serverSession;
+  client_t clientRuntime;
+  server_t serverRuntime;
   protocolDecoder_t decoder;
   protocolMessage_t decodedMsg;
   long consumed = 0;
@@ -502,6 +342,8 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
   clientSession = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   serverSession = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(clientSession != NULL && serverSession != NULL, "sessions should be created");
+  wireClientSessionRuntime(clientSession, &poller, &clientRuntime);
+  wireServerSessionRuntime(serverSession, &serverRuntime, &poller);
 
   testAssertTrue(
       sessionHandleTunIngressPayload(
@@ -537,24 +379,24 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
       sessionHandleConnEvent(serverSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key)
       == sessionStepContinue,
       "conn event entrypoint should process tcp read");
-  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTunWrite, "tun write event should be available");
-  testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "tun write service should flush queued frame");
-
+  testAssertTrue(ioTunServiceWriteEvent(&serverRuntime.tunPoller), "tun write service should flush queued frame");
   {
     char received[128];
-    ssize_t nread = read(tunPair[1], received, sizeof(received));
+    ssize_t nread = recv(tunPair[1], received, sizeof(received), MSG_DONTWAIT);
     testAssertTrue(nread == (ssize_t)strlen("event-path"), "tun peer should receive decoded payload");
     testAssertTrue(memcmp(received, "event-path", strlen("event-path")) == 0, "tun peer payload should match");
   }
 
   sessionDestroy(serverSession);
   sessionDestroy(clientSession);
+  serverDeinit(&serverRuntime);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testBackpressurePauseAndResumeFlow(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
+  client_t clientRuntime;
   int tunPair[2];
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
@@ -568,6 +410,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
+  wireClientSessionRuntime(session, &poller, &clientRuntime);
 
   testAssertTrue(
       ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 16),
@@ -669,480 +512,17 @@ static void testSharedTunWriteInterestIsRuntimeOwned(void) {
   close(tcpPairB[1]);
 }
 
-static void setupServerForTest(
-    server_t *runtime,
-    int maxSessions,
-    int *epollFd,
-    int tunPair[2],
-    int tcpPairA[2],
-    int tcpPairB[2],
-    int *slotA,
-    int *slotB) {
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp pair A should be created");
-  testAssertTrue(
-      serverInit(runtime, tunPair[0], 72, maxSessions, maxSessions, &defaultHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
-
-  *epollFd = epoll_create1(0);
-  testAssertTrue(*epollFd >= 0, "epoll_create1 should succeed");
-  runtime->epollFd = *epollFd;
-  testAssertTrue(
-      epoll_ctl(
-          *epollFd,
-          EPOLL_CTL_ADD,
-          runtime->tunPoller.tunFd,
-          &(struct epoll_event){.events = runtime->tunPoller.events, .data.fd = runtime->tunPoller.tunFd})
-          == 0,
-      "add tun fd should succeed");
-
-  *slotA = serverAddClient(runtime, 0, tcpPairA[0], testServerKey, testClaim2, sizeof(testClaim2));
-  testAssertTrue(*slotA == 0, "first client should be added");
-  testAssertTrue(
-      epoll_ctl(
-          *epollFd,
-          EPOLL_CTL_ADD,
-          tcpPairA[0],
-          &(struct epoll_event){.events = runtime->activeConns[*slotA].tcpPoller.events, .data.fd = tcpPairA[0]})
-          == 0,
-      "add tcp A fd should succeed");
-
-  *slotB = -1;
-  if (maxSessions > 1) {
-    testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
-    *slotB = serverAddClient(runtime, 1, tcpPairB[0], testServerKey, testClaim3, sizeof(testClaim3));
-    testAssertTrue(*slotB == 1, "second client should be added");
-    testAssertTrue(
-        epoll_ctl(
-            *epollFd,
-            EPOLL_CTL_ADD,
-            tcpPairB[0],
-            &(struct epoll_event){.events = runtime->activeConns[*slotB].tcpPoller.events, .data.fd = tcpPairB[0]})
-            == 0,
-        "add tcp B fd should succeed");
-  }
-}
-
-static void teardownServerForTest(
-    server_t *runtime,
-    int epollFd,
-    int tunPair[2],
-    int tcpPairA[2],
-    int tcpPairB[2],
-    int slotA,
-    int slotB) {
-  if (slotA >= 0) {
-    (void)serverRemoveClient(runtime, slotA);
-  }
-  if (slotB >= 0) {
-    (void)serverRemoveClient(runtime, slotB);
-  }
-  close(epollFd);
-  serverDeinit(runtime);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
-  if (tcpPairB[0] >= 0) {
-    close(tcpPairB[0]);
-  }
-  if (tcpPairB[1] >= 0) {
-    close(tcpPairB[1]);
-  }
-}
-
-static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
-  unsigned char key[ProtocolPskSize];
-  server_t runtime;
-  int epollFd;
-  int tunPair[2];
-  int tcpPairA[2];
-  int tcpPairB[2] = {-1, -1};
-  int slotA;
-  int slotB;
-  char fill[IoPollerQueueCapacity];
-  char tunPayload[128];
-  session_t *session;
-  ioTcpPoller_t *poller;
-  sessionStats_t stats;
-
-  memset(key, 0x51, sizeof(key));
-  memset(fill, 'p', sizeof(fill));
-  memset(tunPayload, 'q', sizeof(tunPayload));
-  setupServerForTest(&runtime, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  session = serverSessionAt(&runtime, slotA);
-  testAssertTrue(session != NULL, "server session should exist");
-  poller = &runtime.activeConns[slotA].tcpPoller;
-
-  testAssertTrue(
-      ioTcpWrite(poller, fill, IoPollerQueueCapacity - 16),
-      "prefill tcp queue should succeed");
-  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
-  testAssertTrue(
-      runSessionStepSplit(session, poller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
-      "session should continue on overflow");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.tcpWritePendingNbytes == 0, "server overflow should retain pending data in runtime, not session");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "runtime should disable tun epollin while pending exists");
-
-  teardownServerForTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
-}
-
-static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(void) {
-  unsigned char key[ProtocolPskSize];
-  server_t runtime;
-  int epollFd;
-  int tunPair[2];
-  int tcpPairA[2];
-  int tcpPairB[2];
-  int slotA;
-  int slotB;
-  char fill[IoPollerQueueCapacity];
-  char tunPayload[128];
-  session_t *ownerSession;
-  session_t *otherSession;
-  ioTcpPoller_t *ownerPoller;
-  ioTcpPoller_t *otherPoller;
-  sessionStats_t ownerStats;
-  long queued;
-
-  memset(key, 0x52, sizeof(key));
-  memset(fill, 'r', sizeof(fill));
-  memset(tunPayload, 's', sizeof(tunPayload));
-  setupServerForTest(&runtime, 2, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  ownerSession = serverSessionAt(&runtime, slotA);
-  otherSession = serverSessionAt(&runtime, slotB);
-  ownerPoller = &runtime.activeConns[slotA].tcpPoller;
-  otherPoller = &runtime.activeConns[slotB].tcpPoller;
-  testAssertTrue(ownerSession != NULL, "owner session should exist");
-  testAssertTrue(otherSession != NULL, "other session should exist");
-
-  testAssertTrue(
-      ioTcpWrite(ownerPoller, fill, IoPollerQueueCapacity - 16),
-      "prefill owner tcp queue should succeed");
-  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
-  testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
-      "overflow on owner should continue");
-  testAssertTrue(sessionGetStats(ownerSession, &ownerStats), "sessionGetStats should succeed");
-  testAssertTrue(ownerStats.tcpWritePendingNbytes == 0, "owner session should not keep runtime pending bytes locally");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while runtime pending exists");
-
-  testAssertTrue(
-      runSessionStepSplit(otherSession, otherPoller, &runtime.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
-      "non-owner tcp write path should continue");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "non-owner should not consume runtime pending");
-
-  ownerPoller->outOffset = 0;
-  ownerPoller->outNbytes = IoPollerLowWatermark + 100;
-  testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
-      "owner tcp write path should continue after first drain");
-  queued = ioTcpQueuedBytes(ownerPoller);
-  testAssertTrue(queued > IoPollerLowWatermark, "owner queue should remain above low watermark");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
-
-  ownerPoller->outOffset = 0;
-  ownerPoller->outNbytes = IoPollerLowWatermark;
-  testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
-      "owner tcp write path should continue after second drain");
-  queued = ioTcpQueuedBytes(ownerPoller);
-  testAssertTrue(queued <= IoPollerLowWatermark, "owner queue should drain to low watermark");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
-
-  teardownServerForTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
-}
-
-static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(void) {
-  unsigned char key[ProtocolPskSize];
-  server_t runtime;
-  int epollFd;
-  int tunPair[2];
-  int tcpPairA[2];
-  int tcpPairB[2] = {-1, -1};
-  int slotA;
-  int slotB;
-  char fill[IoPollerQueueCapacity];
-  char tunPayload[128];
-  session_t *session;
-  ioTcpPoller_t *poller;
-
-  memset(key, 0x53, sizeof(key));
-  memset(fill, 'u', sizeof(fill));
-  memset(tunPayload, 'v', sizeof(tunPayload));
-  setupServerForTest(&runtime, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  session = serverSessionAt(&runtime, slotA);
-  testAssertTrue(session != NULL, "server session should exist");
-  poller = &runtime.activeConns[slotA].tcpPoller;
-
-  testAssertTrue(
-      ioTcpWrite(poller, fill, IoPollerQueueCapacity - 16),
-      "prefill tcp queue should succeed");
-  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
-  testAssertTrue(
-      runSessionStepSplit(session, poller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
-      "overflow path should continue");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
-
-  testAssertTrue(serverRemoveClient(&runtime, slotA), "owner removal should succeed");
-  slotA = -1;
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
-
-  teardownServerForTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
-}
-
-static void testRoleQueueAdaptersDispatchToServerAndClientApis(void) {
-  server_t serverRuntime;
-  client_t clientRuntime;
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  int serverTunPair[2];
-  int serverTcpPair[2];
-  char fill[IoPollerQueueCapacity];
-  char payload[128];
-  bool clientTunReadPaused = false;
-  long clientTcpPendingNbytes = 0;
-  char clientTcpPendingBuf[ProtocolFrameSize];
-  sessionQueueResult_t result;
-  int serverSlot;
-
-  memset(fill, 'w', sizeof(fill));
-  memset(payload, 'z', sizeof(payload));
-  memset(clientTcpPendingBuf, 0, sizeof(clientTcpPendingBuf));
-
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  clientRuntime.tunPoller = &poller.tunPoller;
-  clientRuntime.tcpPoller = &poller.tcpPoller;
-  testAssertTrue(
-      ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 16),
-      "prefill client tcp queue should succeed");
-  result = clientQueueTcpWithBackpressure(
-      &clientRuntime,
-      &poller.tcpPoller,
-      &poller.tunPoller,
-      &clientTunReadPaused,
-      &clientTcpPendingNbytes,
-      clientTcpPendingBuf,
-      payload,
-      sizeof(payload));
-  testAssertTrue(result == sessionQueueResultBlocked, "client queue api should block on overflow");
-  testAssertTrue(clientTunReadPaused, "client queue api should pause tun reads on overflow");
-  testAssertTrue(clientTcpPendingNbytes > 0, "client queue api should store pending tcp payload");
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTunPair) == 0, "server tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTcpPair) == 0, "server tcp pair should be created");
-  testAssertTrue(
-      serverInit(&serverRuntime, serverTunPair[0], 80, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
-      "server runtime init should succeed");
-  serverSlot = serverAddClient(&serverRuntime, 0, serverTcpPair[0], testServerKey, testClaim2, sizeof(testClaim2));
-  testAssertTrue(serverSlot == 0, "server client should be added");
-  testAssertTrue(
-      ioTcpWrite(&serverRuntime.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity - 16),
-      "prefill server tcp queue should succeed");
-  result = serverQueueTcpWithBackpressure(
-      &serverRuntime, &serverRuntime.activeConns[0].tcpPoller, payload, sizeof(payload));
-  testAssertTrue(result == sessionQueueResultBlocked, "server queue api should block on overflow");
-  testAssertTrue(serverHasPendingTunToTcp(&serverRuntime), "server queue api should store runtime pending payload");
-  testAssertTrue(serverPendingTunToTcpOwner(&serverRuntime) == 0, "server pending payload owner should match slot");
-
-  serverDeinit(&serverRuntime);
-  close(serverTunPair[0]);
-  close(serverTunPair[1]);
-  close(serverTcpPair[0]);
-  close(serverTcpPair[1]);
-}
-
-static void testRoleInboundAdaptersDispatchToServerAndClientHandlers(void) {
-  server_t serverRuntime;
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  int serverTunPair[2];
-  int serverTcpPair[2];
-  int slot;
-  bool heartbeatPending = false;
-  long long lastValidInboundMs = 17;
-  long long clientLastDataRecvMs = 0;
-  bool clientTcpReadPaused = false;
-  long clientTunPendingNbytes = 0;
-  char clientTunPendingBuf[ProtocolFrameSize];
-  protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
-  protocolMessage_t data = {.type = protocolMsgData, .nbytes = 5, .buf = "abcde"};
-  sessionQueueResult_t result;
-
-  memset(clientTunPendingBuf, 0, sizeof(clientTunPendingBuf));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  result = clientHandleInboundMessage(
-      NULL,
-      &poller.tcpPoller,
-      &poller.tunPoller,
-      &clientTcpReadPaused,
-      &clientTunPendingNbytes,
-      clientTunPendingBuf,
-      &heartbeatPending,
-      1000,
-      &lastValidInboundMs,
-      &clientLastDataRecvMs,
-      testServerKey,
-      &data);
-  testAssertTrue(result == sessionQueueResultQueued, "client inbound data should route through client handler");
-  testAssertTrue(lastValidInboundMs == 1000, "client handler should refresh last valid inbound timestamp");
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTunPair) == 0, "server tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTcpPair) == 0, "server tcp pair should be created");
-  testAssertTrue(
-      serverInit(&serverRuntime, serverTunPair[0], 81, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
-      "server runtime init should succeed");
-  slot = serverAddClient(&serverRuntime, 0, serverTcpPair[0], testServerKey, testClaim2, sizeof(testClaim2));
-  testAssertTrue(slot == 0, "server client should be added");
-  result = serverHandleInboundMessage(
-      &serverRuntime,
-      &serverRuntime.activeConns[slot].tcpPoller,
-      &serverRuntime.tunPoller,
-      testServerKey,
-      &heartbeatPending,
-      &lastValidInboundMs,
-      &req);
-  testAssertTrue(result == sessionQueueResultQueued, "server inbound heartbeat request should route through server handler");
-  testAssertTrue(lastValidInboundMs > 0, "server handler should refresh last valid inbound timestamp");
-
-  serverDeinit(&serverRuntime);
-  close(serverTunPair[0]);
-  close(serverTunPair[1]);
-  close(serverTcpPair[0]);
-  close(serverTcpPair[1]);
-}
-
-static void testRoleHeartbeatDelegatesToServerAndClientHandlers(void) {
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  client_t clientRuntime;
-  bool heartbeatPending = false;
-  long long heartbeatSentMs = 0;
-  long long lastHeartbeatReqMs = 0;
-  bool tunReadPaused = false;
-  long tcpWritePendingNbytes = 0;
-  char tcpWritePendingBuf[ProtocolFrameSize];
-  bool ok;
-
-  testAssertTrue(serverHeartbeatTick(NULL, 8999, 0, 9000), "server heartbeat should allow pre-timeout interval");
-  testAssertTrue(!serverHeartbeatTick(NULL, 9000, 0, 9000), "server heartbeat should stop at timeout boundary");
-
-  memset(tcpWritePendingBuf, 0, sizeof(tcpWritePendingBuf));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  clientRuntime.tunPoller = &poller.tunPoller;
-  clientRuntime.tcpPoller = &poller.tcpPoller;
-
-  ok = clientHeartbeatTick(
-      &clientRuntime,
-      &poller.tcpPoller,
-      &poller.tunPoller,
-      &heartbeatPending,
-      6000,
-      defaultHeartbeatCfg.intervalMs,
-      defaultHeartbeatCfg.timeoutMs,
-      &heartbeatSentMs,
-      &lastHeartbeatReqMs,
-      0,
-      0,
-      &tunReadPaused,
-      &tcpWritePendingNbytes,
-      tcpWritePendingBuf,
-      testServerKey);
-  testAssertTrue(ok, "client heartbeat tick should continue");
-  testAssertTrue(heartbeatPending, "client heartbeat handler should set pending when request queues");
-  testAssertTrue(heartbeatSentMs == 6000, "client heartbeat handler should capture send timestamp");
-  testAssertTrue(lastHeartbeatReqMs == 6000, "client heartbeat handler should capture last request timestamp");
-
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-}
-
-static void testRoleBackpressureDispatchesToServerAndClientServices(void) {
-  server_t serverRuntime;
-  client_t clientRuntime;
-  splitPollersFixture_t poller;
-  int tunPair[2];
-  int tcpPair[2];
-  int serverTunPair[2];
-  int serverTcpPair[2];
-  int slot;
-  bool clientTunReadPaused = false;
-  bool clientTcpReadPaused = false;
-  long clientTcpPendingNbytes = 0;
-  long clientTunPendingNbytes = 0;
-  char clientTcpPendingBuf[ProtocolFrameSize];
-  char clientTunPendingBuf[ProtocolFrameSize];
-
-  memset(clientTcpPendingBuf, 0, sizeof(clientTcpPendingBuf));
-  memset(clientTunPendingBuf, 0, sizeof(clientTunPendingBuf));
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  clientRuntime.tunPoller = &poller.tunPoller;
-  clientRuntime.tcpPoller = &poller.tcpPoller;
-  testAssertTrue(
-      clientServiceBackpressure(
-          &clientRuntime,
-          &poller.tcpPoller,
-          &poller.tunPoller,
-          ioEventTimeout,
-          &clientTunReadPaused,
-          &clientTcpReadPaused,
-          &clientTcpPendingNbytes,
-          clientTcpPendingBuf,
-          &clientTunPendingNbytes,
-          clientTunPendingBuf),
-      "client backpressure service should succeed without pending bytes");
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTunPair) == 0, "server tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, serverTcpPair) == 0, "server tcp pair should be created");
-  testAssertTrue(
-      serverInit(&serverRuntime, serverTunPair[0], 82, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
-      "server runtime init should succeed");
-  slot = serverAddClient(&serverRuntime, 0, serverTcpPair[0], testServerKey, testClaim2, sizeof(testClaim2));
-  testAssertTrue(slot == 0, "server client should be added");
-  testAssertTrue(
-      serverServiceBackpressure(
-          &serverRuntime,
-          &serverRuntime.activeConns[slot].tcpPoller,
-          &serverRuntime.tunPoller,
-          ioEventTimeout),
-      "server backpressure service should succeed without pending bytes");
-
-  serverDeinit(&serverRuntime);
-  close(serverTunPair[0]);
-  close(serverTunPair[1]);
-  close(serverTcpPair[0]);
-  close(serverTcpPair[1]);
-}
-
 void runSessionTests(void) {
+  testSessionServerRoleAssertsOnMissingRuntime();
+  testSessionClientRoleAssertsOnMissingRuntime();
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
   testSessionApiSmoke();
   testSessionInitSeedsModeAndTimestamps();
   testSessionResetClearsPendingAndPauseFlags();
-  testServerHeartbeatTimeoutStopsSession();
-  testClientHeartbeatUsesConfiguredInterval();
-  testClientHeartbeatTimeoutUsesConfiguredTimeout();
-  testServerHeartbeatTimeoutUsesConfiguredTimeout();
-  testClientHeartbeatRequestAndAckFlow();
-  testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds();
-  testClientRejectsInboundHeartbeatRequest();
   testSessionTunReadQueuesEncryptedTcpFrame();
   testSessionTcpReadQueuesTunWrite();
   testSessionSplitEntrypointsForTunPayloadAndConnEvents();
   testBackpressurePauseAndResumeFlow();
   testSharedTunWriteInterestIsRuntimeOwned();
-  testServerTunOverflowDisablesTunEpollinGlobally();
-  testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark();
-  testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin();
-  testRoleQueueAdaptersDispatchToServerAndClientApis();
-  testRoleInboundAdaptersDispatchToServerAndClientHandlers();
-  testRoleHeartbeatDelegatesToServerAndClientHandlers();
-  testRoleBackpressureDispatchesToServerAndClientServices();
 }
