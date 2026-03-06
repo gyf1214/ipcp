@@ -1,6 +1,5 @@
 #include "sessionInternal.h"
 
-#include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,7 +53,6 @@ static server_t *sessionServer(session_t *session) {
   if (session == NULL || !session->isServer) {
     return NULL;
   }
-  assert(session->runtime != NULL);
   return (server_t *)session->runtime;
 }
 
@@ -62,7 +60,6 @@ static client_t *sessionClient(session_t *session) {
   if (session == NULL || session->isServer) {
     return NULL;
   }
-  assert(session->runtime != NULL);
   return (client_t *)session->runtime;
 }
 
