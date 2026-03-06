@@ -540,13 +540,11 @@ sessionQueueResult_t serverSendMessage(
 sessionQueueResult_t serverHandleInboundMessage(
     server_t *runtime,
     ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
     const unsigned char key[ProtocolPskSize],
     bool *heartbeatPending,
     long long *lastValidInboundMs,
     const protocolMessage_t *msg) {
   long long nowMs;
-  (void)tunPoller;
   (void)heartbeatPending;
 
   if (runtime == NULL || tcpPoller == NULL || key == NULL || lastValidInboundMs == NULL || msg == NULL) {
@@ -585,9 +583,8 @@ bool serverHeartbeatTick(server_t *runtime, long long nowMs, long long lastValid
   return nowMs - lastValidInboundMs < timeoutMs;
 }
 
-bool serverServiceBackpressure(server_t *runtime, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioEvent_t event) {
+bool serverServiceBackpressure(server_t *runtime, ioTcpPoller_t *tcpPoller, ioEvent_t event) {
   long queued;
-  (void)tunPoller;
 
   if (runtime == NULL || tcpPoller == NULL) {
     return false;

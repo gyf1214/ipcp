@@ -23,8 +23,6 @@ void clientResetHeartbeatState(
 
 sessionQueueResult_t clientQueueTcpWithBackpressure(
     client_t *runtime,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
     bool *tunReadPaused,
     long *tcpWritePendingNbytes,
     char tcpWritePendingBuf[ProtocolFrameSize],
@@ -32,8 +30,6 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
     long nbytes);
 sessionQueueResult_t clientQueueTunWithBackpressure(
     client_t *runtime,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
     bool *tcpReadPaused,
     long *tunWritePendingNbytes,
     char tunWritePendingBuf[ProtocolFrameSize],
@@ -41,8 +37,6 @@ sessionQueueResult_t clientQueueTunWithBackpressure(
     long nbytes);
 sessionQueueResult_t clientSendMessage(
     client_t *runtime,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
     bool *tunReadPaused,
     long *tcpWritePendingNbytes,
     char tcpWritePendingBuf[ProtocolFrameSize],
@@ -51,8 +45,6 @@ sessionQueueResult_t clientSendMessage(
     const protocolMessage_t *msg);
 sessionQueueResult_t clientHandleInboundMessage(
     client_t *runtime,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
     bool *tcpReadPaused,
     long *tunWritePendingNbytes,
     char tunWritePendingBuf[ProtocolFrameSize],
@@ -61,8 +53,6 @@ sessionQueueResult_t clientHandleInboundMessage(
     const protocolMessage_t *msg);
 bool clientHeartbeatTick(
     client_t *runtime,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
     long long nowMs,
     bool *tunReadPaused,
     long *tcpWritePendingNbytes,
@@ -70,9 +60,6 @@ bool clientHeartbeatTick(
     const unsigned char key[ProtocolPskSize]);
 bool clientServiceBackpressure(
     client_t *runtime,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
-    ioEvent_t event,
     bool *tunReadPaused,
     bool *tcpReadPaused,
     long *tcpWritePendingNbytes,

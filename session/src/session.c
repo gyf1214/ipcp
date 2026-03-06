@@ -78,7 +78,7 @@ static bool serviceBackpressure(
   if (session->isServer) {
     server_t *runtime = sessionServer(session);
     long queued;
-    if (!serverServiceBackpressure(runtime, tcpPoller, tunPoller, event)) {
+    if (!serverServiceBackpressure(runtime, tcpPoller, event)) {
       return false;
     }
     if (serverHasPendingTunToTcp(runtime)) {
@@ -96,9 +96,6 @@ static bool serviceBackpressure(
   client_t *client = sessionClient(session);
   return clientServiceBackpressure(
       client,
-      tcpPoller,
-      tunPoller,
-      event,
       &session->tunReadPaused,
       &session->tcpReadPaused,
       &session->tcpWritePendingNbytes,
@@ -142,8 +139,6 @@ static bool pipeTun(
     client_t *client = sessionClient(session);
     result = clientSendMessage(
         client,
-        tcpPoller,
-        tunPoller,
         &session->tunReadPaused,
         &session->tcpWritePendingNbytes,
         session->tcpWritePendingBuf,
@@ -195,13 +190,11 @@ static bool pipeTcpBytes(
 
     if (session->isServer) {
       result = serverHandleInboundMessage(
-          sessionServer(session), tcpPoller, tunPoller, key, NULL, &session->lastValidInboundMs, &msg);
+          sessionServer(session), tcpPoller, key, NULL, &session->lastValidInboundMs, &msg);
     } else {
       client_t *client = sessionClient(session);
       result = clientHandleInboundMessage(
           client,
-          tcpPoller,
-          tunPoller,
           &session->tcpReadPaused,
           &session->tunWritePendingNbytes,
           session->tunWritePendingBuf,
@@ -423,8 +416,6 @@ static sessionStepResult_t sessionFinalizeStep(
     client_t *client = sessionClient(session);
     if (!clientHeartbeatTick(
             client,
-            tcpPoller,
-            tunPoller,
             now,
             &session->tunReadPaused,
             &session->tcpWritePendingNbytes,
@@ -472,8 +463,6 @@ sessionStepResult_t sessionHandleTunIngressPayload(
     client_t *client = sessionClient(session);
     result = clientSendMessage(
         client,
-        tcpPoller,
-        tunPoller,
         &session->tunReadPaused,
         &session->tcpWritePendingNbytes,
         session->tcpWritePendingBuf,

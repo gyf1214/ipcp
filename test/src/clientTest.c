@@ -412,8 +412,6 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
       "prefill client tcp queue should succeed");
   result = clientQueueTcpWithBackpressure(
       &runtime,
-      &poller.tcpPoller,
-      &poller.tunPoller,
       &tunReadPaused,
       &tcpWritePendingNbytes,
       tcpWritePendingBuf,
@@ -452,8 +450,6 @@ static void testClientInboundHandlerRoutesDataAndRefreshesTimestamp(void) {
 
   result = clientHandleInboundMessage(
       &runtime,
-      &poller.tcpPoller,
-      &poller.tunPoller,
       &tcpReadPaused,
       &tunWritePendingNbytes,
       tunWritePendingBuf,
@@ -490,8 +486,6 @@ static void testClientHeartbeatTickSetsPendingAndTimestamps(void) {
 
   ok = clientHeartbeatTick(
       &runtime,
-      &poller.tcpPoller,
-      &poller.tunPoller,
       6000,
       &tunReadPaused,
       &tcpWritePendingNbytes,
@@ -531,9 +525,6 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
   testAssertTrue(
       clientServiceBackpressure(
           &runtime,
-          &poller.tcpPoller,
-          &poller.tunPoller,
-          ioEventTimeout,
           &tunReadPaused,
           &tcpReadPaused,
           &tcpWritePendingNbytes,

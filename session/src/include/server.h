@@ -110,13 +110,12 @@ sessionQueueResult_t serverSendMessage(
 sessionQueueResult_t serverHandleInboundMessage(
     server_t *runtime,
     ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
     const unsigned char key[ProtocolPskSize],
     bool *heartbeatPending,
     long long *lastValidInboundMs,
     const protocolMessage_t *msg);
 bool serverHeartbeatTick(server_t *runtime, long long nowMs, long long lastValidInboundMs, long long timeoutMs);
-bool serverServiceBackpressure(server_t *runtime, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioEvent_t event);
+bool serverServiceBackpressure(server_t *runtime, ioTcpPoller_t *tcpPoller, ioEvent_t event);
 
 session_t *serverSessionAt(server_t *runtime, int slot);
 int serverConnFdAt(const server_t *runtime, int slot);

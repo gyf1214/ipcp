@@ -938,7 +938,6 @@ static void testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp(void
   result = serverHandleInboundMessage(
       &runtime,
       &runtime.activeConns[0].tcpPoller,
-      &runtime.tunPoller,
       testKey,
       &heartbeatPending,
       &lastValidInboundMs,
@@ -973,7 +972,6 @@ static void testServerBackpressureServiceSucceedsWithoutPendingBytes(void) {
       serverServiceBackpressure(
           &runtime,
           &runtime.activeConns[0].tcpPoller,
-          &runtime.tunPoller,
           ioEventTimeout),
       "server backpressure service should succeed without pending bytes");
 
