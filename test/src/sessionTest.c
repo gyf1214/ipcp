@@ -427,6 +427,60 @@ static void testBackpressurePauseAndResumeFlow(void) {
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
+static void testSessionRetryOverflowFlushesAndResumesRead(void) {
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  session_t *session;
+  const char payload[] = "retry-overflow";
+
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+
+  memcpy(session->overflowBuf, payload, sizeof(payload) - 1);
+  session->overflowNbytes = (long)sizeof(payload) - 1;
+  session->tcpReadPaused = true;
+
+  testAssertTrue(sessionHasOverflow(session), "session should report pending overflow");
+  testAssertTrue(
+      sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller),
+      "session retry overflow should succeed");
+  testAssertTrue(!sessionHasOverflow(session), "session overflow should clear after retry");
+  testAssertTrue(!session->tcpReadPaused, "tcp read pause should clear after retry");
+
+  sessionDestroy(session);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+}
+
+static void testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated(void) {
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  session_t *session;
+  const char payload[] = "retry-blocked";
+
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+
+  poller.tunPoller.frameCount = IoTunQueueFrameCapacity;
+  poller.tunPoller.queuedBytes = IoPollerQueueCapacity;
+
+  memcpy(session->overflowBuf, payload, sizeof(payload) - 1);
+  session->overflowNbytes = (long)sizeof(payload) - 1;
+  session->tcpReadPaused = true;
+
+  testAssertTrue(
+      sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller),
+      "session retry overflow should stay alive when queue remains saturated");
+  testAssertTrue(sessionHasOverflow(session), "session overflow should remain pending");
+  testAssertTrue(session->tcpReadPaused, "tcp read should remain paused while overflow is pending");
+
+  sessionDestroy(session);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+}
+
 static void testSessionCreateRejectsNullHeartbeatConfig(void) {
   session_t *session = sessionCreate(false, NULL, fakeNow, NULL);
   testAssertTrue(session == NULL, "session create should fail with null heartbeat config");
@@ -515,5 +569,7 @@ void runSessionTests(void) {
   testSessionTcpReadQueuesTunWrite();
   testSessionSplitEntrypointsForTunPayloadAndConnEvents();
   testBackpressurePauseAndResumeFlow();
+  testSessionRetryOverflowFlushesAndResumesRead();
+  testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated();
   testSharedTunWriteInterestIsRuntimeOwned();
 }

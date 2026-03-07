@@ -485,25 +485,24 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
   int tunPair[2];
   int tcpPair[2];
   client_t client;
-  bool tcpReadPaused = false;
-  long overflowNbytes = 0;
-  char overflowBuf[ProtocolFrameSize];
+  session_t *session;
 
-  memset(overflowBuf, 0, sizeof(overflowBuf));
   setupPairs(tunPair, tcpPair);
   testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
+  session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
   memset(&client, 0, sizeof(client));
   client.tunPoller = &poller.tunPoller;
   client.tcpPoller = &poller.tcpPoller;
+  sessionAttachClient(session, &client);
 
   testAssertTrue(
       clientServiceBackpressure(
           &client,
-          &tcpReadPaused,
-          &overflowNbytes,
-          overflowBuf),
+          session),
       "client backpressure service should succeed without pending bytes");
 
+  sessionDestroy(session);
   teardownSplitPollers(&poller);
   close(tunPair[0]);
   close(tunPair[1]);

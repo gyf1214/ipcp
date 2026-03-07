@@ -353,10 +353,10 @@ int serverRetryBlockedTunRoundRobin(server_t *server) {
     if (session == NULL) {
       continue;
     }
-    if (!sessionHasPendingTunEgress(session)) {
+    if (!sessionHasOverflow(session)) {
       continue;
     }
-    if (!sessionServiceBackpressure(session, &server->activeConns[slot].tcpPoller)) {
+    if (!sessionRetryOverflow(session, &server->activeConns[slot].tcpPoller, &server->tunPoller)) {
       return -1;
     }
   }

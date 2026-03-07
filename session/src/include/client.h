@@ -44,9 +44,7 @@ bool clientHeartbeatTick(
     const unsigned char key[ProtocolPskSize]);
 bool clientServiceBackpressure(
     client_t *client,
-    bool *tcpReadPaused,
-    long *overflowNbytes,
-    char overflowBuf[ProtocolFrameSize]);
+    session_t *session);
 
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg);
 int clientReadRawMsg(int fd, protocolRawMsg_t *msg);

@@ -51,8 +51,8 @@ bool sessionPromoteFromPreAuth(
     const protocolDecoder_t *decoder,
     const char *carryBuf,
     long carryNbytes);
-bool sessionHasPendingTunEgress(const session_t *session);
-bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller);
+bool sessionHasOverflow(const session_t *session);
+bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller);
 sessionStepResult_t sessionFinalizeStep(
     session_t *session,
     ioTcpPoller_t *tcpPoller,

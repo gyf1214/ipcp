@@ -61,11 +61,7 @@ static bool serviceBackpressure(
   }
 
   client_t *client = sessionClient(session);
-  return clientServiceBackpressure(
-      client,
-      &session->tcpReadPaused,
-      &session->overflowNbytes,
-      session->overflowBuf);
+  return clientServiceBackpressure(client, session);
 }
 
 static sessionQueueResult_t queueTunWithBackpressure(
@@ -345,18 +341,41 @@ bool sessionPromoteFromPreAuth(
   return true;
 }
 
-bool sessionHasPendingTunEgress(const session_t *session) {
+bool sessionHasOverflow(const session_t *session) {
   if (session == NULL) {
     return false;
   }
   return session->overflowNbytes > 0;
 }
 
-bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller) {
-  if (session == NULL || tcpPoller == NULL) {
+bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller) {
+  long queued;
+  if (session == NULL || tcpPoller == NULL || tunPoller == NULL) {
     return false;
   }
-  return serviceBackpressure(tcpPoller, session, ioEventTimeout);
+  if (session->overflowNbytes > 0) {
+    if (ioTunWrite(tunPoller, session->overflowBuf, session->overflowNbytes)) {
+      session->overflowNbytes = 0;
+    } else {
+      queued = ioTunQueuedBytes(tunPoller);
+      if (queued < 0 || queued + session->overflowNbytes <= IoPollerQueueCapacity) {
+        return false;
+      }
+    }
+  }
+  if (session->tcpReadPaused && session->overflowNbytes == 0) {
+    queued = ioTunQueuedBytes(tunPoller);
+    if (queued < 0) {
+      return false;
+    }
+    if (queued <= IoPollerLowWatermark) {
+      if (!ioTcpSetReadEnabled(tcpPoller, true)) {
+        return false;
+      }
+      session->tcpReadPaused = false;
+    }
+  }
+  return true;
 }
 
 sessionStepResult_t sessionFinalizeStep(
