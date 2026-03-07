@@ -23,26 +23,30 @@ typedef enum {
   sessionQueueResultError,
 } sessionQueueResult_t;
 
-typedef struct {
+struct session_t {
   bool isServer;
+  void *runtime;
+  sessionNowMsFn_t nowFn;
+  void *nowCtx;
+  protocolDecoder_t tcpDecoder;
+  char tcpReadBuf[ProtocolFrameSize];
+  char tcpReadCarryBuf[ProtocolFrameSize];
+  long tcpReadCarryNbytes;
   long long lastValidInboundMs;
-  long long lastDataSentMs;
-  long long lastDataRecvMs;
-  bool heartbeatPending;
-  long long heartbeatSentMs;
-  long long lastHeartbeatReqMs;
+  int heartbeatIntervalMs;
+  int heartbeatTimeoutMs;
   bool tunReadPaused;
   bool tcpReadPaused;
   long tcpWritePendingNbytes;
+  char tcpWritePendingBuf[ProtocolFrameSize];
   long tunWritePendingNbytes;
-  long tcpReadCarryNbytes;
-} sessionStats_t;
+  char tunWritePendingBuf[ProtocolFrameSize];
+};
 
 session_t *sessionCreate(
     bool isServer, const sessionHeartbeatConfig_t *heartbeatCfg, sessionNowMsFn_t nowFn, void *nowCtx);
 void sessionDestroy(session_t *session);
 void sessionReset(session_t *session);
-bool sessionGetStats(const session_t *session, sessionStats_t *outStats);
 void sessionSetServer(session_t *session, struct server_t *runtime);
 void sessionSetClient(session_t *session, struct client_t *runtime);
 bool sessionPromoteFromPreAuth(

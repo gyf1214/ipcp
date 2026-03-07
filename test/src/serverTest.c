@@ -759,7 +759,6 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   char tunPayload[128];
   session_t *session;
   ioTcpPoller_t *poller;
-  sessionStats_t stats;
 
   memset(key, 0x51, sizeof(key));
   memset(fill, 'p', sizeof(fill));
@@ -776,8 +775,7 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   testAssertTrue(
       runSessionStepSplit(session, poller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "session should continue on overflow");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.tcpWritePendingNbytes == 0, "server overflow should retain pending data in runtime, not session");
+  testAssertTrue(session->tcpWritePendingNbytes == 0, "server overflow should retain pending data in runtime, not session");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "runtime should disable tun epollin while pending exists");
 
   teardownServerForSessionTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
@@ -798,7 +796,6 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   session_t *otherSession;
   ioTcpPoller_t *ownerPoller;
   ioTcpPoller_t *otherPoller;
-  sessionStats_t ownerStats;
   long queued;
 
   memset(key, 0x52, sizeof(key));
@@ -819,8 +816,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(
       runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow on owner should continue");
-  testAssertTrue(sessionGetStats(ownerSession, &ownerStats), "sessionGetStats should succeed");
-  testAssertTrue(ownerStats.tcpWritePendingNbytes == 0, "owner session should not keep runtime pending bytes locally");
+  testAssertTrue(ownerSession->tcpWritePendingNbytes == 0, "owner session should not keep runtime pending bytes locally");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while runtime pending exists");
 
   testAssertTrue(

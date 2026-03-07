@@ -9,26 +9,6 @@
 #include "client.h"
 #include "server.h"
 
-struct session_t {
-  bool isServer;
-  void *runtime;
-  sessionNowMsFn_t nowFn;
-  void *nowCtx;
-  protocolDecoder_t tcpDecoder;
-  char tcpReadBuf[ProtocolFrameSize];
-  char tcpReadCarryBuf[ProtocolFrameSize];
-  long tcpReadCarryNbytes;
-  long long lastValidInboundMs;
-  int heartbeatIntervalMs;
-  int heartbeatTimeoutMs;
-  bool tunReadPaused;
-  bool tcpReadPaused;
-  long tcpWritePendingNbytes;
-  char tcpWritePendingBuf[ProtocolFrameSize];
-  long tunWritePendingNbytes;
-  char tunWritePendingBuf[ProtocolFrameSize];
-};
-
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
   (void)ctx;
@@ -312,35 +292,6 @@ void sessionReset(session_t *session) {
   protocolDecoderInit(&session->tcpDecoder);
   session->lastValidInboundMs = now;
   sessionResetClientHeartbeatState(session);
-}
-
-bool sessionGetStats(const session_t *session, sessionStats_t *outStats) {
-  if (session == NULL || outStats == NULL) {
-    return false;
-  }
-
-  memset(outStats, 0, sizeof(*outStats));
-  outStats->isServer = session->isServer;
-  outStats->lastValidInboundMs = session->lastValidInboundMs;
-  outStats->lastDataSentMs = 0;
-  outStats->lastDataRecvMs = 0;
-  outStats->heartbeatPending = false;
-  outStats->heartbeatSentMs = 0;
-  outStats->lastHeartbeatReqMs = 0;
-  if (!session->isServer && session->runtime != NULL) {
-    const client_t *client = (const client_t *)session->runtime;
-    outStats->lastDataSentMs = client->lastDataSentMs;
-    outStats->lastDataRecvMs = client->lastDataRecvMs;
-    outStats->heartbeatPending = client->heartbeatPending;
-    outStats->heartbeatSentMs = client->heartbeatSentMs;
-    outStats->lastHeartbeatReqMs = client->lastHeartbeatReqMs;
-  }
-  outStats->tunReadPaused = session->tunReadPaused;
-  outStats->tcpReadPaused = session->tcpReadPaused;
-  outStats->tcpWritePendingNbytes = session->tcpWritePendingNbytes;
-  outStats->tunWritePendingNbytes = session->tunWritePendingNbytes;
-  outStats->tcpReadCarryNbytes = session->tcpReadCarryNbytes;
-  return true;
 }
 
 void sessionSetServer(session_t *session, server_t *runtime) {

@@ -190,17 +190,13 @@ static void testSessionClientRoleAssertsOnMissingRuntime(void) {
 }
 
 static void testSessionInitSeedsModeAndTimestamps(void) {
-  sessionStats_t stats;
 
   fakeNowMs = 12345;
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(!stats.isServer, "session should keep client mode");
-  testAssertTrue(stats.lastValidInboundMs == fakeNowMs, "lastValidInboundMs should be seeded");
-  testAssertTrue(stats.lastDataSentMs == 0, "client data sent timestamp should be unset before runtime wiring");
-  testAssertTrue(stats.lastDataRecvMs == 0, "client data recv timestamp should be unset before runtime wiring");
-  testAssertTrue(stats.lastHeartbeatReqMs == 0, "client heartbeat request timestamp should be unset before runtime wiring");
+  testAssertTrue(!session->isServer, "session should keep client mode");
+  testAssertTrue(session->lastValidInboundMs == fakeNowMs, "lastValidInboundMs should be seeded");
+  testAssertTrue(session->runtime == NULL, "client runtime should be unset before runtime wiring");
   sessionDestroy(session);
 }
 
@@ -212,7 +208,6 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
   char tunPayload[128];
-  sessionStats_t stats;
 
   memset(key, 0x55, sizeof(key));
   memset(fill, 'f', sizeof(fill));
@@ -231,16 +226,14 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "session should stay alive on overflow backpressure");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
-  testAssertTrue(stats.tunReadPaused, "tun read should be paused under overflow");
+  testAssertTrue(session->tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
+  testAssertTrue(session->tunReadPaused, "tun read should be paused under overflow");
 
   sessionReset(session);
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed after reset");
-  testAssertTrue(stats.tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
-  testAssertTrue(stats.tunWritePendingNbytes == 0, "reset should clear pending tun bytes");
-  testAssertTrue(!stats.tunReadPaused, "reset should clear tun pause");
-  testAssertTrue(!stats.tcpReadPaused, "reset should clear tcp pause");
+  testAssertTrue(session->tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
+  testAssertTrue(session->tunWritePendingNbytes == 0, "reset should clear pending tun bytes");
+  testAssertTrue(!session->tunReadPaused, "reset should clear tun pause");
+  testAssertTrue(!session->tcpReadPaused, "reset should clear tcp pause");
   sessionDestroy(session);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
@@ -402,7 +395,6 @@ static void testBackpressurePauseAndResumeFlow(void) {
   char fill[IoPollerQueueCapacity];
   char tunPayload[64];
   char drain[IoPollerQueueCapacity];
-  sessionStats_t stats;
 
   memset(key, 0x46, sizeof(key));
   memset(fill, 'x', sizeof(fill));
@@ -419,18 +411,16 @@ static void testBackpressurePauseAndResumeFlow(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.tunReadPaused, "tun read should be paused");
-  testAssertTrue(stats.tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
+  testAssertTrue(session->tunReadPaused, "tun read should be paused");
+  testAssertTrue(session->tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
 
   testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
   testAssertTrue(read(tcpPair[1], drain, sizeof(drain)) > 0, "drain should consume queued bytes");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
       "service backpressure should continue");
-  testAssertTrue(sessionGetStats(session, &stats), "sessionGetStats should succeed");
-  testAssertTrue(stats.tcpWritePendingNbytes == 0, "pending tcp payload should flush");
-  testAssertTrue(!stats.tunReadPaused, "tun read should resume when queue drains");
+  testAssertTrue(session->tcpWritePendingNbytes == 0, "pending tcp payload should flush");
+  testAssertTrue(!session->tunReadPaused, "tun read should resume when queue drains");
 
   sessionDestroy(session);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
