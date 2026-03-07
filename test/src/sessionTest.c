@@ -339,10 +339,11 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
   wireServerSession(serverSession, &server, &poller);
 
   testAssertTrue(
-      sessionHandleTunIngressPayload(
-          clientSession, &poller.tcpPoller, &poller.tunPoller, key, payload, (long)sizeof(payload) - 1)
-      == sessionStepContinue,
-      "tun payload entrypoint should queue encrypted tcp frame");
+      write(tunPair[1], payload, sizeof(payload) - 1) == (ssize_t)(sizeof(payload) - 1),
+      "tun peer write should succeed");
+  testAssertTrue(
+      sessionStep(clientSession, &poller.tcpPoller, &poller.tunPoller, ioEventTunRead, key) == sessionStepContinue,
+      "tun read event should queue encrypted tcp frame");
   testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should be available");
   testAssertTrue(ioTcpServiceWriteEvent(&poller.tcpPoller), "tcp write service should flush queued data");
 

@@ -596,6 +596,40 @@ static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
   close(tunPair[1]);
 }
 
+static void testServerQueueWithDropSkipsOverflowWithoutPendingState(void) {
+  server_t server;
+  int tunPair[2];
+  int tcpPair[2];
+  const char payload[] = "drop-me";
+  sessionQueueResult_t result;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
+  testAssertTrue(
+      serverInit(&server, tunPair[0], 78, 1, 1, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
+
+  server.activeConns[0].tcpPoller.outOffset = 0;
+  server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity - 2;
+
+  result = serverQueueTcpWithDrop(
+      &server.activeConns[0].tcpPoller,
+      payload,
+      (long)sizeof(payload) - 1);
+  testAssertTrue(result == sessionQueueResultBlocked, "queue-with-drop should report dropped on overflow");
+  testAssertTrue(
+      server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity - 2,
+      "queue-with-drop should leave queue unchanged when dropping");
+  testAssertTrue(!serverHasPendingTunToTcp(&server), "queue-with-drop should not use shared pending state");
+
+  serverDeinit(&server);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
 static void setupServerForSessionTest(
     server_t *server,
     int maxSessions,
@@ -995,6 +1029,7 @@ void runServerTests(void) {
   testServerFanoutTapBroadcastToAllClients();
   testServerFanoutTunBroadcastsBySubnetPolicy();
   testServerBroadcastFanoutSkipsSaturatedClient();
+  testServerQueueWithDropSkipsOverflowWithoutPendingState();
   testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload();
   testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp();
   testServerHeartbeatTickTimeoutBoundary();

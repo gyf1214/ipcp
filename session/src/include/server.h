@@ -101,6 +101,8 @@ serverPendingRetry_t serverRetryPendingTunToTcp(
 bool serverDropPendingTunToTcpByOwner(server_t *server, int ownerSlot);
 sessionQueueResult_t serverQueueTcpWithBackpressure(
     server_t *server, ioTcpPoller_t *tcpPoller, const void *data, long nbytes);
+sessionQueueResult_t serverQueueTcpWithDrop(
+    ioTcpPoller_t *tcpPoller, const void *data, long nbytes);
 sessionQueueResult_t serverSendMessage(
     server_t *server,
     ioTcpPoller_t *tcpPoller,

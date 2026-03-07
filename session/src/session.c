@@ -359,7 +359,7 @@ bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller) {
   return serviceBackpressure(tcpPoller, session, ioEventTimeout);
 }
 
-static sessionStepResult_t sessionFinalizeStep(
+sessionStepResult_t sessionFinalizeStep(
     session_t *session,
     ioTcpPoller_t *tcpPoller,
     ioEvent_t event,
@@ -390,51 +390,6 @@ static sessionStepResult_t sessionFinalizeStep(
   }
 
   return sessionStepContinue;
-}
-
-sessionStepResult_t sessionHandleTunIngressPayload(
-    session_t *session,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
-    const unsigned char key[ProtocolPskSize],
-    const void *payload,
-    long payloadNbytes) {
-  sessionQueueResult_t result;
-  long long nowMs;
-
-  if (session == NULL
-      || tcpPoller == NULL
-      || tunPoller == NULL
-      || key == NULL
-      || payload == NULL
-      || payloadNbytes <= 0) {
-    return sessionStepStop;
-  }
-
-  nowMs = sessionNowMs(session);
-  if (session->isServer) {
-    protocolMessage_t msg;
-    msg.type = protocolMsgData;
-    msg.nbytes = payloadNbytes;
-    msg.buf = (const char *)payload;
-    result = serverSendMessage(sessionServer(session), tcpPoller, key, &msg);
-  } else {
-    protocolMessage_t msg;
-    msg.type = protocolMsgData;
-    msg.nbytes = payloadNbytes;
-    msg.buf = (const char *)payload;
-    client_t *client = sessionClient(session);
-    result = clientSendMessage(
-        client,
-        key,
-        nowMs,
-        &msg);
-  }
-  if (result == sessionQueueResultError) {
-    return sessionStepStop;
-  }
-
-  return sessionFinalizeStep(session, tcpPoller, ioEventTunRead, key);
 }
 
 sessionStepResult_t sessionHandleConnEvent(

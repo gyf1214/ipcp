@@ -505,6 +505,27 @@ sessionQueueResult_t serverQueueTcpWithBackpressure(
   return sessionQueueResultError;
 }
 
+sessionQueueResult_t serverQueueTcpWithDrop(
+    ioTcpPoller_t *tcpPoller, const void *data, long nbytes) {
+  long used;
+
+  if (tcpPoller == NULL || data == NULL || nbytes <= 0) {
+    return sessionQueueResultError;
+  }
+
+  used = tcpPoller->outOffset + tcpPoller->outNbytes;
+  if (used + nbytes > IoPollerQueueCapacity && tcpPoller->outOffset > 0) {
+    used = tcpPoller->outNbytes;
+  }
+  if (used + nbytes > IoPollerQueueCapacity) {
+    return sessionQueueResultBlocked;
+  }
+  if (ioTcpWrite(tcpPoller, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+  return sessionQueueResultBlocked;
+}
+
 sessionQueueResult_t serverSendMessage(
     server_t *server,
     ioTcpPoller_t *tcpPoller,
@@ -1064,13 +1085,23 @@ static bool serverDispatchTunIngressToSlot(
   session_t *session = serverSessionAt(server, slot);
   int connFd = serverConnFdAt(server, slot);
   const unsigned char *key = serverKeyAt(server, slot);
+  protocolMessage_t msg;
+  sessionQueueResult_t result;
 
-  if (session == NULL || connFd < 0 || key == NULL) {
+  if (session == NULL || connFd < 0 || key == NULL || payload == NULL || payloadNbytes <= 0) {
     return false;
   }
-  if (sessionHandleTunIngressPayload(
-          session, &server->activeConns[slot].tcpPoller, &server->tunPoller, key, payload, payloadNbytes)
-      == sessionStepStop) {
+
+  msg.type = protocolMsgData;
+  msg.nbytes = payloadNbytes;
+  msg.buf = (const char *)payload;
+  result = serverSendMessage(server, &server->activeConns[slot].tcpPoller, key, &msg);
+  if (result == sessionQueueResultError) {
+    (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+    close(connFd);
+    return serverRemoveClient(server, slot);
+  }
+  if (sessionFinalizeStep(session, &server->activeConns[slot].tcpPoller, ioEventTunRead, key) == sessionStepStop) {
     (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
     close(connFd);
     return serverRemoveClient(server, slot);
@@ -1096,30 +1127,6 @@ static bool serverTunDestinationMatchesDirectedBroadcast(
       && memcmp(destination->claim, server->tunSubnet.broadcast, 4) == 0;
 }
 
-static bool serverWouldOverflowClientQueue(
-    const activeConn_t *conn, const void *payload, long payloadNbytes) {
-  protocolMessage_t msg;
-  protocolFrame_t frame;
-  long used;
-
-  if (conn == NULL || payload == NULL || payloadNbytes <= 0) {
-    return true;
-  }
-
-  msg.type = protocolMsgData;
-  msg.nbytes = payloadNbytes;
-  msg.buf = (const char *)payload;
-  if (protocolEncodeSecureMsg(&msg, conn->key, &frame) != protocolStatusOk) {
-    return true;
-  }
-
-  used = conn->tcpPoller.outOffset + conn->tcpPoller.outNbytes;
-  if (used + frame.nbytes > IoPollerQueueCapacity && conn->tcpPoller.outOffset > 0) {
-    used = conn->tcpPoller.outNbytes;
-  }
-  return used + frame.nbytes > IoPollerQueueCapacity;
-}
-
 static bool serverFanoutTunIngressToAll(
     server_t *server, const void *payload, long payloadNbytes) {
   int slot;
@@ -1129,14 +1136,46 @@ static bool serverFanoutTunIngressToAll(
   }
 
   for (slot = 0; slot < server->maxActiveSessions; slot++) {
+    session_t *session;
+    int connFd;
+    const unsigned char *key;
+    protocolMessage_t msg;
+    protocolFrame_t frame;
+    sessionQueueResult_t result;
+
     if (!server->activeConns[slot].active) {
       continue;
     }
-    if (serverWouldOverflowClientQueue(&server->activeConns[slot], payload, payloadNbytes)) {
+    session = serverSessionAt(server, slot);
+    connFd = serverConnFdAt(server, slot);
+    key = serverKeyAt(server, slot);
+    if (session == NULL || connFd < 0 || key == NULL) {
+      return false;
+    }
+
+    msg.type = protocolMsgData;
+    msg.nbytes = payloadNbytes;
+    msg.buf = (const char *)payload;
+    if (protocolEncodeSecureMsg(&msg, key, &frame) != protocolStatusOk) {
+      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+      close(connFd);
+      return serverRemoveClient(server, slot);
+    }
+
+    result = serverQueueTcpWithDrop(&server->activeConns[slot].tcpPoller, frame.buf, frame.nbytes);
+    if (result == sessionQueueResultError) {
+      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+      close(connFd);
+      return serverRemoveClient(server, slot);
+    }
+    if (result == sessionQueueResultBlocked) {
       continue;
     }
-    if (!serverDispatchTunIngressToSlot(server, slot, payload, payloadNbytes)) {
-      return false;
+
+    if (sessionFinalizeStep(session, &server->activeConns[slot].tcpPoller, ioEventTunRead, key) == sessionStepStop) {
+      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+      close(connFd);
+      return serverRemoveClient(server, slot);
     }
   }
 
