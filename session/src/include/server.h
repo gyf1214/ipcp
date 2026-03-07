@@ -62,7 +62,7 @@ struct server_t {
 };
 
 bool serverInit(
-    server_t *runtime,
+    server_t *server,
     int tunFd,
     int listenFd,
     int maxActiveSessions,
@@ -70,64 +70,63 @@ bool serverInit(
     const sessionHeartbeatConfig_t *heartbeatCfg,
     sessionNowMsFn_t nowMsFn,
     void *nowCtx);
-void serverDeinit(server_t *runtime);
+void serverDeinit(server_t *server);
 
 int serverAddClient(
-    server_t *runtime,
+    server_t *server,
     int activeSlot,
     int connFd,
     const unsigned char key[ProtocolPskSize],
     const unsigned char *claim,
     long claimNbytes);
-bool serverRemoveClient(server_t *runtime, int slot);
+bool serverRemoveClient(server_t *server, int slot);
 
-int serverFindSlotByFd(const server_t *runtime, int connFd);
-int serverFindSlotByClaim(const server_t *runtime, const unsigned char *claim, long claimNbytes);
-int serverFindPreAuthSlotByFd(const server_t *runtime, int connFd);
-int serverPickEgressClient(const server_t *runtime);
-int serverClientCount(const server_t *runtime);
-long serverQueuedTunBytes(const server_t *runtime);
-long long serverNowMs(const server_t *runtime);
+int serverFindSlotByFd(const server_t *server, int connFd);
+int serverFindSlotByClaim(const server_t *server, const unsigned char *claim, long claimNbytes);
+int serverFindPreAuthSlotByFd(const server_t *server, int connFd);
+int serverPickEgressClient(const server_t *server);
+int serverClientCount(const server_t *server);
+long serverQueuedTunBytes(const server_t *server);
+long long serverNowMs(const server_t *server);
 
-bool serverSyncTunWriteInterest(server_t *runtime);
-bool serverQueueTunWrite(server_t *runtime, const void *data, long nbytes);
-bool serverServiceTunWriteEvent(server_t *runtime);
-int serverRetryBlockedTunRoundRobin(server_t *runtime);
-bool serverSetTunReadEnabled(server_t *runtime, bool enabled);
-bool serverHasPendingTunToTcp(const server_t *runtime);
-int serverPendingTunToTcpOwner(const server_t *runtime);
-bool serverStorePendingTunToTcp(server_t *runtime, int ownerSlot, const void *data, long nbytes);
+bool serverSyncTunWriteInterest(server_t *server);
+bool serverQueueTunWrite(server_t *server, const void *data, long nbytes);
+bool serverServiceTunWriteEvent(server_t *server);
+int serverRetryBlockedTunRoundRobin(server_t *server);
+bool serverSetTunReadEnabled(server_t *server, bool enabled);
+bool serverHasPendingTunToTcp(const server_t *server);
+int serverPendingTunToTcpOwner(const server_t *server);
+bool serverStorePendingTunToTcp(server_t *server, int ownerSlot, const void *data, long nbytes);
 serverPendingRetry_t serverRetryPendingTunToTcp(
-    server_t *runtime, int ownerSlot, ioTcpPoller_t *ownerPoller);
-bool serverDropPendingTunToTcpByOwner(server_t *runtime, int ownerSlot);
+    server_t *server, int ownerSlot, ioTcpPoller_t *ownerPoller);
+bool serverDropPendingTunToTcpByOwner(server_t *server, int ownerSlot);
 sessionQueueResult_t serverQueueTcpWithBackpressure(
-    server_t *runtime, ioTcpPoller_t *tcpPoller, const void *data, long nbytes);
-sessionQueueResult_t serverQueueTunWithBackpressure(server_t *runtime, const void *data, long nbytes);
+    server_t *server, ioTcpPoller_t *tcpPoller, const void *data, long nbytes);
+sessionQueueResult_t serverQueueTunWithBackpressure(server_t *server, const void *data, long nbytes);
 sessionQueueResult_t serverSendMessage(
-    server_t *runtime,
+    server_t *server,
     ioTcpPoller_t *tcpPoller,
     const unsigned char key[ProtocolPskSize],
     const protocolMessage_t *msg);
 sessionQueueResult_t serverHandleInboundMessage(
-    server_t *runtime,
+    server_t *server,
     ioTcpPoller_t *tcpPoller,
     const unsigned char key[ProtocolPskSize],
-    bool *heartbeatPending,
     long long *lastValidInboundMs,
     const protocolMessage_t *msg);
-bool serverHeartbeatTick(server_t *runtime, long long nowMs, long long lastValidInboundMs, long long timeoutMs);
-bool serverServiceBackpressure(server_t *runtime, ioTcpPoller_t *tcpPoller, ioEvent_t event);
+bool serverHeartbeatTick(long long nowMs, long long lastValidInboundMs, long long timeoutMs);
+bool serverServiceBackpressure(server_t *server, ioTcpPoller_t *tcpPoller, ioEvent_t event);
 
-session_t *serverSessionAt(server_t *runtime, int slot);
-int serverConnFdAt(const server_t *runtime, int slot);
-const unsigned char *serverKeyAt(const server_t *runtime, int slot);
-bool serverHasActiveClaim(const server_t *runtime, const unsigned char *claim, long claimNbytes);
-bool serverRouteTunIngressPacket(server_t *runtime, const char *ifModeLabel, const void *packet, long packetNbytes);
+session_t *serverSessionAt(server_t *server, int slot);
+int serverConnFdAt(const server_t *server, int slot);
+const unsigned char *serverKeyAt(const server_t *server, int slot);
+bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, long claimNbytes);
+bool serverRouteTunIngressPacket(server_t *server, const char *ifModeLabel, const void *packet, long packetNbytes);
 
-int serverCreatePreAuthConn(server_t *runtime, int connFd, long long authDeadlineMs);
-bool serverRemovePreAuthConn(server_t *runtime, int preAuthSlot);
-preAuthConn_t *serverPreAuthAt(server_t *runtime, int preAuthSlot);
-bool serverPromoteToActiveSlot(server_t *runtime, int preAuthSlot);
+int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadlineMs);
+bool serverRemovePreAuthConn(server_t *server, int preAuthSlot);
+preAuthConn_t *serverPreAuthAt(server_t *server, int preAuthSlot);
+bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot);
 
 int serverServeMultiClient(
     int tunFd,

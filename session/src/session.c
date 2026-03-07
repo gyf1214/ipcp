@@ -54,11 +54,10 @@ static void sessionResetClientHeartbeatState(session_t *session) {
 }
 
 static bool serviceBackpressure(
-    ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, ioEvent_t event) {
+    ioTcpPoller_t *tcpPoller, session_t *session, ioEvent_t event) {
   if (session->isServer) {
-    server_t *runtime = sessionServer(session);
-    (void)tunPoller;
-    return serverServiceBackpressure(runtime, tcpPoller, event);
+    server_t *server = sessionServer(session);
+    return serverServiceBackpressure(server, tcpPoller, event);
   }
 
   client_t *client = sessionClient(session);
@@ -152,7 +151,7 @@ static bool pipeTcpBytes(
 
     if (session->isServer) {
       result = serverHandleInboundMessage(
-          sessionServer(session), tcpPoller, key, NULL, &session->lastValidInboundMs, &msg);
+          sessionServer(session), tcpPoller, key, &session->lastValidInboundMs, &msg);
     } else {
       client_t *client = sessionClient(session);
       result = clientHandleInboundMessage(
@@ -276,18 +275,18 @@ void sessionReset(session_t *session) {
   sessionResetClientHeartbeatState(session);
 }
 
-void sessionSetServer(session_t *session, server_t *runtime) {
+void sessionAttachServer(session_t *session, server_t *server) {
   if (session == NULL || !session->isServer) {
     return;
   }
-  session->runtime = runtime;
+  session->runtime = server;
 }
 
-void sessionSetClient(session_t *session, client_t *runtime) {
+void sessionAttachClient(session_t *session, client_t *client) {
   if (session == NULL || session->isServer) {
     return;
   }
-  session->runtime = runtime;
+  session->runtime = client;
   sessionResetClientHeartbeatState(session);
 }
 
@@ -317,30 +316,28 @@ bool sessionHasPendingTunEgress(const session_t *session) {
   return session->tunWritePendingNbytes > 0;
 }
 
-bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller) {
-  if (session == NULL || tcpPoller == NULL || tunPoller == NULL) {
+bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller) {
+  if (session == NULL || tcpPoller == NULL) {
     return false;
   }
-  return serviceBackpressure(tcpPoller, tunPoller, session, ioEventTimeout);
+  return serviceBackpressure(tcpPoller, session, ioEventTimeout);
 }
 
 static sessionStepResult_t sessionFinalizeStep(
     session_t *session,
     ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]) {
   long long now = sessionNowMs(session);
   long long timeoutMs = heartbeatTimeoutMs(session);
 
-  if (!serviceBackpressure(tcpPoller, tunPoller, session, event)) {
+  if (!serviceBackpressure(tcpPoller, session, event)) {
     logf("backpressure handling failure");
     return sessionStepStop;
   }
 
   if (session->isServer) {
-    server_t *runtime = sessionServer(session);
-    bool ok = serverHeartbeatTick(runtime, now, session->lastValidInboundMs, timeoutMs);
+    bool ok = serverHeartbeatTick(now, session->lastValidInboundMs, timeoutMs);
     if (!ok) {
       logf("server heartbeat timeout");
       return sessionStepStop;
@@ -401,7 +398,7 @@ sessionStepResult_t sessionHandleTunIngressPayload(
     return sessionStepStop;
   }
 
-  return sessionFinalizeStep(session, tcpPoller, tunPoller, ioEventTunRead, key);
+  return sessionFinalizeStep(session, tcpPoller, ioEventTunRead, key);
 }
 
 sessionStepResult_t sessionHandleConnEvent(
@@ -419,7 +416,7 @@ sessionStepResult_t sessionHandleConnEvent(
   if (event == ioEventTcpRead && !pipeTcp(tcpPoller, tunPoller, key, session)) {
     return sessionStepStop;
   }
-  return sessionFinalizeStep(session, tcpPoller, tunPoller, event, key);
+  return sessionFinalizeStep(session, tcpPoller, event, key);
 }
 
 sessionStepResult_t sessionStep(
@@ -435,7 +432,7 @@ sessionStepResult_t sessionStep(
     if (!pipeTun(tcpPoller, tunPoller, key, session)) {
       return sessionStepStop;
     }
-    return sessionFinalizeStep(session, tcpPoller, tunPoller, event, key);
+    return sessionFinalizeStep(session, tcpPoller, event, key);
   }
   return sessionHandleConnEvent(session, tcpPoller, tunPoller, event, key);
 }

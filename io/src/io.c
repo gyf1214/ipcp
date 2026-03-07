@@ -322,7 +322,7 @@ static int ioPortValid(int port) {
   return port > 0 && port <= 65535;
 }
 
-static int fillPeerInfo(int connFd, const struct sockaddr_in *clientAddr, char *peerIp, long peerIpSize, int *peerPort) {
+static int fillPeerInfo(const struct sockaddr_in *clientAddr, char *peerIp, long peerIpSize, int *peerPort) {
   if (peerIp != NULL) {
     if (peerIpSize <= 0) {
       return -1;
@@ -334,7 +334,6 @@ static int fillPeerInfo(int connFd, const struct sockaddr_in *clientAddr, char *
   if (peerPort != NULL) {
     *peerPort = (int)ntohs(clientAddr->sin_port);
   }
-  (void)connFd;
   return 0;
 }
 
@@ -376,7 +375,7 @@ int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort) {
     return -1;
   }
 
-  if (fillPeerInfo(connFd, &clientAddr, peerIp, peerIpSize, peerPort) != 0) {
+  if (fillPeerInfo(&clientAddr, peerIp, peerIpSize, peerPort) != 0) {
     close(connFd);
     return -1;
   }
@@ -422,7 +421,7 @@ ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, lo
     return ioStatusError;
   }
 
-  if (fillPeerInfo(connFd, &clientAddr, peerIp, peerIpSize, peerPort) != 0) {
+  if (fillPeerInfo(&clientAddr, peerIp, peerIpSize, peerPort) != 0) {
     close(connFd);
     return ioStatusError;
   }
@@ -481,10 +480,6 @@ int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd) {
   return 0;
 }
 
-void ioTcpPollerClose(ioTcpPoller_t *poller) {
-  (void)poller;
-}
-
 int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd) {
   if (poller == NULL || tunFd < 0 || epollFd < 0) {
     return -1;
@@ -508,10 +503,6 @@ int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd) {
     return -1;
   }
   return 0;
-}
-
-void ioTunPollerClose(ioTunPoller_t *poller) {
-  (void)poller;
 }
 
 bool ioTcpWrite(ioTcpPoller_t *poller, const void *data, long nbytes) {

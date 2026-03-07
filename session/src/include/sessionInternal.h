@@ -44,15 +44,15 @@ session_t *sessionCreate(
     bool isServer, const sessionHeartbeatConfig_t *heartbeatCfg, sessionNowMsFn_t nowFn, void *nowCtx);
 void sessionDestroy(session_t *session);
 void sessionReset(session_t *session);
-void sessionSetServer(session_t *session, struct server_t *runtime);
-void sessionSetClient(session_t *session, struct client_t *runtime);
+void sessionAttachServer(session_t *session, struct server_t *server);
+void sessionAttachClient(session_t *session, struct client_t *client);
 bool sessionPromoteFromPreAuth(
     session_t *session,
     const protocolDecoder_t *decoder,
     const char *carryBuf,
     long carryNbytes);
 bool sessionHasPendingTunEgress(const session_t *session);
-bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller);
+bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller);
 sessionStepResult_t sessionHandleTunIngressPayload(
     session_t *session,
     ioTcpPoller_t *tcpPoller,

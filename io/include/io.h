@@ -69,9 +69,7 @@ ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, lo
 int ioTcpConnect(const char *remoteIP, int port);
 
 int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd);
-void ioTcpPollerClose(ioTcpPoller_t *poller);
 int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd);
-void ioTunPollerClose(ioTunPoller_t *poller);
 bool ioTcpWrite(ioTcpPoller_t *poller, const void *data, long nbytes);
 bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes);
 bool ioTcpServiceWriteEvent(ioTcpPoller_t *poller);

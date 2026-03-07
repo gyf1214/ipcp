@@ -130,21 +130,21 @@ static sessionStepResult_t runSessionStepWithSuppressedStderr(
   return result;
 }
 
-static void wireClientSessionRuntime(session_t *session, splitPollersFixture_t *poller, client_t *runtime) {
-  memset(runtime, 0, sizeof(*runtime));
-  runtime->tunPoller = &poller->tunPoller;
-  runtime->tcpPoller = &poller->tcpPoller;
-  sessionSetClient(session, runtime);
+static void wireClientSession(session_t *session, splitPollersFixture_t *poller, client_t *client) {
+  memset(client, 0, sizeof(*client));
+  client->tunPoller = &poller->tunPoller;
+  client->tcpPoller = &poller->tcpPoller;
+  sessionAttachClient(session, client);
 }
 
-static void wireServerSessionRuntime(session_t *session, server_t *runtime, splitPollersFixture_t *poller) {
-  memset(runtime, 0, sizeof(*runtime));
+static void wireServerSession(session_t *session, server_t *server, splitPollersFixture_t *poller) {
+  memset(server, 0, sizeof(*server));
   testAssertTrue(
-      serverInit(runtime, poller->tunPoller.tunFd, poller->tcpPoller.tcpFd, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
+      serverInit(server, poller->tunPoller.tunFd, poller->tcpPoller.tcpFd, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
       "server runtime init should succeed");
-  runtime->tunPoller.epollFd = poller->tunPoller.epollFd;
-  runtime->tunPoller.events = poller->tunPoller.events;
-  sessionSetServer(session, runtime);
+  server->tunPoller.epollFd = poller->tunPoller.epollFd;
+  server->tunPoller.events = poller->tunPoller.events;
+  sessionAttachServer(session, server);
 }
 
 static void assertSessionStepAbortsWhenRuntimeMissing(bool isServer) {
@@ -203,7 +203,7 @@ static void testSessionInitSeedsModeAndTimestamps(void) {
 static void testSessionResetClearsPendingAndPauseFlags(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
-  client_t clientRuntime;
+  client_t client;
   int tunPair[2];
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
@@ -217,7 +217,7 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
-  wireClientSessionRuntime(session, &poller, &clientRuntime);
+  wireClientSession(session, &poller, &client);
 
   testAssertTrue(
       ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 32),
@@ -226,13 +226,13 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "session should stay alive on overflow backpressure");
-  testAssertTrue(clientRuntime.tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
-  testAssertTrue(clientRuntime.tunReadPaused, "tun read should be paused under overflow");
+  testAssertTrue(client.tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
+  testAssertTrue(client.tunReadPaused, "tun read should be paused under overflow");
 
   sessionReset(session);
-  testAssertTrue(clientRuntime.tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
+  testAssertTrue(client.tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
   testAssertTrue(session->tunWritePendingNbytes == 0, "reset should clear pending tun bytes");
-  testAssertTrue(!clientRuntime.tunReadPaused, "reset should clear tun pause");
+  testAssertTrue(!client.tunReadPaused, "reset should clear tun pause");
   testAssertTrue(!session->tcpReadPaused, "reset should clear tcp pause");
   sessionDestroy(session);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
@@ -241,7 +241,7 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
 static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
-  client_t clientRuntime;
+  client_t client;
   int tunPair[2];
   int tcpPair[2];
   char payload[] = "tun-payload";
@@ -255,7 +255,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
-  wireClientSessionRuntime(session, &poller, &clientRuntime);
+  wireClientSession(session, &poller, &client);
 
   testAssertTrue(write(tunPair[1], payload, strlen(payload)) == (long)strlen(payload), "tun write should succeed");
   testAssertTrue(
@@ -284,7 +284,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
 static void testSessionTcpReadQueuesTunWrite(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
-  server_t serverRuntime;
+  server_t server;
   int tunPair[2];
   int tcpPair[2];
   char wire[ProtocolFrameSize];
@@ -296,14 +296,14 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
-  wireServerSessionRuntime(session, &serverRuntime, &poller);
+  wireServerSession(session, &server, &poller);
 
   wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)strlen(payload), wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
       "tcp read event should continue");
-  testAssertTrue(ioTunServiceWriteEvent(&serverRuntime.tunPoller), "server tun write service should flush payload");
+  testAssertTrue(ioTunServiceWriteEvent(&server.tunPoller), "server tun write service should flush payload");
 
   testAssertTrue(
       recv(tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (long)strlen(payload),
@@ -311,7 +311,7 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   testAssertTrue(memcmp(out, payload, strlen(payload)) == 0, "tun payload should match");
 
   sessionDestroy(session);
-  serverDeinit(&serverRuntime);
+  serverDeinit(&server);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
@@ -323,8 +323,8 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
   const char payload[] = "split-entry";
   session_t *clientSession;
   session_t *serverSession;
-  client_t clientRuntime;
-  server_t serverRuntime;
+  client_t client;
+  server_t server;
   protocolDecoder_t decoder;
   protocolMessage_t decodedMsg;
   long consumed = 0;
@@ -335,8 +335,8 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
   clientSession = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   serverSession = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(clientSession != NULL && serverSession != NULL, "sessions should be created");
-  wireClientSessionRuntime(clientSession, &poller, &clientRuntime);
-  wireServerSessionRuntime(serverSession, &serverRuntime, &poller);
+  wireClientSession(clientSession, &poller, &client);
+  wireServerSession(serverSession, &server, &poller);
 
   testAssertTrue(
       sessionHandleTunIngressPayload(
@@ -372,7 +372,7 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
       sessionHandleConnEvent(serverSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key)
       == sessionStepContinue,
       "conn event entrypoint should process tcp read");
-  testAssertTrue(ioTunServiceWriteEvent(&serverRuntime.tunPoller), "tun write service should flush queued frame");
+  testAssertTrue(ioTunServiceWriteEvent(&server.tunPoller), "tun write service should flush queued frame");
   {
     char received[128];
     ssize_t nread = recv(tunPair[1], received, sizeof(received), MSG_DONTWAIT);
@@ -382,14 +382,14 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
 
   sessionDestroy(serverSession);
   sessionDestroy(clientSession);
-  serverDeinit(&serverRuntime);
+  serverDeinit(&server);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
 static void testBackpressurePauseAndResumeFlow(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
-  client_t clientRuntime;
+  client_t client;
   int tunPair[2];
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
@@ -402,7 +402,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
-  wireClientSessionRuntime(session, &poller, &clientRuntime);
+  wireClientSession(session, &poller, &client);
 
   testAssertTrue(
       ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 16),
@@ -411,16 +411,16 @@ static void testBackpressurePauseAndResumeFlow(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
-  testAssertTrue(clientRuntime.tunReadPaused, "tun read should be paused");
-  testAssertTrue(clientRuntime.tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
+  testAssertTrue(client.tunReadPaused, "tun read should be paused");
+  testAssertTrue(client.tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
 
   testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
   testAssertTrue(read(tcpPair[1], drain, sizeof(drain)) > 0, "drain should consume queued bytes");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
       "service backpressure should continue");
-  testAssertTrue(clientRuntime.tcpWritePendingNbytes == 0, "pending tcp payload should flush");
-  testAssertTrue(!clientRuntime.tunReadPaused, "tun read should resume when queue drains");
+  testAssertTrue(client.tcpWritePendingNbytes == 0, "pending tcp payload should flush");
+  testAssertTrue(!client.tunReadPaused, "tun read should resume when queue drains");
 
   sessionDestroy(session);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
@@ -447,7 +447,7 @@ static void testSessionCreateRejectsInvalidHeartbeatConfig(void) {
 }
 
 static void testSharedTunWriteInterestIsRuntimeOwned(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int epollFd;
   int tcpPairA[2];
@@ -459,41 +459,41 @@ static void testSharedTunWriteInterestIsRuntimeOwned(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp pair A should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
   testAssertTrue(
-      serverInit(&runtime, tunPair[0], 70, 2, 2, &defaultHeartbeatCfg, NULL, NULL),
+      serverInit(&server, tunPair[0], 70, 2, 2, &defaultHeartbeatCfg, NULL, NULL),
       "runtime init should succeed");
 
   epollFd = epoll_create1(0);
   testAssertTrue(epollFd >= 0, "epoll_create1 should succeed");
-  runtime.epollFd = epollFd;
+  server.epollFd = epollFd;
   testAssertTrue(
       epoll_ctl(
           epollFd,
           EPOLL_CTL_ADD,
-          runtime.tunPoller.tunFd,
-          &(struct epoll_event){.events = runtime.tunPoller.events, .data.fd = runtime.tunPoller.tunFd})
+          server.tunPoller.tunFd,
+          &(struct epoll_event){.events = server.tunPoller.events, .data.fd = server.tunPoller.tunFd})
           == 0,
       "add tun fd should succeed");
-  testAssertTrue(serverSyncTunWriteInterest(&runtime), "initial tun interest sync should succeed");
+  testAssertTrue(serverSyncTunWriteInterest(&server), "initial tun interest sync should succeed");
 
   testAssertTrue(
-      serverAddClient(&runtime, 0, tcpPairA[0], testServerKey, testClaim2, sizeof(testClaim2)) == 0,
+      serverAddClient(&server, 0, tcpPairA[0], testServerKey, testClaim2, sizeof(testClaim2)) == 0,
       "first client should be added");
   testAssertTrue(
-      serverAddClient(&runtime, 1, tcpPairB[0], testServerKey, testClaim3, sizeof(testClaim3)) == 1,
+      serverAddClient(&server, 1, tcpPairB[0], testServerKey, testClaim3, sizeof(testClaim3)) == 1,
       "second client should be added");
 
-  testAssertTrue(serverQueueTunWrite(&runtime, payloadA, (long)strlen(payloadA)), "queue payload A should succeed");
-  testAssertTrue(serverQueueTunWrite(&runtime, payloadB, (long)strlen(payloadB)), "queue payload B should succeed");
-  testAssertTrue((runtime.tunPoller.events & EPOLLOUT) != 0, "runtime should enable tun epollout with pending shared queue");
-  testAssertTrue(serverSyncTunWriteInterest(&runtime), "sync should keep epollout while queue has pending bytes");
-  testAssertTrue((runtime.tunPoller.events & EPOLLOUT) != 0, "runtime should keep epollout until shared queue drains");
+  testAssertTrue(serverQueueTunWrite(&server, payloadA, (long)strlen(payloadA)), "queue payload A should succeed");
+  testAssertTrue(serverQueueTunWrite(&server, payloadB, (long)strlen(payloadB)), "queue payload B should succeed");
+  testAssertTrue((server.tunPoller.events & EPOLLOUT) != 0, "runtime should enable tun epollout with pending shared queue");
+  testAssertTrue(serverSyncTunWriteInterest(&server), "sync should keep epollout while queue has pending bytes");
+  testAssertTrue((server.tunPoller.events & EPOLLOUT) != 0, "runtime should keep epollout until shared queue drains");
 
-  testAssertTrue(serverServiceTunWriteEvent(&runtime), "shared tun write event should flush queued frames");
-  testAssertTrue(serverSyncTunWriteInterest(&runtime), "sync should disable epollout after queue drains");
-  testAssertTrue((runtime.tunPoller.events & EPOLLOUT) == 0, "runtime should disable epollout when shared queue drains");
+  testAssertTrue(serverServiceTunWriteEvent(&server), "shared tun write event should flush queued frames");
+  testAssertTrue(serverSyncTunWriteInterest(&server), "sync should disable epollout after queue drains");
+  testAssertTrue((server.tunPoller.events & EPOLLOUT) == 0, "runtime should disable epollout when shared queue drains");
 
   close(epollFd);
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPairA[0]);

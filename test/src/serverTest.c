@@ -96,14 +96,14 @@ static sessionStepResult_t runSessionStepWithSuppressedStderr(
   return result;
 }
 
-static void wireServerSessionRuntime(session_t *session, server_t *runtime, splitPollersFixture_t *poller) {
-  memset(runtime, 0, sizeof(*runtime));
+static void wireServerSession(session_t *session, server_t *server, splitPollersFixture_t *poller) {
+  memset(server, 0, sizeof(*server));
   testAssertTrue(
-      serverInit(runtime, poller->tunPoller.tunFd, poller->tcpPoller.tcpFd, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server runtime init should succeed");
-  runtime->tunPoller.epollFd = poller->tunPoller.epollFd;
-  runtime->tunPoller.events = poller->tunPoller.events;
-  sessionSetServer(session, runtime);
+      serverInit(server, poller->tunPoller.tunFd, poller->tcpPoller.tcpFd, 1, 1, &testHeartbeatCfg, NULL, NULL),
+      "server server init should succeed");
+  server->tunPoller.epollFd = poller->tunPoller.epollFd;
+  server->tunPoller.events = poller->tunPoller.events;
+  sessionAttachServer(session, server);
 }
 
 static int fakeLookup(
@@ -123,124 +123,124 @@ static int fakeLookup(
 static void testServerServeMultiClientRejectsInvalidArgs(void) {
   testAssertTrue(
       serverServeMultiClient(-1, -1, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
-      "server runtime should reject invalid fds");
+      "server server should reject invalid fds");
   testAssertTrue(
       serverServeMultiClient(1, 2, NULL, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
-      "server runtime should reject null lookup callback");
+      "server server should reject null lookup callback");
   testAssertTrue(
       serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, NULL, 2, 2) < 0,
-      "server runtime should reject null heartbeat config");
+      "server server should reject null heartbeat config");
   testAssertTrue(
       serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 0, 2) < 0,
-      "server runtime should reject non-positive max session count");
+      "server server should reject non-positive max session count");
   testAssertTrue(
       serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 0) < 0,
-      "server runtime should reject non-positive max pre-auth session count");
+      "server server should reject non-positive max pre-auth session count");
 }
 
 static void testServerAddRemoveAndReuseSlots(void) {
-  server_t runtime;
+  server_t server;
   int slot0;
   int slot1;
   int reusedSlot;
 
   testAssertTrue(
-      serverInit(&runtime, 10, 11, 2, 2, &testHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
+      serverInit(&server, 10, 11, 2, 2, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
 
-  slot0 = serverAddClient(&runtime, 0, 100, testKey, claim2, sizeof(claim2));
-  slot1 = serverAddClient(&runtime, 1, 101, testKey, claim3, sizeof(claim3));
+  slot0 = serverAddClient(&server, 0, 100, testKey, claim2, sizeof(claim2));
+  slot1 = serverAddClient(&server, 1, 101, testKey, claim3, sizeof(claim3));
   testAssertTrue(slot0 == 0, "first client should use slot 0");
   testAssertTrue(slot1 == 1, "second client should use slot 1");
-  testAssertTrue(serverClientCount(&runtime) == 2, "client count should track active clients");
+  testAssertTrue(serverClientCount(&server) == 2, "client count should track active clients");
 
-  testAssertTrue(serverRemoveClient(&runtime, slot0), "remove should succeed for active slot");
-  testAssertTrue(serverClientCount(&runtime) == 1, "client count should decrement after remove");
+  testAssertTrue(serverRemoveClient(&server, slot0), "remove should succeed for active slot");
+  testAssertTrue(serverClientCount(&server) == 1, "client count should decrement after remove");
 
-  reusedSlot = serverAddClient(&runtime, 0, 102, testKey, claim4, sizeof(claim4));
-  testAssertTrue(reusedSlot == 0, "runtime should reuse first free slot");
-  testAssertTrue(serverClientCount(&runtime) == 2, "client count should return to cap");
+  reusedSlot = serverAddClient(&server, 0, 102, testKey, claim4, sizeof(claim4));
+  testAssertTrue(reusedSlot == 0, "server should reuse first free slot");
+  testAssertTrue(serverClientCount(&server) == 2, "client count should return to cap");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
 }
 
 static void testServerRejectsBeyondMaxSessions(void) {
-  server_t runtime;
+  server_t server;
 
   testAssertTrue(
-      serverInit(&runtime, 20, 21, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
+      serverInit(&server, 20, 21, 1, 1, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
   testAssertTrue(
-      serverAddClient(&runtime, 0, 200, testKey, claim2, sizeof(claim2)) == 0,
+      serverAddClient(&server, 0, 200, testKey, claim2, sizeof(claim2)) == 0,
       "first slot should be accepted");
   testAssertTrue(
-      serverAddClient(&runtime, 0, 201, testKey, claim3, sizeof(claim3)) < 0,
-      "runtime should reject client when max reached");
+      serverAddClient(&server, 0, 201, testKey, claim3, sizeof(claim3)) < 0,
+      "server should reject client when max reached");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
 }
 
 static void testServerFindSlotByFdAndPickEgress(void) {
-  server_t runtime;
+  server_t server;
   int slot0;
   int slot1;
 
   testAssertTrue(
-      serverInit(&runtime, 30, 31, 3, 3, &testHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
-  slot0 = serverAddClient(&runtime, 0, 300, testKey, claim2, sizeof(claim2));
-  slot1 = serverAddClient(&runtime, 1, 301, testKey, claim3, sizeof(claim3));
-  testAssertTrue(slot0 == 0 && slot1 == 1, "runtime should allocate first two slots");
+      serverInit(&server, 30, 31, 3, 3, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
+  slot0 = serverAddClient(&server, 0, 300, testKey, claim2, sizeof(claim2));
+  slot1 = serverAddClient(&server, 1, 301, testKey, claim3, sizeof(claim3));
+  testAssertTrue(slot0 == 0 && slot1 == 1, "server should allocate first two slots");
 
-  testAssertTrue(serverFindSlotByFd(&runtime, 300) == slot0, "fd should map to slot 0");
-  testAssertTrue(serverFindSlotByFd(&runtime, 301) == slot1, "fd should map to slot 1");
-  testAssertTrue(serverFindSlotByFd(&runtime, 999) < 0, "unknown fd should not map to slot");
+  testAssertTrue(serverFindSlotByFd(&server, 300) == slot0, "fd should map to slot 0");
+  testAssertTrue(serverFindSlotByFd(&server, 301) == slot1, "fd should map to slot 1");
+  testAssertTrue(serverFindSlotByFd(&server, 999) < 0, "unknown fd should not map to slot");
 
-  testAssertTrue(serverPickEgressClient(&runtime) == 300, "egress pick should choose first active client");
+  testAssertTrue(serverPickEgressClient(&server) == 300, "egress pick should choose first active client");
 
-  testAssertTrue(serverRemoveClient(&runtime, slot0), "slot 0 removal should succeed");
-  testAssertTrue(serverPickEgressClient(&runtime) == 301, "egress pick should move to next active client");
+  testAssertTrue(serverRemoveClient(&server, slot0), "slot 0 removal should succeed");
+  testAssertTrue(serverPickEgressClient(&server) == 301, "egress pick should move to next active client");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
 }
 
 static void testServerFindSlotByClaim(void) {
-  server_t runtime;
+  server_t server;
   int slot0;
   int slot1;
   unsigned char mismatchLenClaim[] = {10, 0, 0};
   unsigned char unknownClaim[] = {10, 0, 0, 99};
 
   testAssertTrue(
-      serverInit(&runtime, 35, 36, 3, 3, &testHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
-  slot0 = serverAddClient(&runtime, 0, 350, testKey, claim2, sizeof(claim2));
-  slot1 = serverAddClient(&runtime, 1, 351, testKey, claim3, sizeof(claim3));
-  testAssertTrue(slot0 == 0 && slot1 == 1, "runtime should allocate slots for claim tests");
+      serverInit(&server, 35, 36, 3, 3, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
+  slot0 = serverAddClient(&server, 0, 350, testKey, claim2, sizeof(claim2));
+  slot1 = serverAddClient(&server, 1, 351, testKey, claim3, sizeof(claim3));
+  testAssertTrue(slot0 == 0 && slot1 == 1, "server should allocate slots for claim tests");
 
   testAssertTrue(
-      serverFindSlotByClaim(&runtime, claim2, sizeof(claim2)) == slot0,
+      serverFindSlotByClaim(&server, claim2, sizeof(claim2)) == slot0,
       "claim lookup should return exact matching slot");
   testAssertTrue(
-      serverFindSlotByClaim(&runtime, claim3, sizeof(claim3)) == slot1,
+      serverFindSlotByClaim(&server, claim3, sizeof(claim3)) == slot1,
       "claim lookup should return second matching slot");
   testAssertTrue(
-      serverFindSlotByClaim(&runtime, unknownClaim, sizeof(unknownClaim)) < 0,
+      serverFindSlotByClaim(&server, unknownClaim, sizeof(unknownClaim)) < 0,
       "unknown claim should not match");
   testAssertTrue(
-      serverFindSlotByClaim(&runtime, mismatchLenClaim, sizeof(mismatchLenClaim)) < 0,
+      serverFindSlotByClaim(&server, mismatchLenClaim, sizeof(mismatchLenClaim)) < 0,
       "claim length mismatch should not match");
 
-  testAssertTrue(serverRemoveClient(&runtime, slot0), "remove slot 0 should succeed");
+  testAssertTrue(serverRemoveClient(&server, slot0), "remove slot 0 should succeed");
   testAssertTrue(
-      serverFindSlotByClaim(&runtime, claim2, sizeof(claim2)) < 0,
+      serverFindSlotByClaim(&server, claim2, sizeof(claim2)) < 0,
       "inactive slot should be ignored for claim lookup");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
 }
 
 static void testServerSharedTunInterestTracksGlobalQueue(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int epollFd;
   char payloadA[16];
@@ -250,68 +250,68 @@ static void testServerSharedTunInterestTracksGlobalQueue(void) {
   memset(payloadB, 'b', sizeof(payloadB));
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(
-      serverInit(&runtime, tunPair[0], 40, 2, 2, &testHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
+      serverInit(&server, tunPair[0], 40, 2, 2, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
 
   epollFd = epoll_create1(0);
   testAssertTrue(epollFd >= 0, "epoll_create1 should succeed");
-  runtime.epollFd = epollFd;
+  server.epollFd = epollFd;
   testAssertTrue(
       epoll_ctl(
           epollFd,
           EPOLL_CTL_ADD,
-          runtime.tunPoller.tunFd,
-          &(struct epoll_event){.events = runtime.tunPoller.events, .data.fd = runtime.tunPoller.tunFd})
+          server.tunPoller.tunFd,
+          &(struct epoll_event){.events = server.tunPoller.events, .data.fd = server.tunPoller.tunFd})
       == 0,
       "add tun fd should succeed");
 
-  testAssertTrue(serverQueueTunWrite(&runtime, payloadA, sizeof(payloadA)), "first shared tun queue write should succeed");
-  testAssertTrue(serverQueueTunWrite(&runtime, payloadB, sizeof(payloadB)), "second shared tun queue write should succeed");
+  testAssertTrue(serverQueueTunWrite(&server, payloadA, sizeof(payloadA)), "first shared tun queue write should succeed");
+  testAssertTrue(serverQueueTunWrite(&server, payloadB, sizeof(payloadB)), "second shared tun queue write should succeed");
   testAssertTrue(
-      (runtime.tunPoller.events & EPOLLOUT) != 0, "shared tun epollout should stay enabled while queue has bytes");
-  testAssertTrue(serverSyncTunWriteInterest(&runtime), "sync should keep epollout enabled while queue is not empty");
+      (server.tunPoller.events & EPOLLOUT) != 0, "shared tun epollout should stay enabled while queue has bytes");
+  testAssertTrue(serverSyncTunWriteInterest(&server), "sync should keep epollout enabled while queue is not empty");
   testAssertTrue(
-      (runtime.tunPoller.events & EPOLLOUT) != 0, "sync should preserve epollout while backlog remains");
+      (server.tunPoller.events & EPOLLOUT) != 0, "sync should preserve epollout while backlog remains");
 
-  testAssertTrue(serverServiceTunWriteEvent(&runtime), "shared tun write event should flush queued frames");
-  testAssertTrue(serverSyncTunWriteInterest(&runtime), "sync should disable epollout when queue drains");
-  testAssertTrue((runtime.tunPoller.events & EPOLLOUT) == 0, "shared tun epollout should disable after global queue drains");
+  testAssertTrue(serverServiceTunWriteEvent(&server), "shared tun write event should flush queued frames");
+  testAssertTrue(serverSyncTunWriteInterest(&server), "sync should disable epollout when queue drains");
+  testAssertTrue((server.tunPoller.events & EPOLLOUT) == 0, "shared tun epollout should disable after global queue drains");
 
   close(epollFd);
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tunPair[0]);
   close(tunPair[1]);
 }
 
 static void testServerRoundRobinRetryCursorRotates(void) {
-  server_t runtime;
+  server_t server;
 
   testAssertTrue(
-      serverInit(&runtime, 50, 51, 4, 4, &testHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
-  testAssertTrue(runtime.retryCursor == 0, "retry cursor should start at zero");
+      serverInit(&server, 50, 51, 4, 4, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
+  testAssertTrue(server.retryCursor == 0, "retry cursor should start at zero");
   testAssertTrue(
-      serverAddClient(&runtime, 0, 500, testKey, claim2, sizeof(claim2)) == 0,
+      serverAddClient(&server, 0, 500, testKey, claim2, sizeof(claim2)) == 0,
       "first client should be added");
   testAssertTrue(
-      serverAddClient(&runtime, 1, 501, testKey, claim3, sizeof(claim3)) == 1,
+      serverAddClient(&server, 1, 501, testKey, claim3, sizeof(claim3)) == 1,
       "second client should be added");
   testAssertTrue(
-      serverAddClient(&runtime, 2, 502, testKey, claim4, sizeof(claim4)) == 2,
+      serverAddClient(&server, 2, 502, testKey, claim4, sizeof(claim4)) == 2,
       "third client should be added");
 
-  runtime.retryCursor = 1;
-  testAssertTrue(serverRetryBlockedTunRoundRobin(&runtime) == 2, "retry pass should advance cursor to next slot");
-  testAssertTrue(runtime.retryCursor == 2, "retry cursor should rotate after retry pass");
+  server.retryCursor = 1;
+  testAssertTrue(serverRetryBlockedTunRoundRobin(&server) == 2, "retry pass should advance cursor to next slot");
+  testAssertTrue(server.retryCursor == 2, "retry cursor should rotate after retry pass");
 
-  testAssertTrue(serverRetryBlockedTunRoundRobin(&runtime) == 0, "retry pass should wrap cursor");
-  testAssertTrue(runtime.retryCursor == 0, "retry cursor should wrap to zero");
+  testAssertTrue(serverRetryBlockedTunRoundRobin(&server) == 0, "retry pass should wrap cursor");
+  testAssertTrue(server.retryCursor == 0, "retry cursor should wrap to zero");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
 }
 
 static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPair[2];
   unsigned char payload[] = "pending-owner-payload";
@@ -319,35 +319,35 @@ static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(serverInit(&runtime, tunPair[0], 52, 1, 1, &testHeartbeatCfg, NULL, NULL), "runtime init should succeed");
-  testAssertTrue(serverAddClient(&runtime, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "slot should be added");
+  testAssertTrue(serverInit(&server, tunPair[0], 52, 1, 1, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "slot should be added");
 
-  runtime.activeConns[0].tcpPoller.outOffset = 0;
-  runtime.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
+  server.activeConns[0].tcpPoller.outOffset = 0;
+  server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
 
   testAssertTrue(
-      serverStorePendingTunToTcp(&runtime, 0, payload, (long)sizeof(payload)),
+      serverStorePendingTunToTcp(&server, 0, payload, (long)sizeof(payload)),
       "storing pending tun-to-tcp payload should succeed");
-  testAssertTrue(serverHasPendingTunToTcp(&runtime), "runtime should report pending tun-to-tcp payload");
-  testAssertTrue(serverPendingTunToTcpOwner(&runtime) == 0, "runtime should record pending owner slot");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "runtime should disable tun epollin while pending is active");
+  testAssertTrue(serverHasPendingTunToTcp(&server), "server should report pending tun-to-tcp payload");
+  testAssertTrue(serverPendingTunToTcpOwner(&server) == 0, "server should record pending owner slot");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "server should disable tun epollin while pending is active");
 
-  retry = serverRetryPendingTunToTcp(&runtime, 1, &runtime.activeConns[0].tcpPoller);
+  retry = serverRetryPendingTunToTcp(&server, 1, &server.activeConns[0].tcpPoller);
   testAssertTrue(retry == serverPendingRetryBlocked, "non-owner retry should be blocked");
-  testAssertTrue(serverHasPendingTunToTcp(&runtime), "non-owner retry should not consume pending payload");
+  testAssertTrue(serverHasPendingTunToTcp(&server), "non-owner retry should not consume pending payload");
 
-  runtime.activeConns[0].tcpPoller.outOffset = 0;
-  runtime.activeConns[0].tcpPoller.outNbytes = 0;
-  retry = serverRetryPendingTunToTcp(&runtime, 0, &runtime.activeConns[0].tcpPoller);
+  server.activeConns[0].tcpPoller.outOffset = 0;
+  server.activeConns[0].tcpPoller.outNbytes = 0;
+  retry = serverRetryPendingTunToTcp(&server, 0, &server.activeConns[0].tcpPoller);
   testAssertTrue(retry == serverPendingRetryQueued, "owner retry should queue pending payload");
-  testAssertTrue(!serverHasPendingTunToTcp(&runtime), "owner retry should clear pending payload");
+  testAssertTrue(!serverHasPendingTunToTcp(&server), "owner retry should clear pending payload");
 
   testAssertTrue(
-      serverSetTunReadEnabled(&runtime, true),
+      serverSetTunReadEnabled(&server, true),
       "read interest should be re-enabled after pending payload clears");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) != 0, "runtime should enable tun epollin when requested");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) != 0, "server should enable tun epollin when requested");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tcpPair[0]);
   close(tcpPair[1]);
   close(tunPair[0]);
@@ -355,7 +355,7 @@ static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
 }
 
 static void testServerRoutesTunIngressByClaimMatch(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2];
@@ -369,25 +369,25 @@ static void testServerRoutesTunIngressByClaimMatch(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
-  testAssertTrue(serverInit(&runtime, tunPair[0], 60, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(serverInit(&server, tunPair[0], 60, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
   testAssertTrue(
-      serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
+      serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
       "slot A should be added");
   testAssertTrue(
-      serverAddClient(&runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1,
+      serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1,
       "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&runtime, "tun", payload, sizeof(payload)),
+      serverRouteTunIngressPacket(&server, "tun", payload, sizeof(payload)),
       "tun ingress routing should succeed for matching claim");
   testAssertTrue(
-      runtime.activeConns[0].tcpPoller.outNbytes == 0,
+      server.activeConns[0].tcpPoller.outNbytes == 0,
       "non-matching client should have no queued tcp bytes");
   testAssertTrue(
-      runtime.activeConns[1].tcpPoller.outNbytes > 0,
+      server.activeConns[1].tcpPoller.outNbytes > 0,
       "matching client should have queued encrypted frame bytes");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tcpPairA[0]);
   close(tcpPairA[1]);
   close(tcpPairB[0]);
@@ -397,7 +397,7 @@ static void testServerRoutesTunIngressByClaimMatch(void) {
 }
 
 static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPairA[2];
   unsigned char unmatched[] = {
@@ -417,17 +417,17 @@ static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(v
   unsigned char malformed[] = {0x45, 0x00, 0x00, 0x14};
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp socketpair should be created");
-  testAssertTrue(serverInit(&runtime, tunPair[0], 61, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(serverInit(&server, tunPair[0], 61, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
   testAssertTrue(
-      serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
+      serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
       "slot A should be added");
 
-  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", unmatched, sizeof(unmatched)), "unmatched route should not fail");
-  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
-  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", malformed, sizeof(malformed)), "malformed drop should not fail");
-  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue to any client");
+  testAssertTrue(serverRouteTunIngressPacket(&server, "tun", unmatched, sizeof(unmatched)), "unmatched route should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&server, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&server, "tun", malformed, sizeof(malformed)), "malformed drop should not fail");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue to any client");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tcpPairA[0]);
   close(tcpPairA[1]);
   close(tunPair[0]);
@@ -435,7 +435,7 @@ static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(v
 }
 
 static void testServerFanoutTapBroadcastToAllClients(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2];
@@ -448,17 +448,17 @@ static void testServerFanoutTapBroadcastToAllClients(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
-  testAssertTrue(serverInit(&runtime, tunPair[0], 62, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  testAssertTrue(serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
-  testAssertTrue(serverAddClient(&runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+  testAssertTrue(serverInit(&server, tunPair[0], 62, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
+  testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&runtime, "tap", tapBroadcast, sizeof(tapBroadcast)),
+      serverRouteTunIngressPacket(&server, "tap", tapBroadcast, sizeof(tapBroadcast)),
       "tap broadcast fanout should not fail");
-  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive tap broadcast");
-  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive tap broadcast");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive tap broadcast");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive tap broadcast");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tcpPairA[0]);
   close(tcpPairA[1]);
   close(tcpPairB[0]);
@@ -468,7 +468,7 @@ static void testServerFanoutTapBroadcastToAllClients(void) {
 }
 
 static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2];
@@ -504,43 +504,43 @@ static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
-  testAssertTrue(serverInit(&runtime, tunPair[0], 63, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  runtime.tunSubnet.enabled = true;
-  runtime.tunSubnet.prefix = 24;
-  runtime.tunSubnet.broadcast[0] = 10;
-  runtime.tunSubnet.broadcast[1] = 250;
-  runtime.tunSubnet.broadcast[2] = 0;
-  runtime.tunSubnet.broadcast[3] = 255;
-  testAssertTrue(serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
-  testAssertTrue(serverAddClient(&runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+  testAssertTrue(serverInit(&server, tunPair[0], 63, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  server.tunSubnet.enabled = true;
+  server.tunSubnet.prefix = 24;
+  server.tunSubnet.broadcast[0] = 10;
+  server.tunSubnet.broadcast[1] = 250;
+  server.tunSubnet.broadcast[2] = 0;
+  server.tunSubnet.broadcast[3] = 255;
+  testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
+  testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&runtime, "tun", directedBroadcast, sizeof(directedBroadcast)),
+      serverRouteTunIngressPacket(&server, "tun", directedBroadcast, sizeof(directedBroadcast)),
       "directed broadcast fanout should not fail");
-  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive directed broadcast");
-  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive directed broadcast");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive directed broadcast");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive directed broadcast");
 
-  runtime.activeConns[0].tcpPoller.outNbytes = 0;
-  runtime.activeConns[1].tcpPoller.outNbytes = 0;
+  server.activeConns[0].tcpPoller.outNbytes = 0;
+  server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTunIngressPacket(&runtime, "tun", limitedBroadcast, sizeof(limitedBroadcast)),
+      serverRouteTunIngressPacket(&server, "tun", limitedBroadcast, sizeof(limitedBroadcast)),
       "limited broadcast fanout should not fail");
-  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive limited broadcast");
-  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive limited broadcast");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive limited broadcast");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive limited broadcast");
 
-  runtime.activeConns[0].tcpPoller.outNbytes = 0;
-  runtime.activeConns[1].tcpPoller.outNbytes = 0;
+  server.activeConns[0].tcpPoller.outNbytes = 0;
+  server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTunIngressPacket(&runtime, "tun", nonMatchingDirected, sizeof(nonMatchingDirected)),
+      serverRouteTunIngressPacket(&server, "tun", nonMatchingDirected, sizeof(nonMatchingDirected)),
       "non-matching directed broadcast should not fail");
-  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
-  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
 
-  testAssertTrue(serverRouteTunIngressPacket(&runtime, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
-  testAssertTrue(runtime.activeConns[0].tcpPoller.outNbytes == 0, "multicast should not queue client A");
-  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes == 0, "multicast should not queue client B");
+  testAssertTrue(serverRouteTunIngressPacket(&server, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "multicast should not queue client A");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "multicast should not queue client B");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tcpPairA[0]);
   close(tcpPairA[1]);
   close(tcpPairB[0]);
@@ -550,7 +550,7 @@ static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
 }
 
 static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2];
@@ -565,29 +565,29 @@ static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
-  testAssertTrue(serverInit(&runtime, tunPair[0], 64, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  runtime.tunSubnet.enabled = true;
-  runtime.tunSubnet.prefix = 24;
-  runtime.tunSubnet.broadcast[0] = 10;
-  runtime.tunSubnet.broadcast[1] = 250;
-  runtime.tunSubnet.broadcast[2] = 0;
-  runtime.tunSubnet.broadcast[3] = 255;
-  testAssertTrue(serverAddClient(&runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
-  testAssertTrue(serverAddClient(&runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+  testAssertTrue(serverInit(&server, tunPair[0], 64, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  server.tunSubnet.enabled = true;
+  server.tunSubnet.prefix = 24;
+  server.tunSubnet.broadcast[0] = 10;
+  server.tunSubnet.broadcast[1] = 250;
+  server.tunSubnet.broadcast[2] = 0;
+  server.tunSubnet.broadcast[3] = 255;
+  testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
+  testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
 
-  runtime.activeConns[0].tcpPoller.outOffset = 0;
-  runtime.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
+  server.activeConns[0].tcpPoller.outOffset = 0;
+  server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&runtime, "tun", limitedBroadcast, sizeof(limitedBroadcast)),
+      serverRouteTunIngressPacket(&server, "tun", limitedBroadcast, sizeof(limitedBroadcast)),
       "broadcast fanout with saturation should not fail");
   testAssertTrue(
-      runtime.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity,
+      server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity,
       "saturated client queue should remain unchanged");
-  testAssertTrue(runtime.activeConns[1].tcpPoller.outNbytes > 0, "non-saturated client should still receive broadcast");
-  testAssertTrue(!serverHasPendingTunToTcp(&runtime), "broadcast best-effort skip should not set shared pending packet");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "non-saturated client should still receive broadcast");
+  testAssertTrue(!serverHasPendingTunToTcp(&server), "broadcast best-effort skip should not set shared pending packet");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tcpPairA[0]);
   close(tcpPairA[1]);
   close(tcpPairB[0]);
@@ -597,7 +597,7 @@ static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
 }
 
 static void setupServerForSessionTest(
-    server_t *runtime,
+    server_t *server,
     int maxSessions,
     int *epollFd,
     int tunPair[2],
@@ -608,50 +608,50 @@ static void setupServerForSessionTest(
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp pair A should be created");
   testAssertTrue(
-      serverInit(runtime, tunPair[0], 72, maxSessions, maxSessions, &testHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
+      serverInit(server, tunPair[0], 72, maxSessions, maxSessions, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
 
   *epollFd = epoll_create1(0);
   testAssertTrue(*epollFd >= 0, "epoll_create1 should succeed");
-  runtime->epollFd = *epollFd;
+  server->epollFd = *epollFd;
   testAssertTrue(
       epoll_ctl(
           *epollFd,
           EPOLL_CTL_ADD,
-          runtime->tunPoller.tunFd,
-          &(struct epoll_event){.events = runtime->tunPoller.events, .data.fd = runtime->tunPoller.tunFd})
+          server->tunPoller.tunFd,
+          &(struct epoll_event){.events = server->tunPoller.events, .data.fd = server->tunPoller.tunFd})
           == 0,
       "add tun fd should succeed");
 
-  *slotA = serverAddClient(runtime, 0, tcpPairA[0], testKey, claim2, sizeof(claim2));
+  *slotA = serverAddClient(server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2));
   testAssertTrue(*slotA == 0, "first client should be added");
   testAssertTrue(
       epoll_ctl(
           *epollFd,
           EPOLL_CTL_ADD,
           tcpPairA[0],
-          &(struct epoll_event){.events = runtime->activeConns[*slotA].tcpPoller.events, .data.fd = tcpPairA[0]})
+          &(struct epoll_event){.events = server->activeConns[*slotA].tcpPoller.events, .data.fd = tcpPairA[0]})
           == 0,
       "add tcp A fd should succeed");
 
   *slotB = -1;
   if (maxSessions > 1) {
     testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
-    *slotB = serverAddClient(runtime, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+    *slotB = serverAddClient(server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
     testAssertTrue(*slotB == 1, "second client should be added");
     testAssertTrue(
         epoll_ctl(
             *epollFd,
             EPOLL_CTL_ADD,
             tcpPairB[0],
-            &(struct epoll_event){.events = runtime->activeConns[*slotB].tcpPoller.events, .data.fd = tcpPairB[0]})
+            &(struct epoll_event){.events = server->activeConns[*slotB].tcpPoller.events, .data.fd = tcpPairB[0]})
             == 0,
         "add tcp B fd should succeed");
   }
 }
 
 static void teardownServerForSessionTest(
-    server_t *runtime,
+    server_t *server,
     int epollFd,
     int tunPair[2],
     int tcpPairA[2],
@@ -659,13 +659,13 @@ static void teardownServerForSessionTest(
     int slotA,
     int slotB) {
   if (slotA >= 0) {
-    (void)serverRemoveClient(runtime, slotA);
+    (void)serverRemoveClient(server, slotA);
   }
   if (slotB >= 0) {
-    (void)serverRemoveClient(runtime, slotB);
+    (void)serverRemoveClient(server, slotB);
   }
   close(epollFd);
-  serverDeinit(runtime);
+  serverDeinit(server);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPairA[0]);
@@ -681,7 +681,7 @@ static void teardownServerForSessionTest(
 static void testServerHeartbeatTimeoutStopsSession(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
-  server_t serverRuntime;
+  server_t server;
   int tunPair[2];
   int tcpPair[2];
 
@@ -692,7 +692,7 @@ static void testServerHeartbeatTimeoutStopsSession(void) {
   fakeNowMs = 0;
   session_t *session = sessionCreate(true, &testHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
-  wireServerSessionRuntime(session, &serverRuntime, &poller);
+  wireServerSession(session, &server, &poller);
 
   fakeNowMs = 15000;
   testAssertTrue(
@@ -700,7 +700,7 @@ static void testServerHeartbeatTimeoutStopsSession(void) {
       "server should stop after heartbeat timeout");
 
   sessionDestroy(session);
-  serverDeinit(&serverRuntime);
+  serverDeinit(&server);
   teardownSplitPollers(&poller);
   close(tunPair[0]);
   close(tunPair[1]);
@@ -711,7 +711,7 @@ static void testServerHeartbeatTimeoutStopsSession(void) {
 static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
-  server_t serverRuntime;
+  server_t server;
   int tunPair[2];
   int tcpPair[2];
   sessionHeartbeatConfig_t heartbeatCfg = {
@@ -726,7 +726,7 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
   fakeNowMs = 0;
   session_t *session = sessionCreate(true, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
-  wireServerSessionRuntime(session, &serverRuntime, &poller);
+  wireServerSession(session, &server, &poller);
 
   fakeNowMs = 8999;
   testAssertTrue(
@@ -738,7 +738,7 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
       "server should stop at configured timeout");
 
   sessionDestroy(session);
-  serverDeinit(&serverRuntime);
+  serverDeinit(&server);
   teardownSplitPollers(&poller);
   close(tunPair[0]);
   close(tunPair[1]);
@@ -748,7 +748,7 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
 
 static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   unsigned char key[ProtocolPskSize];
-  server_t runtime;
+  server_t server;
   int epollFd;
   int tunPair[2];
   int tcpPairA[2];
@@ -763,28 +763,28 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   memset(key, 0x51, sizeof(key));
   memset(fill, 'p', sizeof(fill));
   memset(tunPayload, 'q', sizeof(tunPayload));
-  setupServerForSessionTest(&runtime, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  session = serverSessionAt(&runtime, slotA);
+  setupServerForSessionTest(&server, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  session = serverSessionAt(&server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
-  poller = &runtime.activeConns[slotA].tcpPoller;
+  poller = &server.activeConns[slotA].tcpPoller;
 
   testAssertTrue(
       ioTcpWrite(poller, fill, IoPollerQueueCapacity - 16),
       "prefill tcp queue should succeed");
   testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
-      runSessionStepSplit(session, poller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStepSplit(session, poller, &server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "session should continue on overflow");
-  testAssertTrue(serverHasPendingTunToTcp(&runtime), "server overflow should retain pending data in runtime");
-  testAssertTrue(runtime.tunReadPaused, "server runtime should mark tun read paused while pending exists");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "runtime should disable tun epollin while pending exists");
+  testAssertTrue(serverHasPendingTunToTcp(&server), "server overflow should retain pending data in server");
+  testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending exists");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
 
-  teardownServerForSessionTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(void) {
   unsigned char key[ProtocolPskSize];
-  server_t runtime;
+  server_t server;
   int epollFd;
   int tunPair[2];
   int tcpPairA[2];
@@ -802,11 +802,11 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   memset(key, 0x52, sizeof(key));
   memset(fill, 'r', sizeof(fill));
   memset(tunPayload, 's', sizeof(tunPayload));
-  setupServerForSessionTest(&runtime, 2, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  ownerSession = serverSessionAt(&runtime, slotA);
-  otherSession = serverSessionAt(&runtime, slotB);
-  ownerPoller = &runtime.activeConns[slotA].tcpPoller;
-  otherPoller = &runtime.activeConns[slotB].tcpPoller;
+  setupServerForSessionTest(&server, 2, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  ownerSession = serverSessionAt(&server, slotA);
+  otherSession = serverSessionAt(&server, slotB);
+  ownerPoller = &server.activeConns[slotA].tcpPoller;
+  otherPoller = &server.activeConns[slotB].tcpPoller;
   testAssertTrue(ownerSession != NULL, "owner session should exist");
   testAssertTrue(otherSession != NULL, "other session should exist");
 
@@ -815,42 +815,42 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       "prefill owner tcp queue should succeed");
   testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStepSplit(ownerSession, ownerPoller, &server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow on owner should continue");
-  testAssertTrue(serverHasPendingTunToTcp(&runtime), "owner overflow should store runtime pending bytes");
-  testAssertTrue(runtime.tunReadPaused, "server runtime should mark tun read paused while pending exists");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while runtime pending exists");
+  testAssertTrue(serverHasPendingTunToTcp(&server), "owner overflow should store server pending bytes");
+  testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending exists");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while server pending exists");
 
   testAssertTrue(
-      runSessionStepSplit(otherSession, otherPoller, &runtime.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      runSessionStepSplit(otherSession, otherPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "non-owner tcp write path should continue");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "non-owner should not consume runtime pending");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "non-owner should not consume server pending");
 
   ownerPoller->outOffset = 0;
   ownerPoller->outNbytes = IoPollerLowWatermark + 100;
   testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      runSessionStepSplit(ownerSession, ownerPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "owner tcp write path should continue after first drain");
   queued = ioTcpQueuedBytes(ownerPoller);
   testAssertTrue(queued > IoPollerLowWatermark, "owner queue should remain above low watermark");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
 
   ownerPoller->outOffset = 0;
   ownerPoller->outNbytes = IoPollerLowWatermark;
   testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      runSessionStepSplit(ownerSession, ownerPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "owner tcp write path should continue after second drain");
   queued = ioTcpQueuedBytes(ownerPoller);
   testAssertTrue(queued <= IoPollerLowWatermark, "owner queue should drain to low watermark");
-  testAssertTrue(!runtime.tunReadPaused, "server runtime should clear tun read paused at low watermark");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
+  testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused at low watermark");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
 
-  teardownServerForSessionTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(void) {
   unsigned char key[ProtocolPskSize];
-  server_t runtime;
+  server_t server;
   int epollFd;
   int tunPair[2];
   int tcpPairA[2];
@@ -865,31 +865,31 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   memset(key, 0x53, sizeof(key));
   memset(fill, 'u', sizeof(fill));
   memset(tunPayload, 'v', sizeof(tunPayload));
-  setupServerForSessionTest(&runtime, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  session = serverSessionAt(&runtime, slotA);
+  setupServerForSessionTest(&server, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  session = serverSessionAt(&server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
-  poller = &runtime.activeConns[slotA].tcpPoller;
+  poller = &server.activeConns[slotA].tcpPoller;
 
   testAssertTrue(
       ioTcpWrite(poller, fill, IoPollerQueueCapacity - 16),
       "prefill tcp queue should succeed");
   testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
-      runSessionStepSplit(session, poller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStepSplit(session, poller, &server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
-  testAssertTrue(runtime.tunReadPaused, "server runtime should mark tun read paused while pending is active");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
+  testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending is active");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
 
-  testAssertTrue(serverRemoveClient(&runtime, slotA), "owner removal should succeed");
+  testAssertTrue(serverRemoveClient(&server, slotA), "owner removal should succeed");
   slotA = -1;
-  testAssertTrue(!runtime.tunReadPaused, "server runtime should clear tun read paused after owner drop");
-  testAssertTrue((runtime.tunPoller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
+  testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused after owner drop");
+  testAssertTrue((server.tunPoller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
 
-  teardownServerForSessionTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
@@ -901,19 +901,19 @@ static void testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload(void
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
   testAssertTrue(
-      serverInit(&runtime, tunPair[0], 80, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server runtime init should succeed");
-  testAssertTrue(serverAddClient(&runtime, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
+      serverInit(&server, tunPair[0], 80, 1, 1, &testHeartbeatCfg, NULL, NULL),
+      "server server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
   testAssertTrue(
-      ioTcpWrite(&runtime.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity - 16),
+      ioTcpWrite(&server.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity - 16),
       "prefill server tcp queue should succeed");
   result = serverQueueTcpWithBackpressure(
-      &runtime, &runtime.activeConns[0].tcpPoller, payload, sizeof(payload));
+      &server, &server.activeConns[0].tcpPoller, payload, sizeof(payload));
   testAssertTrue(result == sessionQueueResultBlocked, "server queue api should block on overflow");
-  testAssertTrue(serverHasPendingTunToTcp(&runtime), "server queue api should store runtime pending payload");
-  testAssertTrue(serverPendingTunToTcpOwner(&runtime) == 0, "server pending payload owner should match slot");
+  testAssertTrue(serverHasPendingTunToTcp(&server), "server queue api should store server pending payload");
+  testAssertTrue(serverPendingTunToTcpOwner(&server) == 0, "server pending payload owner should match slot");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);
@@ -921,10 +921,9 @@ static void testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload(void
 }
 
 static void testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPair[2];
-  bool heartbeatPending = false;
   long long lastValidInboundMs = 17;
   protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
   sessionQueueResult_t result;
@@ -932,21 +931,20 @@ static void testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp(void
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
   testAssertTrue(
-      serverInit(&runtime, tunPair[0], 81, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server runtime init should succeed");
-  testAssertTrue(serverAddClient(&runtime, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
+      serverInit(&server, tunPair[0], 81, 1, 1, &testHeartbeatCfg, NULL, NULL),
+      "server server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
 
   result = serverHandleInboundMessage(
-      &runtime,
-      &runtime.activeConns[0].tcpPoller,
+      &server,
+      &server.activeConns[0].tcpPoller,
       testKey,
-      &heartbeatPending,
       &lastValidInboundMs,
       &req);
   testAssertTrue(result == sessionQueueResultQueued, "server inbound heartbeat request should route through server handler");
   testAssertTrue(lastValidInboundMs > 0, "server handler should refresh last valid inbound timestamp");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);
@@ -954,29 +952,29 @@ static void testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp(void
 }
 
 static void testServerHeartbeatTickTimeoutBoundary(void) {
-  testAssertTrue(serverHeartbeatTick(NULL, 8999, 0, 9000), "server heartbeat should allow pre-timeout interval");
-  testAssertTrue(!serverHeartbeatTick(NULL, 9000, 0, 9000), "server heartbeat should stop at timeout boundary");
+  testAssertTrue(serverHeartbeatTick(8999, 0, 9000), "server heartbeat should allow pre-timeout interval");
+  testAssertTrue(!serverHeartbeatTick(9000, 0, 9000), "server heartbeat should stop at timeout boundary");
 }
 
 static void testServerBackpressureServiceSucceedsWithoutPendingBytes(void) {
-  server_t runtime;
+  server_t server;
   int tunPair[2];
   int tcpPair[2];
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
   testAssertTrue(
-      serverInit(&runtime, tunPair[0], 82, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server runtime init should succeed");
-  testAssertTrue(serverAddClient(&runtime, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
+      serverInit(&server, tunPair[0], 82, 1, 1, &testHeartbeatCfg, NULL, NULL),
+      "server server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
   testAssertTrue(
       serverServiceBackpressure(
-          &runtime,
-          &runtime.activeConns[0].tcpPoller,
+          &server,
+          &server.activeConns[0].tcpPoller,
           ioEventTimeout),
       "server backpressure service should succeed without pending bytes");
 
-  serverDeinit(&runtime);
+  serverDeinit(&server);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);

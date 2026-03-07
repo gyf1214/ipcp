@@ -12,42 +12,42 @@
 #define EPOLL_WAIT_MS 200
 
 void clientResetHeartbeatState(
-    client_t *runtime,
+    client_t *client,
     int heartbeatIntervalMs,
     int heartbeatTimeoutMs,
     long long nowMs) {
-  if (runtime == NULL || heartbeatIntervalMs <= 0 || heartbeatTimeoutMs <= heartbeatIntervalMs) {
+  if (client == NULL || heartbeatIntervalMs <= 0 || heartbeatTimeoutMs <= heartbeatIntervalMs) {
     return;
   }
-  runtime->heartbeatPending = false;
-  runtime->heartbeatSentMs = 0;
-  runtime->lastHeartbeatReqMs = nowMs;
-  runtime->lastDataSentMs = nowMs;
-  runtime->lastDataRecvMs = nowMs;
-  runtime->tunReadPaused = false;
-  runtime->tcpWritePendingNbytes = 0;
-  memset(runtime->tcpWritePendingBuf, 0, sizeof(runtime->tcpWritePendingBuf));
-  runtime->heartbeatIntervalMs = heartbeatIntervalMs;
-  runtime->heartbeatTimeoutMs = heartbeatTimeoutMs;
+  client->heartbeatPending = false;
+  client->heartbeatSentMs = 0;
+  client->lastHeartbeatReqMs = nowMs;
+  client->lastDataSentMs = nowMs;
+  client->lastDataRecvMs = nowMs;
+  client->tunReadPaused = false;
+  client->tcpWritePendingNbytes = 0;
+  memset(client->tcpWritePendingBuf, 0, sizeof(client->tcpWritePendingBuf));
+  client->heartbeatIntervalMs = heartbeatIntervalMs;
+  client->heartbeatTimeoutMs = heartbeatTimeoutMs;
 }
 
 sessionQueueResult_t clientQueueTcpWithBackpressure(
-    client_t *runtime,
+    client_t *client,
     const void *data,
     long nbytes) {
   long queued;
   ioTcpPoller_t *tcpPoller;
   ioTunPoller_t *tunPoller;
 
-  if (runtime == NULL) {
+  if (client == NULL) {
     return sessionQueueResultError;
   }
-  tcpPoller = runtime->tcpPoller;
-  tunPoller = runtime->tunPoller;
+  tcpPoller = client->tcpPoller;
+  tunPoller = client->tunPoller;
   if (tcpPoller == NULL || tunPoller == NULL || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
   }
-  if (runtime->tcpWritePendingNbytes > 0) {
+  if (client->tcpWritePendingNbytes > 0) {
     return sessionQueueResultBlocked;
   }
   if (ioTcpWrite(tcpPoller, data, nbytes)) {
@@ -59,13 +59,13 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
     return sessionQueueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
-    memcpy(runtime->tcpWritePendingBuf, data, (size_t)nbytes);
-    runtime->tcpWritePendingNbytes = nbytes;
-    if (!runtime->tunReadPaused) {
+    memcpy(client->tcpWritePendingBuf, data, (size_t)nbytes);
+    client->tcpWritePendingNbytes = nbytes;
+    if (!client->tunReadPaused) {
       if (!ioTunSetReadEnabled(tunPoller, false)) {
         return sessionQueueResultError;
       }
-      runtime->tunReadPaused = true;
+      client->tunReadPaused = true;
     }
     return sessionQueueResultBlocked;
   }
@@ -73,7 +73,7 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
 }
 
 sessionQueueResult_t clientQueueTunWithBackpressure(
-    client_t *runtime,
+    client_t *client,
     bool *tcpReadPaused,
     long *tunWritePendingNbytes,
     char tunWritePendingBuf[ProtocolFrameSize],
@@ -83,11 +83,11 @@ sessionQueueResult_t clientQueueTunWithBackpressure(
   ioTcpPoller_t *tcpPoller;
   ioTunPoller_t *tunPoller;
 
-  if (runtime == NULL) {
+  if (client == NULL) {
     return sessionQueueResultError;
   }
-  tcpPoller = runtime->tcpPoller;
-  tunPoller = runtime->tunPoller;
+  tcpPoller = client->tcpPoller;
+  tunPoller = client->tunPoller;
   if (tcpPoller == NULL || tunPoller == NULL || tcpReadPaused == NULL || tunWritePendingNbytes == NULL
       || tunWritePendingBuf == NULL || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
@@ -118,46 +118,46 @@ sessionQueueResult_t clientQueueTunWithBackpressure(
 }
 
 sessionQueueResult_t clientSendMessage(
-    client_t *runtime,
+    client_t *client,
     const unsigned char key[ProtocolPskSize],
     long long nowMs,
     const protocolMessage_t *msg) {
   protocolFrame_t frame;
   sessionQueueResult_t result;
 
-  if (runtime == NULL || key == NULL || msg == NULL) {
+  if (client == NULL || key == NULL || msg == NULL) {
     return sessionQueueResultError;
   }
   if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
     return sessionQueueResultError;
   }
-  result = clientQueueTcpWithBackpressure(runtime, frame.buf, frame.nbytes);
+  result = clientQueueTcpWithBackpressure(client, frame.buf, frame.nbytes);
   if (result == sessionQueueResultQueued && msg->type == protocolMsgData) {
-    runtime->lastDataSentMs = nowMs;
+    client->lastDataSentMs = nowMs;
   }
   return result;
 }
 
 sessionQueueResult_t clientHandleInboundMessage(
-    client_t *runtime,
+    client_t *client,
     bool *tcpReadPaused,
     long *tunWritePendingNbytes,
     char tunWritePendingBuf[ProtocolFrameSize],
     long long nowMs,
     long long *lastValidInboundMs,
     const protocolMessage_t *msg) {
-  if (runtime == NULL || lastValidInboundMs == NULL || msg == NULL) {
+  if (client == NULL || lastValidInboundMs == NULL || msg == NULL) {
     return sessionQueueResultError;
   }
   *lastValidInboundMs = nowMs;
 
   if (msg->type == protocolMsgData) {
     sessionQueueResult_t result = clientQueueTunWithBackpressure(
-        runtime, tcpReadPaused, tunWritePendingNbytes, tunWritePendingBuf, msg->buf, msg->nbytes);
+        client, tcpReadPaused, tunWritePendingNbytes, tunWritePendingBuf, msg->buf, msg->nbytes);
     if (result != sessionQueueResultQueued) {
       return result;
     }
-    runtime->lastDataRecvMs = nowMs;
+    client->lastDataRecvMs = nowMs;
     dbgf("received %ld bytes of data", msg->nbytes);
     return sessionQueueResultQueued;
   }
@@ -166,11 +166,11 @@ sessionQueueResult_t clientHandleInboundMessage(
     return sessionQueueResultError;
   }
   if (msg->type == protocolMsgHeartbeatAck) {
-    if (!runtime->heartbeatPending) {
+    if (!client->heartbeatPending) {
       logf("unexpected heartbeat ack");
       return sessionQueueResultError;
     }
-    runtime->heartbeatPending = false;
+    client->heartbeatPending = false;
     dbgf("heartbeat ack received");
     return sessionQueueResultQueued;
   }
@@ -178,22 +178,22 @@ sessionQueueResult_t clientHandleInboundMessage(
 }
 
 bool clientHeartbeatTick(
-    client_t *runtime,
+    client_t *client,
     long long nowMs,
     const unsigned char key[ProtocolPskSize]) {
-  if (runtime == NULL || key == NULL || runtime->heartbeatIntervalMs <= 0
-      || runtime->heartbeatTimeoutMs <= runtime->heartbeatIntervalMs) {
+  if (client == NULL || key == NULL || client->heartbeatIntervalMs <= 0
+      || client->heartbeatTimeoutMs <= client->heartbeatIntervalMs) {
     return false;
   }
 
-  if (!runtime->heartbeatPending) {
-    bool idleSend = nowMs - runtime->lastDataSentMs >= runtime->heartbeatIntervalMs;
-    bool idleRecv = nowMs - runtime->lastDataRecvMs >= runtime->heartbeatIntervalMs;
-    bool intervalElapsed = nowMs - runtime->lastHeartbeatReqMs >= runtime->heartbeatIntervalMs;
+  if (!client->heartbeatPending) {
+    bool idleSend = nowMs - client->lastDataSentMs >= client->heartbeatIntervalMs;
+    bool idleRecv = nowMs - client->lastDataRecvMs >= client->heartbeatIntervalMs;
+    bool intervalElapsed = nowMs - client->lastHeartbeatReqMs >= client->heartbeatIntervalMs;
     if (idleSend && idleRecv && intervalElapsed) {
       protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
       sessionQueueResult_t result = clientSendMessage(
-          runtime,
+          client,
           key,
           nowMs,
           &req);
@@ -203,14 +203,14 @@ bool clientHeartbeatTick(
       if (result == sessionQueueResultBlocked) {
         return true;
       }
-      runtime->heartbeatPending = true;
-      runtime->heartbeatSentMs = nowMs;
-      runtime->lastHeartbeatReqMs = nowMs;
+      client->heartbeatPending = true;
+      client->heartbeatSentMs = nowMs;
+      client->lastHeartbeatReqMs = nowMs;
       dbgf("sent heartbeat request");
     }
   }
 
-  if (runtime->heartbeatPending && nowMs - runtime->heartbeatSentMs >= runtime->heartbeatTimeoutMs) {
+  if (client->heartbeatPending && nowMs - client->heartbeatSentMs >= client->heartbeatTimeoutMs) {
     logf("client heartbeat timeout waiting for ack");
     return false;
   }
@@ -219,7 +219,7 @@ bool clientHeartbeatTick(
 }
 
 bool clientServiceBackpressure(
-    client_t *runtime,
+    client_t *client,
     bool *tcpReadPaused,
     long *tunWritePendingNbytes,
     char tunWritePendingBuf[ProtocolFrameSize]) {
@@ -227,22 +227,22 @@ bool clientServiceBackpressure(
   ioTcpPoller_t *tcpPoller;
   ioTunPoller_t *tunPoller;
 
-  if (runtime == NULL) {
+  if (client == NULL) {
     return false;
   }
-  tcpPoller = runtime->tcpPoller;
-  tunPoller = runtime->tunPoller;
+  tcpPoller = client->tcpPoller;
+  tunPoller = client->tunPoller;
   if (tcpPoller == NULL || tunPoller == NULL || tcpReadPaused == NULL
       || tunWritePendingNbytes == NULL || tunWritePendingBuf == NULL) {
     return false;
   }
 
-  if (runtime->tcpWritePendingNbytes > 0) {
-    if (ioTcpWrite(tcpPoller, runtime->tcpWritePendingBuf, runtime->tcpWritePendingNbytes)) {
-      runtime->tcpWritePendingNbytes = 0;
+  if (client->tcpWritePendingNbytes > 0) {
+    if (ioTcpWrite(tcpPoller, client->tcpWritePendingBuf, client->tcpWritePendingNbytes)) {
+      client->tcpWritePendingNbytes = 0;
     } else {
       queued = ioTcpQueuedBytes(tcpPoller);
-      if (queued < 0 || queued + runtime->tcpWritePendingNbytes <= IoPollerQueueCapacity) {
+      if (queued < 0 || queued + client->tcpWritePendingNbytes <= IoPollerQueueCapacity) {
         return false;
       }
     }
@@ -272,7 +272,7 @@ bool clientServiceBackpressure(
     }
   }
 
-  if (runtime->tunReadPaused && runtime->tcpWritePendingNbytes == 0) {
+  if (client->tunReadPaused && client->tcpWritePendingNbytes == 0) {
     queued = ioTcpQueuedBytes(tcpPoller);
     if (queued < 0) {
       return false;
@@ -281,7 +281,7 @@ bool clientServiceBackpressure(
       if (!ioTunSetReadEnabled(tunPoller, true)) {
         return false;
       }
-      runtime->tunReadPaused = false;
+      client->tunReadPaused = false;
     }
   }
 
@@ -453,7 +453,7 @@ int clientServeConn(
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   ioTunPoller_t tunPoller;
   ioTcpPoller_t tcpPoller;
-  client_t runtime;
+  client_t client;
   ioEvent_t event;
   session_t *session = NULL;
   int epollFd = -1;
@@ -477,16 +477,16 @@ int clientServeConn(
     errf("setup epoll failed: %s", strerror(errno));
     goto cleanup;
   }
-  runtime.tunPoller = &tunPoller;
-  runtime.tcpPoller = &tcpPoller;
-  clientResetHeartbeatState(&runtime, heartbeatCfg->intervalMs, heartbeatCfg->timeoutMs, 0);
+  client.tunPoller = &tunPoller;
+  client.tcpPoller = &tcpPoller;
+  clientResetHeartbeatState(&client, heartbeatCfg->intervalMs, heartbeatCfg->timeoutMs, 0);
 
   session = sessionCreate(false, heartbeatCfg, NULL, NULL);
   if (session == NULL) {
     errf("session setup failed");
     goto cleanup;
   }
-  sessionSetClient(session, &runtime);
+  sessionAttachClient(session, &client);
 
   while (1) {
     event = ioPollersWait(&tunPoller, &tcpPoller, EPOLL_WAIT_MS);
