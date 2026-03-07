@@ -23,14 +23,6 @@ typedef struct {
 } splitPollersFixture_t;
 
 static long long fakeNowMs = 0;
-static unsigned char testServerKey[ProtocolPskSize] = {
-    0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
-    0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe, 0x0f,
-    0x1f, 0x2e, 0x3d, 0x4c, 0x5b, 0x6a, 0x79, 0x88,
-    0x97, 0xa6, 0xb5, 0xc4, 0xd3, 0xe2, 0xf1, 0x00,
-};
-static const unsigned char testClaim2[] = {10, 0, 0, 2};
-static const unsigned char testClaim3[] = {10, 0, 0, 3};
 static const sessionHeartbeatConfig_t defaultHeartbeatCfg = {
     .intervalMs = 5000,
     .timeoutMs = 15000,
@@ -509,62 +501,6 @@ static void testSessionCreateRejectsInvalidHeartbeatConfig(void) {
   testAssertTrue(session == NULL, "session create should fail when timeout is not greater than interval");
 }
 
-static void testSharedTunWriteInterestIsRuntimeOwned(void) {
-  server_t server;
-  int tunPair[2];
-  int epollFd;
-  int tcpPairA[2];
-  int tcpPairB[2];
-  char payloadA[] = "payload-a";
-  char payloadB[] = "payload-b";
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp pair A should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
-  testAssertTrue(
-      serverInit(&server, tunPair[0], 70, 2, 2, &defaultHeartbeatCfg, NULL, NULL),
-      "runtime init should succeed");
-
-  epollFd = epoll_create1(0);
-  testAssertTrue(epollFd >= 0, "epoll_create1 should succeed");
-  server.epollFd = epollFd;
-  testAssertTrue(
-      epoll_ctl(
-          epollFd,
-          EPOLL_CTL_ADD,
-          server.tunPoller.tunFd,
-          &(struct epoll_event){.events = server.tunPoller.events, .data.fd = server.tunPoller.tunFd})
-          == 0,
-      "add tun fd should succeed");
-  testAssertTrue(serverSyncTunWriteInterest(&server), "initial tun interest sync should succeed");
-
-  testAssertTrue(
-      serverAddClient(&server, 0, tcpPairA[0], testServerKey, testClaim2, sizeof(testClaim2)) == 0,
-      "first client should be added");
-  testAssertTrue(
-      serverAddClient(&server, 1, tcpPairB[0], testServerKey, testClaim3, sizeof(testClaim3)) == 1,
-      "second client should be added");
-
-  testAssertTrue(serverQueueTunWrite(&server, payloadA, (long)strlen(payloadA)), "queue payload A should succeed");
-  testAssertTrue(serverQueueTunWrite(&server, payloadB, (long)strlen(payloadB)), "queue payload B should succeed");
-  testAssertTrue((server.tunPoller.events & EPOLLOUT) != 0, "runtime should enable tun epollout with pending shared queue");
-  testAssertTrue(serverSyncTunWriteInterest(&server), "sync should keep epollout while queue has pending bytes");
-  testAssertTrue((server.tunPoller.events & EPOLLOUT) != 0, "runtime should keep epollout until shared queue drains");
-
-  testAssertTrue(serverServiceTunWriteEvent(&server), "shared tun write event should flush queued frames");
-  testAssertTrue(serverSyncTunWriteInterest(&server), "sync should disable epollout after queue drains");
-  testAssertTrue((server.tunPoller.events & EPOLLOUT) == 0, "runtime should disable epollout when shared queue drains");
-
-  close(epollFd);
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
-  close(tcpPairB[0]);
-  close(tcpPairB[1]);
-}
-
 void runSessionTests(void) {
   testSessionServerRoleSkipsRuntimeAssertOnTimeout();
   testSessionClientRoleAssertsOnMissingRuntime();
@@ -579,5 +515,4 @@ void runSessionTests(void) {
   testBackpressurePauseAndResumeFlow();
   testSessionRetryOverflowFlushesAndResumesRead();
   testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated();
-  testSharedTunWriteInterestIsRuntimeOwned();
 }

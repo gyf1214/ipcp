@@ -291,43 +291,6 @@ long long serverNowMs(const server_t *server) {
   return server->nowMsFn(server->nowCtx);
 }
 
-bool serverSyncTunWriteInterest(server_t *server) {
-  unsigned int nextEvents;
-  bool needWrite;
-
-  if (server == NULL) {
-    return false;
-  }
-  if (server->epollFd < 0) {
-    return true;
-  }
-
-  needWrite = ioTunQueuedBytes(&server->tunPoller) > 0;
-  nextEvents = server->tunPoller.events;
-  if (needWrite) {
-    nextEvents |= EPOLLOUT;
-  } else {
-    nextEvents &= ~EPOLLOUT;
-  }
-  if (nextEvents == server->tunPoller.events) {
-    return true;
-  }
-  return runtimeTunEpollCtl(server, nextEvents);
-}
-
-bool serverQueueTunWrite(server_t *server, const void *data, long nbytes) {
-  if (server == NULL) {
-    return false;
-  }
-  if (server->epollFd >= 0) {
-    server->tunPoller.epollFd = server->epollFd;
-  }
-  if (!ioTunWrite(&server->tunPoller, data, nbytes)) {
-    return false;
-  }
-  return true;
-}
-
 bool serverServiceTunWriteEvent(server_t *server) {
   if (server == NULL) {
     return false;
@@ -1465,9 +1428,6 @@ int serverServeMultiClient(
           }
           if (ioTunQueuedBytes(&server.tunPoller) <= IoPollerLowWatermark) {
             if (serverRetryBlockedTunRoundRobin(&server) < 0) {
-              goto cleanup;
-            }
-            if (!serverSyncTunWriteInterest(&server)) {
               goto cleanup;
             }
           }

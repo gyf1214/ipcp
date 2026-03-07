@@ -239,50 +239,6 @@ static void testServerFindSlotByClaim(void) {
   serverDeinit(&server);
 }
 
-static void testServerSharedTunInterestTracksGlobalQueue(void) {
-  server_t server;
-  int tunPair[2];
-  int epollFd;
-  char payloadA[16];
-  char payloadB[16];
-
-  memset(payloadA, 'a', sizeof(payloadA));
-  memset(payloadB, 'b', sizeof(payloadB));
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(
-      serverInit(&server, tunPair[0], 40, 2, 2, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
-
-  epollFd = epoll_create1(0);
-  testAssertTrue(epollFd >= 0, "epoll_create1 should succeed");
-  server.epollFd = epollFd;
-  testAssertTrue(
-      epoll_ctl(
-          epollFd,
-          EPOLL_CTL_ADD,
-          server.tunPoller.tunFd,
-          &(struct epoll_event){.events = server.tunPoller.events, .data.fd = server.tunPoller.tunFd})
-      == 0,
-      "add tun fd should succeed");
-
-  testAssertTrue(serverQueueTunWrite(&server, payloadA, sizeof(payloadA)), "first shared tun queue write should succeed");
-  testAssertTrue(serverQueueTunWrite(&server, payloadB, sizeof(payloadB)), "second shared tun queue write should succeed");
-  testAssertTrue(
-      (server.tunPoller.events & EPOLLOUT) != 0, "shared tun epollout should stay enabled while queue has bytes");
-  testAssertTrue(serverSyncTunWriteInterest(&server), "sync should keep epollout enabled while queue is not empty");
-  testAssertTrue(
-      (server.tunPoller.events & EPOLLOUT) != 0, "sync should preserve epollout while backlog remains");
-
-  testAssertTrue(serverServiceTunWriteEvent(&server), "shared tun write event should flush queued frames");
-  testAssertTrue(serverSyncTunWriteInterest(&server), "sync should disable epollout when queue drains");
-  testAssertTrue((server.tunPoller.events & EPOLLOUT) == 0, "shared tun epollout should disable after global queue drains");
-
-  close(epollFd);
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-}
-
 static void testServerRoundRobinRetryCursorRotates(void) {
   server_t server;
 
@@ -1057,7 +1013,6 @@ void runServerTests(void) {
   testServerRejectsBeyondMaxSessions();
   testServerFindSlotByFdAndPickEgress();
   testServerFindSlotByClaim();
-  testServerSharedTunInterestTracksGlobalQueue();
   testServerRoundRobinRetryCursorRotates();
   testServerPendingTunToTcpOwnerControlsRetryAndReadInterest();
   testServerRoutesTunIngressByClaimMatch();

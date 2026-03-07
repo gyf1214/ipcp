@@ -89,8 +89,6 @@ int serverPickEgressClient(const server_t *server);
 int serverClientCount(const server_t *server);
 long long serverNowMs(const server_t *server);
 
-bool serverSyncTunWriteInterest(server_t *server);
-bool serverQueueTunWrite(server_t *server, const void *data, long nbytes);
 bool serverServiceTunWriteEvent(server_t *server);
 int serverRetryBlockedTunRoundRobin(server_t *server);
 bool serverSetTunReadEnabled(server_t *server, bool enabled);
