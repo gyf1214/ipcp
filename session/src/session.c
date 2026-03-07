@@ -78,8 +78,6 @@ static bool serviceBackpressure(
       client,
       &session->tunReadPaused,
       &session->tcpReadPaused,
-      &session->tcpWritePendingNbytes,
-      session->tcpWritePendingBuf,
       &session->tunWritePendingNbytes,
       session->tunWritePendingBuf);
 }
@@ -120,8 +118,6 @@ static bool pipeTun(
     result = clientSendMessage(
         client,
         &session->tunReadPaused,
-        &session->tcpWritePendingNbytes,
-        session->tcpWritePendingBuf,
         key,
         nowMs,
         &msg);
@@ -369,8 +365,6 @@ static sessionStepResult_t sessionFinalizeStep(
             client,
             now,
             &session->tunReadPaused,
-            &session->tcpWritePendingNbytes,
-            session->tcpWritePendingBuf,
             key)) {
       logf("heartbeat failure");
       return sessionStepStop;
@@ -415,8 +409,6 @@ sessionStepResult_t sessionHandleTunIngressPayload(
     result = clientSendMessage(
         client,
         &session->tunReadPaused,
-        &session->tcpWritePendingNbytes,
-        session->tcpWritePendingBuf,
         key,
         nowMs,
         &msg);

@@ -226,11 +226,11 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "session should stay alive on overflow backpressure");
-  testAssertTrue(session->tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
+  testAssertTrue(clientRuntime.tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
   testAssertTrue(session->tunReadPaused, "tun read should be paused under overflow");
 
   sessionReset(session);
-  testAssertTrue(session->tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
+  testAssertTrue(clientRuntime.tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
   testAssertTrue(session->tunWritePendingNbytes == 0, "reset should clear pending tun bytes");
   testAssertTrue(!session->tunReadPaused, "reset should clear tun pause");
   testAssertTrue(!session->tcpReadPaused, "reset should clear tcp pause");
@@ -412,14 +412,14 @@ static void testBackpressurePauseAndResumeFlow(void) {
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
   testAssertTrue(session->tunReadPaused, "tun read should be paused");
-  testAssertTrue(session->tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
+  testAssertTrue(clientRuntime.tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
 
   testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
   testAssertTrue(read(tcpPair[1], drain, sizeof(drain)) > 0, "drain should consume queued bytes");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
       "service backpressure should continue");
-  testAssertTrue(session->tcpWritePendingNbytes == 0, "pending tcp payload should flush");
+  testAssertTrue(clientRuntime.tcpWritePendingNbytes == 0, "pending tcp payload should flush");
   testAssertTrue(!session->tunReadPaused, "tun read should resume when queue drains");
 
   sessionDestroy(session);

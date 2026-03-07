@@ -775,7 +775,7 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   testAssertTrue(
       runSessionStepSplit(session, poller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "session should continue on overflow");
-  testAssertTrue(session->tcpWritePendingNbytes == 0, "server overflow should retain pending data in runtime, not session");
+  testAssertTrue(serverHasPendingTunToTcp(&runtime), "server overflow should retain pending data in runtime");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "runtime should disable tun epollin while pending exists");
 
   teardownServerForSessionTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
@@ -816,7 +816,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(
       runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow on owner should continue");
-  testAssertTrue(ownerSession->tcpWritePendingNbytes == 0, "owner session should not keep runtime pending bytes locally");
+  testAssertTrue(serverHasPendingTunToTcp(&runtime), "owner overflow should store runtime pending bytes");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while runtime pending exists");
 
   testAssertTrue(
