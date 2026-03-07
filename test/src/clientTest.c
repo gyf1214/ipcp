@@ -420,37 +420,31 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
   close(tcpPair[1]);
 }
 
-static void testClientInboundHandlerRoutesDataAndRefreshesTimestamp(void) {
+static void testClientInboundHandlerAcceptsHeartbeatAckAndRefreshesTimestamp(void) {
   splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   client_t client;
   long long lastValidInboundMs = 17;
-  bool tcpReadPaused = false;
-  long tunWritePendingNbytes = 0;
-  char tunWritePendingBuf[ProtocolFrameSize];
-  protocolMessage_t data = {.type = protocolMsgData, .nbytes = 5, .buf = "abcde"};
+  protocolMessage_t ack = {.type = protocolMsgHeartbeatAck, .nbytes = 0, .buf = NULL};
   sessionQueueResult_t result;
 
-  memset(tunWritePendingBuf, 0, sizeof(tunWritePendingBuf));
   setupPairs(tunPair, tcpPair);
   testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
   memset(&client, 0, sizeof(client));
   client.tunPoller = &poller.tunPoller;
   client.tcpPoller = &poller.tcpPoller;
   clientResetHeartbeatState(&client, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs, 0);
+  client.heartbeatPending = true;
 
   result = clientHandleInboundMessage(
       &client,
-      &tcpReadPaused,
-      &tunWritePendingNbytes,
-      tunWritePendingBuf,
       1000,
       &lastValidInboundMs,
-      &data);
-  testAssertTrue(result == sessionQueueResultQueued, "client inbound data should route through client handler");
+      &ack);
+  testAssertTrue(result == sessionQueueResultQueued, "client inbound ack should route through client handler");
   testAssertTrue(lastValidInboundMs == 1000, "client handler should refresh last valid inbound timestamp");
-  testAssertTrue(client.lastDataRecvMs == 1000, "client handler should refresh client recv timestamp");
+  testAssertTrue(!client.heartbeatPending, "client handler should clear heartbeat pending on ack");
 
   teardownSplitPollers(&poller);
   close(tunPair[0]);
@@ -714,7 +708,7 @@ void runClientTests(void) {
   testClientServeConnHandshakeAndStopOnPeerClose();
   testClientSessionRuntimeWiringAcceptsClientContext();
   testClientQueueBackpressureBlocksAndStoresPendingPayload();
-  testClientInboundHandlerRoutesDataAndRefreshesTimestamp();
+  testClientInboundHandlerAcceptsHeartbeatAckAndRefreshesTimestamp();
   testClientHeartbeatTickSetsPendingAndTimestamps();
   testClientBackpressureServiceSucceedsWithoutPendingBytes();
   testClientHeartbeatUsesConfiguredInterval();

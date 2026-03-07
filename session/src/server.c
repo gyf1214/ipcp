@@ -282,13 +282,6 @@ int serverClientCount(const server_t *server) {
   return server->activeCount;
 }
 
-long serverQueuedTunBytes(const server_t *server) {
-  if (server == NULL) {
-    return -1;
-  }
-  return ioTunQueuedBytes(&server->tunPoller);
-}
-
 long long serverNowMs(const server_t *server) {
   if (server == NULL || server->nowMsFn == NULL) {
     return -1;
@@ -512,26 +505,6 @@ sessionQueueResult_t serverQueueTcpWithBackpressure(
   return sessionQueueResultError;
 }
 
-sessionQueueResult_t serverQueueTunWithBackpressure(server_t *server, const void *data, long nbytes) {
-  long queued;
-
-  if (server == NULL || data == NULL || nbytes <= 0) {
-    return sessionQueueResultError;
-  }
-  if (serverQueueTunWrite(server, data, nbytes)) {
-    return sessionQueueResultQueued;
-  }
-
-  queued = serverQueuedTunBytes(server);
-  if (queued < 0) {
-    return sessionQueueResultError;
-  }
-  if (queued + nbytes > IoPollerQueueCapacity) {
-    return sessionQueueResultBlocked;
-  }
-  return sessionQueueResultError;
-}
-
 sessionQueueResult_t serverSendMessage(
     server_t *server,
     ioTcpPoller_t *tcpPoller,
@@ -564,12 +537,8 @@ sessionQueueResult_t serverHandleInboundMessage(
   *lastValidInboundMs = nowMs;
 
   if (msg->type == protocolMsgData) {
-    sessionQueueResult_t result = serverQueueTunWithBackpressure(server, msg->buf, msg->nbytes);
-    if (result != sessionQueueResultQueued) {
-      return result;
-    }
-    dbgf("received %ld bytes of data", msg->nbytes);
-    return sessionQueueResultQueued;
+    logf("unexpected data message in server inbound handler");
+    return sessionQueueResultError;
   }
   if (msg->type == protocolMsgHeartbeatReq) {
     protocolMessage_t ack = {.type = protocolMsgHeartbeatAck, .nbytes = 0, .buf = NULL};

@@ -72,51 +72,6 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
   return sessionQueueResultError;
 }
 
-sessionQueueResult_t clientQueueTunWithBackpressure(
-    client_t *client,
-    bool *tcpReadPaused,
-    long *tunWritePendingNbytes,
-    char tunWritePendingBuf[ProtocolFrameSize],
-    const void *data,
-    long nbytes) {
-  long queued;
-  ioTcpPoller_t *tcpPoller;
-  ioTunPoller_t *tunPoller;
-
-  if (client == NULL) {
-    return sessionQueueResultError;
-  }
-  tcpPoller = client->tcpPoller;
-  tunPoller = client->tunPoller;
-  if (tcpPoller == NULL || tunPoller == NULL || tcpReadPaused == NULL || tunWritePendingNbytes == NULL
-      || tunWritePendingBuf == NULL || data == NULL || nbytes <= 0) {
-    return sessionQueueResultError;
-  }
-  if (*tunWritePendingNbytes > 0) {
-    return sessionQueueResultBlocked;
-  }
-  if (ioTunWrite(tunPoller, data, nbytes)) {
-    return sessionQueueResultQueued;
-  }
-
-  queued = ioTunQueuedBytes(tunPoller);
-  if (queued < 0) {
-    return sessionQueueResultError;
-  }
-  if (queued + nbytes > IoPollerQueueCapacity) {
-    memcpy(tunWritePendingBuf, data, (size_t)nbytes);
-    *tunWritePendingNbytes = nbytes;
-    if (!*tcpReadPaused) {
-      if (!ioTcpSetReadEnabled(tcpPoller, false)) {
-        return sessionQueueResultError;
-      }
-      *tcpReadPaused = true;
-    }
-    return sessionQueueResultBlocked;
-  }
-  return sessionQueueResultError;
-}
-
 sessionQueueResult_t clientSendMessage(
     client_t *client,
     const unsigned char key[ProtocolPskSize],
@@ -140,9 +95,6 @@ sessionQueueResult_t clientSendMessage(
 
 sessionQueueResult_t clientHandleInboundMessage(
     client_t *client,
-    bool *tcpReadPaused,
-    long *tunWritePendingNbytes,
-    char tunWritePendingBuf[ProtocolFrameSize],
     long long nowMs,
     long long *lastValidInboundMs,
     const protocolMessage_t *msg) {
@@ -152,14 +104,8 @@ sessionQueueResult_t clientHandleInboundMessage(
   *lastValidInboundMs = nowMs;
 
   if (msg->type == protocolMsgData) {
-    sessionQueueResult_t result = clientQueueTunWithBackpressure(
-        client, tcpReadPaused, tunWritePendingNbytes, tunWritePendingBuf, msg->buf, msg->nbytes);
-    if (result != sessionQueueResultQueued) {
-      return result;
-    }
-    client->lastDataRecvMs = nowMs;
-    dbgf("received %ld bytes of data", msg->nbytes);
-    return sessionQueueResultQueued;
+    logf("unexpected data message in client inbound handler");
+    return sessionQueueResultError;
   }
   if (msg->type == protocolMsgHeartbeatReq) {
     logf("unexpected heartbeat request on client");

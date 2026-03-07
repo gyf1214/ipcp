@@ -86,7 +86,6 @@ int serverFindSlotByClaim(const server_t *server, const unsigned char *claim, lo
 int serverFindPreAuthSlotByFd(const server_t *server, int connFd);
 int serverPickEgressClient(const server_t *server);
 int serverClientCount(const server_t *server);
-long serverQueuedTunBytes(const server_t *server);
 long long serverNowMs(const server_t *server);
 
 bool serverSyncTunWriteInterest(server_t *server);
@@ -102,7 +101,6 @@ serverPendingRetry_t serverRetryPendingTunToTcp(
 bool serverDropPendingTunToTcpByOwner(server_t *server, int ownerSlot);
 sessionQueueResult_t serverQueueTcpWithBackpressure(
     server_t *server, ioTcpPoller_t *tcpPoller, const void *data, long nbytes);
-sessionQueueResult_t serverQueueTunWithBackpressure(server_t *server, const void *data, long nbytes);
 sessionQueueResult_t serverSendMessage(
     server_t *server,
     ioTcpPoller_t *tcpPoller,

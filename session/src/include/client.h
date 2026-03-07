@@ -28,13 +28,6 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
     client_t *client,
     const void *data,
     long nbytes);
-sessionQueueResult_t clientQueueTunWithBackpressure(
-    client_t *client,
-    bool *tcpReadPaused,
-    long *tunWritePendingNbytes,
-    char tunWritePendingBuf[ProtocolFrameSize],
-    const void *data,
-    long nbytes);
 sessionQueueResult_t clientSendMessage(
     client_t *client,
     const unsigned char key[ProtocolPskSize],
@@ -42,9 +35,6 @@ sessionQueueResult_t clientSendMessage(
     const protocolMessage_t *msg);
 sessionQueueResult_t clientHandleInboundMessage(
     client_t *client,
-    bool *tcpReadPaused,
-    long *tunWritePendingNbytes,
-    char tunWritePendingBuf[ProtocolFrameSize],
     long long nowMs,
     long long *lastValidInboundMs,
     const protocolMessage_t *msg);

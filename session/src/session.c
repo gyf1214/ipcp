@@ -68,6 +68,38 @@ static bool serviceBackpressure(
       session->tunWritePendingBuf);
 }
 
+static sessionQueueResult_t queueTunWithBackpressure(
+    ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
+  long queued;
+
+  if (tcpPoller == NULL || tunPoller == NULL || session == NULL || data == NULL || nbytes <= 0) {
+    return sessionQueueResultError;
+  }
+  if (session->tunWritePendingNbytes > 0) {
+    return sessionQueueResultBlocked;
+  }
+  if (ioTunWrite(tunPoller, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+
+  queued = ioTunQueuedBytes(tunPoller);
+  if (queued < 0) {
+    return sessionQueueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    memcpy(session->tunWritePendingBuf, data, (size_t)nbytes);
+    session->tunWritePendingNbytes = nbytes;
+    if (!session->tcpReadPaused) {
+      if (!ioTcpSetReadEnabled(tcpPoller, false)) {
+        return sessionQueueResultError;
+      }
+      session->tcpReadPaused = true;
+    }
+    return sessionQueueResultBlocked;
+  }
+  return sessionQueueResultError;
+}
+
 static bool pipeTun(
     ioTcpPoller_t *tcpPoller,
     ioTunPoller_t *tunPoller,
@@ -149,16 +181,20 @@ static bool pipeTcpBytes(
       continue;
     }
 
-    if (session->isServer) {
+    if (msg.type == protocolMsgData) {
+      result = queueTunWithBackpressure(tcpPoller, tunPoller, session, msg.buf, msg.nbytes);
+      if (result == sessionQueueResultQueued && !session->isServer) {
+        client_t *client = sessionClient(session);
+        client->lastDataRecvMs = now;
+      }
+      session->lastValidInboundMs = now;
+    } else if (session->isServer) {
       result = serverHandleInboundMessage(
           sessionServer(session), tcpPoller, key, &session->lastValidInboundMs, &msg);
     } else {
       client_t *client = sessionClient(session);
       result = clientHandleInboundMessage(
           client,
-          &session->tcpReadPaused,
-          &session->tunWritePendingNbytes,
-          session->tunWritePendingBuf,
           now,
           &session->lastValidInboundMs,
           &msg);

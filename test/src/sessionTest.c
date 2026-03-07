@@ -303,7 +303,7 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
       "tcp read event should continue");
-  testAssertTrue(ioTunServiceWriteEvent(&server.tunPoller), "server tun write service should flush payload");
+  testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "server tun write service should flush payload");
 
   testAssertTrue(
       recv(tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (long)strlen(payload),
@@ -372,7 +372,7 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
       sessionHandleConnEvent(serverSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key)
       == sessionStepContinue,
       "conn event entrypoint should process tcp read");
-  testAssertTrue(ioTunServiceWriteEvent(&server.tunPoller), "tun write service should flush queued frame");
+  testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "tun write service should flush queued frame");
   {
     char received[128];
     ssize_t nread = recv(tunPair[1], received, sizeof(received), MSG_DONTWAIT);
