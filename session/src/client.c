@@ -25,8 +25,8 @@ void clientResetHeartbeatState(
   client->lastDataSentMs = nowMs;
   client->lastDataRecvMs = nowMs;
   client->tunReadPaused = false;
-  client->tcpWritePendingNbytes = 0;
-  memset(client->tcpWritePendingBuf, 0, sizeof(client->tcpWritePendingBuf));
+  client->runtimeOverflowNbytes = 0;
+  memset(client->runtimeOverflowBuf, 0, sizeof(client->runtimeOverflowBuf));
   client->heartbeatIntervalMs = heartbeatIntervalMs;
   client->heartbeatTimeoutMs = heartbeatTimeoutMs;
 }
@@ -47,7 +47,7 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
   if (tcpPoller == NULL || tunPoller == NULL || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
   }
-  if (client->tcpWritePendingNbytes > 0) {
+  if (client->runtimeOverflowNbytes > 0) {
     return sessionQueueResultBlocked;
   }
   if (ioTcpWrite(tcpPoller, data, nbytes)) {
@@ -59,8 +59,8 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
     return sessionQueueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
-    memcpy(client->tcpWritePendingBuf, data, (size_t)nbytes);
-    client->tcpWritePendingNbytes = nbytes;
+    memcpy(client->runtimeOverflowBuf, data, (size_t)nbytes);
+    client->runtimeOverflowNbytes = nbytes;
     if (!client->tunReadPaused) {
       if (!ioTunSetReadEnabled(tunPoller, false)) {
         return sessionQueueResultError;
@@ -167,8 +167,8 @@ bool clientHeartbeatTick(
 bool clientServiceBackpressure(
     client_t *client,
     bool *tcpReadPaused,
-    long *tunWritePendingNbytes,
-    char tunWritePendingBuf[ProtocolFrameSize]) {
+    long *overflowNbytes,
+    char overflowBuf[ProtocolFrameSize]) {
   long queued;
   ioTcpPoller_t *tcpPoller;
   ioTunPoller_t *tunPoller;
@@ -179,33 +179,33 @@ bool clientServiceBackpressure(
   tcpPoller = client->tcpPoller;
   tunPoller = client->tunPoller;
   if (tcpPoller == NULL || tunPoller == NULL || tcpReadPaused == NULL
-      || tunWritePendingNbytes == NULL || tunWritePendingBuf == NULL) {
+      || overflowNbytes == NULL || overflowBuf == NULL) {
     return false;
   }
 
-  if (client->tcpWritePendingNbytes > 0) {
-    if (ioTcpWrite(tcpPoller, client->tcpWritePendingBuf, client->tcpWritePendingNbytes)) {
-      client->tcpWritePendingNbytes = 0;
+  if (client->runtimeOverflowNbytes > 0) {
+    if (ioTcpWrite(tcpPoller, client->runtimeOverflowBuf, client->runtimeOverflowNbytes)) {
+      client->runtimeOverflowNbytes = 0;
     } else {
       queued = ioTcpQueuedBytes(tcpPoller);
-      if (queued < 0 || queued + client->tcpWritePendingNbytes <= IoPollerQueueCapacity) {
+      if (queued < 0 || queued + client->runtimeOverflowNbytes <= IoPollerQueueCapacity) {
         return false;
       }
     }
   }
 
-  if (*tunWritePendingNbytes > 0) {
-    if (ioTunWrite(tunPoller, tunWritePendingBuf, *tunWritePendingNbytes)) {
-      *tunWritePendingNbytes = 0;
+  if (*overflowNbytes > 0) {
+    if (ioTunWrite(tunPoller, overflowBuf, *overflowNbytes)) {
+      *overflowNbytes = 0;
     } else {
       queued = ioTunQueuedBytes(tunPoller);
-      if (queued < 0 || queued + *tunWritePendingNbytes <= IoPollerQueueCapacity) {
+      if (queued < 0 || queued + *overflowNbytes <= IoPollerQueueCapacity) {
         return false;
       }
     }
   }
 
-  if (*tcpReadPaused && *tunWritePendingNbytes == 0) {
+  if (*tcpReadPaused && *overflowNbytes == 0) {
     queued = ioTunQueuedBytes(tunPoller);
     if (queued < 0) {
       return false;
@@ -218,7 +218,7 @@ bool clientServiceBackpressure(
     }
   }
 
-  if (client->tunReadPaused && client->tcpWritePendingNbytes == 0) {
+  if (client->tunReadPaused && client->runtimeOverflowNbytes == 0) {
     queued = ioTcpQueuedBytes(tcpPoller);
     if (queued < 0) {
       return false;

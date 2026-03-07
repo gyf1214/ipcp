@@ -92,7 +92,7 @@ bool serverInit(
   server->tunPoller.frameCount = 0;
   memset(server->tunPoller.outBuf, 0, sizeof(server->tunPoller.outBuf));
   server->pendingOwnerSlot = -1;
-  server->pendingTunToTcpNbytes = 0;
+  server->runtimeOverflowNbytes = 0;
   server->retryCursor = 0;
   server->maxActiveSessions = maxActiveSessions;
   server->activeCount = 0;
@@ -400,7 +400,7 @@ bool serverSetTunReadEnabled(server_t *server, bool enabled) {
 }
 
 bool serverHasPendingTunToTcp(const server_t *server) {
-  return server != NULL && server->pendingTunToTcpNbytes > 0 && server->pendingOwnerSlot >= 0;
+  return server != NULL && server->runtimeOverflowNbytes > 0 && server->pendingOwnerSlot >= 0;
 }
 
 int serverPendingTunToTcpOwner(const server_t *server) {
@@ -411,7 +411,7 @@ int serverPendingTunToTcpOwner(const server_t *server) {
 }
 
 bool serverStorePendingTunToTcp(server_t *server, int ownerSlot, const void *data, long nbytes) {
-  if (server == NULL || data == NULL || nbytes <= 0 || nbytes > (long)sizeof(server->pendingTunToTcpBuf)) {
+  if (server == NULL || data == NULL || nbytes <= 0 || nbytes > (long)sizeof(server->runtimeOverflowBuf)) {
     return false;
   }
   if (!activeSlotIndexValid(server, ownerSlot) || !server->activeConns[ownerSlot].active) {
@@ -421,8 +421,8 @@ bool serverStorePendingTunToTcp(server_t *server, int ownerSlot, const void *dat
     return false;
   }
 
-  memcpy(server->pendingTunToTcpBuf, data, (size_t)nbytes);
-  server->pendingTunToTcpNbytes = nbytes;
+  memcpy(server->runtimeOverflowBuf, data, (size_t)nbytes);
+  server->runtimeOverflowNbytes = nbytes;
   server->pendingOwnerSlot = ownerSlot;
   if (!server->tunReadPaused) {
     return serverSetTunReadEnabled(server, false);
@@ -444,14 +444,14 @@ serverPendingRetry_t serverRetryPendingTunToTcp(
     return serverPendingRetryBlocked;
   }
 
-  if (ioTcpWrite(ownerPoller, server->pendingTunToTcpBuf, server->pendingTunToTcpNbytes)) {
-    server->pendingTunToTcpNbytes = 0;
+  if (ioTcpWrite(ownerPoller, server->runtimeOverflowBuf, server->runtimeOverflowNbytes)) {
+    server->runtimeOverflowNbytes = 0;
     server->pendingOwnerSlot = -1;
     return serverPendingRetryQueued;
   }
 
   queued = ioTcpQueuedBytes(ownerPoller);
-  if (queued < 0 || queued + server->pendingTunToTcpNbytes <= IoPollerQueueCapacity) {
+  if (queued < 0 || queued + server->runtimeOverflowNbytes <= IoPollerQueueCapacity) {
     return serverPendingRetryError;
   }
   return serverPendingRetryBlocked;
@@ -465,7 +465,7 @@ bool serverDropPendingTunToTcpByOwner(server_t *server, int ownerSlot) {
     return true;
   }
 
-  server->pendingTunToTcpNbytes = 0;
+  server->runtimeOverflowNbytes = 0;
   server->pendingOwnerSlot = -1;
   if (server->tunReadPaused) {
     return serverSetTunReadEnabled(server, true);

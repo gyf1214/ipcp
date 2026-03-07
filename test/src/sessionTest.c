@@ -226,12 +226,12 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "session should stay alive on overflow backpressure");
-  testAssertTrue(client.tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
+  testAssertTrue(client.runtimeOverflowNbytes > 0, "pending tcp bytes should be tracked");
   testAssertTrue(client.tunReadPaused, "tun read should be paused under overflow");
 
   sessionReset(session);
-  testAssertTrue(client.tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
-  testAssertTrue(session->tunWritePendingNbytes == 0, "reset should clear pending tun bytes");
+  testAssertTrue(client.runtimeOverflowNbytes == 0, "reset should clear pending tcp bytes");
+  testAssertTrue(session->overflowNbytes == 0, "reset should clear pending tun bytes");
   testAssertTrue(!client.tunReadPaused, "reset should clear tun pause");
   testAssertTrue(!session->tcpReadPaused, "reset should clear tcp pause");
   sessionDestroy(session);
@@ -413,14 +413,14 @@ static void testBackpressurePauseAndResumeFlow(void) {
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
   testAssertTrue(client.tunReadPaused, "tun read should be paused");
-  testAssertTrue(client.tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
+  testAssertTrue(client.runtimeOverflowNbytes > 0, "pending tcp payload should be retained");
 
   testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
   testAssertTrue(read(tcpPair[1], drain, sizeof(drain)) > 0, "drain should consume queued bytes");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
       "service backpressure should continue");
-  testAssertTrue(client.tcpWritePendingNbytes == 0, "pending tcp payload should flush");
+  testAssertTrue(client.runtimeOverflowNbytes == 0, "pending tcp payload should flush");
   testAssertTrue(!client.tunReadPaused, "tun read should resume when queue drains");
 
   sessionDestroy(session);

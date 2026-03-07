@@ -411,7 +411,7 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
       sizeof(payload));
   testAssertTrue(result == sessionQueueResultBlocked, "client queue api should block on overflow");
   testAssertTrue(client.tunReadPaused, "client queue api should pause tun reads on overflow");
-  testAssertTrue(client.tcpWritePendingNbytes > 0, "client queue api should store pending tcp payload");
+  testAssertTrue(client.runtimeOverflowNbytes > 0, "client queue api should store pending tcp payload");
 
   teardownSplitPollers(&poller);
   close(tunPair[0]);
@@ -486,10 +486,10 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
   int tcpPair[2];
   client_t client;
   bool tcpReadPaused = false;
-  long tunWritePendingNbytes = 0;
-  char tunWritePendingBuf[ProtocolFrameSize];
+  long overflowNbytes = 0;
+  char overflowBuf[ProtocolFrameSize];
 
-  memset(tunWritePendingBuf, 0, sizeof(tunWritePendingBuf));
+  memset(overflowBuf, 0, sizeof(overflowBuf));
   setupPairs(tunPair, tcpPair);
   testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
   memset(&client, 0, sizeof(client));
@@ -500,8 +500,8 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
       clientServiceBackpressure(
           &client,
           &tcpReadPaused,
-          &tunWritePendingNbytes,
-          tunWritePendingBuf),
+          &overflowNbytes,
+          overflowBuf),
       "client backpressure service should succeed without pending bytes");
 
   teardownSplitPollers(&poller);
@@ -659,7 +659,7 @@ static void testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds(void) {
       runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
       "client heartbeat tick should continue when request enqueue is blocked");
   testAssertTrue(!client.heartbeatPending, "heartbeat should remain non-pending when req enqueue is blocked");
-  testAssertTrue(client.tcpWritePendingNbytes > 0, "blocked heartbeat request should be retained as pending tcp write");
+  testAssertTrue(client.runtimeOverflowNbytes > 0, "blocked heartbeat request should be retained as pending tcp write");
 
   sessionDestroy(session);
   teardownSplitPollers(&poller);

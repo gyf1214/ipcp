@@ -64,8 +64,8 @@ static bool serviceBackpressure(
   return clientServiceBackpressure(
       client,
       &session->tcpReadPaused,
-      &session->tunWritePendingNbytes,
-      session->tunWritePendingBuf);
+      &session->overflowNbytes,
+      session->overflowBuf);
 }
 
 static sessionQueueResult_t queueTunWithBackpressure(
@@ -75,7 +75,7 @@ static sessionQueueResult_t queueTunWithBackpressure(
   if (tcpPoller == NULL || tunPoller == NULL || session == NULL || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
   }
-  if (session->tunWritePendingNbytes > 0) {
+  if (session->overflowNbytes > 0) {
     return sessionQueueResultBlocked;
   }
   if (ioTunWrite(tunPoller, data, nbytes)) {
@@ -87,8 +87,8 @@ static sessionQueueResult_t queueTunWithBackpressure(
     return sessionQueueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
-    memcpy(session->tunWritePendingBuf, data, (size_t)nbytes);
-    session->tunWritePendingNbytes = nbytes;
+    memcpy(session->overflowBuf, data, (size_t)nbytes);
+    session->overflowNbytes = nbytes;
     if (!session->tcpReadPaused) {
       if (!ioTcpSetReadEnabled(tcpPoller, false)) {
         return sessionQueueResultError;
@@ -349,7 +349,7 @@ bool sessionHasPendingTunEgress(const session_t *session) {
   if (session == NULL) {
     return false;
   }
-  return session->tunWritePendingNbytes > 0;
+  return session->overflowNbytes > 0;
 }
 
 bool sessionServiceBackpressure(session_t *session, ioTcpPoller_t *tcpPoller) {

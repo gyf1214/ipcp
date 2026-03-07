@@ -46,8 +46,8 @@ struct server_t {
   ioTunPoller_t tunPoller;
   bool tunReadPaused;
   int pendingOwnerSlot;
-  long pendingTunToTcpNbytes;
-  unsigned char pendingTunToTcpBuf[ProtocolFrameSize];
+  long runtimeOverflowNbytes;
+  unsigned char runtimeOverflowBuf[ProtocolFrameSize];
   int retryCursor;
   int maxActiveSessions;
   int activeCount;

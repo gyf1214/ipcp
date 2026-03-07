@@ -7,8 +7,8 @@ typedef struct client_t {
   ioTunPoller_t *tunPoller;
   ioTcpPoller_t *tcpPoller;
   bool tunReadPaused;
-  long tcpWritePendingNbytes;
-  char tcpWritePendingBuf[ProtocolFrameSize];
+  long runtimeOverflowNbytes;
+  char runtimeOverflowBuf[ProtocolFrameSize];
   bool heartbeatPending;
   long long heartbeatSentMs;
   long long lastHeartbeatReqMs;
@@ -45,8 +45,8 @@ bool clientHeartbeatTick(
 bool clientServiceBackpressure(
     client_t *client,
     bool *tcpReadPaused,
-    long *tunWritePendingNbytes,
-    char tunWritePendingBuf[ProtocolFrameSize]);
+    long *overflowNbytes,
+    char overflowBuf[ProtocolFrameSize]);
 
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg);
 int clientReadRawMsg(int fd, protocolRawMsg_t *msg);
