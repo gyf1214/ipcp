@@ -24,6 +24,7 @@ void clientResetHeartbeatState(
   runtime->lastHeartbeatReqMs = nowMs;
   runtime->lastDataSentMs = nowMs;
   runtime->lastDataRecvMs = nowMs;
+  runtime->tunReadPaused = false;
   runtime->tcpWritePendingNbytes = 0;
   memset(runtime->tcpWritePendingBuf, 0, sizeof(runtime->tcpWritePendingBuf));
   runtime->heartbeatIntervalMs = heartbeatIntervalMs;
@@ -32,7 +33,6 @@ void clientResetHeartbeatState(
 
 sessionQueueResult_t clientQueueTcpWithBackpressure(
     client_t *runtime,
-    bool *tunReadPaused,
     const void *data,
     long nbytes) {
   long queued;
@@ -44,7 +44,7 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
   }
   tcpPoller = runtime->tcpPoller;
   tunPoller = runtime->tunPoller;
-  if (tcpPoller == NULL || tunPoller == NULL || tunReadPaused == NULL || data == NULL || nbytes <= 0) {
+  if (tcpPoller == NULL || tunPoller == NULL || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
   }
   if (runtime->tcpWritePendingNbytes > 0) {
@@ -61,11 +61,11 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
   if (queued + nbytes > IoPollerQueueCapacity) {
     memcpy(runtime->tcpWritePendingBuf, data, (size_t)nbytes);
     runtime->tcpWritePendingNbytes = nbytes;
-    if (!*tunReadPaused) {
+    if (!runtime->tunReadPaused) {
       if (!ioTunSetReadEnabled(tunPoller, false)) {
         return sessionQueueResultError;
       }
-      *tunReadPaused = true;
+      runtime->tunReadPaused = true;
     }
     return sessionQueueResultBlocked;
   }
@@ -119,7 +119,6 @@ sessionQueueResult_t clientQueueTunWithBackpressure(
 
 sessionQueueResult_t clientSendMessage(
     client_t *runtime,
-    bool *tunReadPaused,
     const unsigned char key[ProtocolPskSize],
     long long nowMs,
     const protocolMessage_t *msg) {
@@ -132,7 +131,7 @@ sessionQueueResult_t clientSendMessage(
   if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
     return sessionQueueResultError;
   }
-  result = clientQueueTcpWithBackpressure(runtime, tunReadPaused, frame.buf, frame.nbytes);
+  result = clientQueueTcpWithBackpressure(runtime, frame.buf, frame.nbytes);
   if (result == sessionQueueResultQueued && msg->type == protocolMsgData) {
     runtime->lastDataSentMs = nowMs;
   }
@@ -181,9 +180,8 @@ sessionQueueResult_t clientHandleInboundMessage(
 bool clientHeartbeatTick(
     client_t *runtime,
     long long nowMs,
-    bool *tunReadPaused,
     const unsigned char key[ProtocolPskSize]) {
-  if (runtime == NULL || tunReadPaused == NULL || key == NULL || runtime->heartbeatIntervalMs <= 0
+  if (runtime == NULL || key == NULL || runtime->heartbeatIntervalMs <= 0
       || runtime->heartbeatTimeoutMs <= runtime->heartbeatIntervalMs) {
     return false;
   }
@@ -196,7 +194,6 @@ bool clientHeartbeatTick(
       protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
       sessionQueueResult_t result = clientSendMessage(
           runtime,
-          tunReadPaused,
           key,
           nowMs,
           &req);
@@ -223,7 +220,6 @@ bool clientHeartbeatTick(
 
 bool clientServiceBackpressure(
     client_t *runtime,
-    bool *tunReadPaused,
     bool *tcpReadPaused,
     long *tunWritePendingNbytes,
     char tunWritePendingBuf[ProtocolFrameSize]) {
@@ -236,7 +232,7 @@ bool clientServiceBackpressure(
   }
   tcpPoller = runtime->tcpPoller;
   tunPoller = runtime->tunPoller;
-  if (tcpPoller == NULL || tunPoller == NULL || tunReadPaused == NULL || tcpReadPaused == NULL
+  if (tcpPoller == NULL || tunPoller == NULL || tcpReadPaused == NULL
       || tunWritePendingNbytes == NULL || tunWritePendingBuf == NULL) {
     return false;
   }
@@ -276,7 +272,7 @@ bool clientServiceBackpressure(
     }
   }
 
-  if (*tunReadPaused && runtime->tcpWritePendingNbytes == 0) {
+  if (runtime->tunReadPaused && runtime->tcpWritePendingNbytes == 0) {
     queued = ioTcpQueuedBytes(tcpPoller);
     if (queued < 0) {
       return false;
@@ -285,7 +281,7 @@ bool clientServiceBackpressure(
       if (!ioTunSetReadEnabled(tunPoller, true)) {
         return false;
       }
-      *tunReadPaused = false;
+      runtime->tunReadPaused = false;
     }
   }
 

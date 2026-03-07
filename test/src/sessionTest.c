@@ -227,12 +227,12 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "session should stay alive on overflow backpressure");
   testAssertTrue(clientRuntime.tcpWritePendingNbytes > 0, "pending tcp bytes should be tracked");
-  testAssertTrue(session->tunReadPaused, "tun read should be paused under overflow");
+  testAssertTrue(clientRuntime.tunReadPaused, "tun read should be paused under overflow");
 
   sessionReset(session);
   testAssertTrue(clientRuntime.tcpWritePendingNbytes == 0, "reset should clear pending tcp bytes");
   testAssertTrue(session->tunWritePendingNbytes == 0, "reset should clear pending tun bytes");
-  testAssertTrue(!session->tunReadPaused, "reset should clear tun pause");
+  testAssertTrue(!clientRuntime.tunReadPaused, "reset should clear tun pause");
   testAssertTrue(!session->tcpReadPaused, "reset should clear tcp pause");
   sessionDestroy(session);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
@@ -411,7 +411,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
-  testAssertTrue(session->tunReadPaused, "tun read should be paused");
+  testAssertTrue(clientRuntime.tunReadPaused, "tun read should be paused");
   testAssertTrue(clientRuntime.tcpWritePendingNbytes > 0, "pending tcp payload should be retained");
 
   testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
@@ -420,7 +420,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
       "service backpressure should continue");
   testAssertTrue(clientRuntime.tcpWritePendingNbytes == 0, "pending tcp payload should flush");
-  testAssertTrue(!session->tunReadPaused, "tun read should resume when queue drains");
+  testAssertTrue(!clientRuntime.tunReadPaused, "tun read should resume when queue drains");
 
   sessionDestroy(session);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);

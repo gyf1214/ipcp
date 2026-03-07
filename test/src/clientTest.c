@@ -392,7 +392,6 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
   client_t runtime;
   char fill[IoPollerQueueCapacity];
   char payload[128];
-  bool tunReadPaused = false;
   sessionQueueResult_t result;
 
   memset(fill, 'w', sizeof(fill));
@@ -408,11 +407,10 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
       "prefill client tcp queue should succeed");
   result = clientQueueTcpWithBackpressure(
       &runtime,
-      &tunReadPaused,
       payload,
       sizeof(payload));
   testAssertTrue(result == sessionQueueResultBlocked, "client queue api should block on overflow");
-  testAssertTrue(tunReadPaused, "client queue api should pause tun reads on overflow");
+  testAssertTrue(runtime.tunReadPaused, "client queue api should pause tun reads on overflow");
   testAssertTrue(runtime.tcpWritePendingNbytes > 0, "client queue api should store pending tcp payload");
 
   teardownSplitPollers(&poller);
@@ -466,7 +464,6 @@ static void testClientHeartbeatTickSetsPendingAndTimestamps(void) {
   int tunPair[2];
   int tcpPair[2];
   client_t runtime;
-  bool tunReadPaused = false;
   bool ok;
 
   setupPairs(tunPair, tcpPair);
@@ -476,7 +473,7 @@ static void testClientHeartbeatTickSetsPendingAndTimestamps(void) {
   runtime.tcpPoller = &poller.tcpPoller;
   clientResetHeartbeatState(&runtime, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs, 0);
 
-  ok = clientHeartbeatTick(&runtime, 6000, &tunReadPaused, testClientKey);
+  ok = clientHeartbeatTick(&runtime, 6000, testClientKey);
   testAssertTrue(ok, "client heartbeat tick should continue");
   testAssertTrue(runtime.heartbeatPending, "client heartbeat handler should set pending when request queues");
   testAssertTrue(runtime.heartbeatSentMs == 6000, "client heartbeat handler should capture send timestamp");
@@ -494,7 +491,6 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
   int tunPair[2];
   int tcpPair[2];
   client_t runtime;
-  bool tunReadPaused = false;
   bool tcpReadPaused = false;
   long tunWritePendingNbytes = 0;
   char tunWritePendingBuf[ProtocolFrameSize];
@@ -509,7 +505,6 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
   testAssertTrue(
       clientServiceBackpressure(
           &runtime,
-          &tunReadPaused,
           &tcpReadPaused,
           &tunWritePendingNbytes,
           tunWritePendingBuf),

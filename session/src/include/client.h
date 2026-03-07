@@ -6,6 +6,7 @@
 typedef struct client_t {
   ioTunPoller_t *tunPoller;
   ioTcpPoller_t *tcpPoller;
+  bool tunReadPaused;
   long tcpWritePendingNbytes;
   char tcpWritePendingBuf[ProtocolFrameSize];
   bool heartbeatPending;
@@ -25,7 +26,6 @@ void clientResetHeartbeatState(
 
 sessionQueueResult_t clientQueueTcpWithBackpressure(
     client_t *runtime,
-    bool *tunReadPaused,
     const void *data,
     long nbytes);
 sessionQueueResult_t clientQueueTunWithBackpressure(
@@ -37,7 +37,6 @@ sessionQueueResult_t clientQueueTunWithBackpressure(
     long nbytes);
 sessionQueueResult_t clientSendMessage(
     client_t *runtime,
-    bool *tunReadPaused,
     const unsigned char key[ProtocolPskSize],
     long long nowMs,
     const protocolMessage_t *msg);
@@ -52,11 +51,9 @@ sessionQueueResult_t clientHandleInboundMessage(
 bool clientHeartbeatTick(
     client_t *runtime,
     long long nowMs,
-    bool *tunReadPaused,
     const unsigned char key[ProtocolPskSize]);
 bool clientServiceBackpressure(
     client_t *runtime,
-    bool *tunReadPaused,
     bool *tcpReadPaused,
     long *tunWritePendingNbytes,
     char tunWritePendingBuf[ProtocolFrameSize]);

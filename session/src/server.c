@@ -396,9 +396,14 @@ bool serverSetTunReadEnabled(server_t *runtime, bool enabled) {
     nextEvents &= ~EPOLLIN;
   }
   if (nextEvents == runtime->tunPoller.events) {
+    runtime->tunReadPaused = !enabled;
     return true;
   }
-  return runtimeTunEpollCtl(runtime, nextEvents);
+  if (!runtimeTunEpollCtl(runtime, nextEvents)) {
+    return false;
+  }
+  runtime->tunReadPaused = !enabled;
+  return true;
 }
 
 bool serverHasPendingTunToTcp(const server_t *runtime) {
@@ -426,7 +431,10 @@ bool serverStorePendingTunToTcp(server_t *runtime, int ownerSlot, const void *da
   memcpy(runtime->pendingTunToTcpBuf, data, (size_t)nbytes);
   runtime->pendingTunToTcpNbytes = nbytes;
   runtime->pendingOwnerSlot = ownerSlot;
-  return serverSetTunReadEnabled(runtime, false);
+  if (!runtime->tunReadPaused) {
+    return serverSetTunReadEnabled(runtime, false);
+  }
+  return true;
 }
 
 serverPendingRetry_t serverRetryPendingTunToTcp(
@@ -466,7 +474,10 @@ bool serverDropPendingTunToTcpByOwner(server_t *runtime, int ownerSlot) {
 
   runtime->pendingTunToTcpNbytes = 0;
   runtime->pendingOwnerSlot = -1;
-  return serverSetTunReadEnabled(runtime, true);
+  if (runtime->tunReadPaused) {
+    return serverSetTunReadEnabled(runtime, true);
+  }
+  return true;
 }
 
 sessionQueueResult_t serverQueueTcpWithBackpressure(
@@ -613,6 +624,9 @@ bool serverServiceBackpressure(server_t *runtime, ioTcpPoller_t *tcpPoller, ioEv
     return false;
   }
   if (queued > IoPollerLowWatermark) {
+    return true;
+  }
+  if (!runtime->tunReadPaused) {
     return true;
   }
   return serverSetTunReadEnabled(runtime, true);

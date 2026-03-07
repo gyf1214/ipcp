@@ -776,6 +776,7 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
       runSessionStepSplit(session, poller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "session should continue on overflow");
   testAssertTrue(serverHasPendingTunToTcp(&runtime), "server overflow should retain pending data in runtime");
+  testAssertTrue(runtime.tunReadPaused, "server runtime should mark tun read paused while pending exists");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "runtime should disable tun epollin while pending exists");
 
   teardownServerForSessionTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
@@ -817,6 +818,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       runSessionStepSplit(ownerSession, ownerPoller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow on owner should continue");
   testAssertTrue(serverHasPendingTunToTcp(&runtime), "owner overflow should store runtime pending bytes");
+  testAssertTrue(runtime.tunReadPaused, "server runtime should mark tun read paused while pending exists");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while runtime pending exists");
 
   testAssertTrue(
@@ -840,6 +842,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       "owner tcp write path should continue after second drain");
   queued = ioTcpQueuedBytes(ownerPoller);
   testAssertTrue(queued <= IoPollerLowWatermark, "owner queue should drain to low watermark");
+  testAssertTrue(!runtime.tunReadPaused, "server runtime should clear tun read paused at low watermark");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
 
   teardownServerForSessionTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
@@ -874,10 +877,12 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   testAssertTrue(
       runSessionStepSplit(session, poller, &runtime.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
+  testAssertTrue(runtime.tunReadPaused, "server runtime should mark tun read paused while pending is active");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
 
   testAssertTrue(serverRemoveClient(&runtime, slotA), "owner removal should succeed");
   slotA = -1;
+  testAssertTrue(!runtime.tunReadPaused, "server runtime should clear tun read paused after owner drop");
   testAssertTrue((runtime.tunPoller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
 
   teardownServerForSessionTest(&runtime, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);

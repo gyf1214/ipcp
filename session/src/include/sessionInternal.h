@@ -35,7 +35,6 @@ struct session_t {
   long long lastValidInboundMs;
   int heartbeatIntervalMs;
   int heartbeatTimeoutMs;
-  bool tunReadPaused;
   bool tcpReadPaused;
   long tunWritePendingNbytes;
   char tunWritePendingBuf[ProtocolFrameSize];

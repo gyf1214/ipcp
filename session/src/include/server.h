@@ -44,6 +44,7 @@ struct server_t {
   int listenFd;
   int epollFd;
   ioTunPoller_t tunPoller;
+  bool tunReadPaused;
   int pendingOwnerSlot;
   long pendingTunToTcpNbytes;
   unsigned char pendingTunToTcpBuf[ProtocolFrameSize];

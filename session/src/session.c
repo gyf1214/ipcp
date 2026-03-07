@@ -57,26 +57,13 @@ static bool serviceBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, ioEvent_t event) {
   if (session->isServer) {
     server_t *runtime = sessionServer(session);
-    long queued;
-    if (!serverServiceBackpressure(runtime, tcpPoller, event)) {
-      return false;
-    }
-    if (serverHasPendingTunToTcp(runtime)) {
-      session->tunReadPaused = true;
-      return true;
-    }
-    queued = ioTcpQueuedBytes(tcpPoller);
-    if (queued < 0) {
-      return false;
-    }
-    session->tunReadPaused = queued > IoPollerLowWatermark;
-    return true;
+    (void)tunPoller;
+    return serverServiceBackpressure(runtime, tcpPoller, event);
   }
 
   client_t *client = sessionClient(session);
   return clientServiceBackpressure(
       client,
-      &session->tunReadPaused,
       &session->tcpReadPaused,
       &session->tunWritePendingNbytes,
       session->tunWritePendingBuf);
@@ -117,7 +104,6 @@ static bool pipeTun(
     client_t *client = sessionClient(session);
     result = clientSendMessage(
         client,
-        &session->tunReadPaused,
         key,
         nowMs,
         &msg);
@@ -364,7 +350,6 @@ static sessionStepResult_t sessionFinalizeStep(
     if (!clientHeartbeatTick(
             client,
             now,
-            &session->tunReadPaused,
             key)) {
       logf("heartbeat failure");
       return sessionStepStop;
@@ -408,7 +393,6 @@ sessionStepResult_t sessionHandleTunIngressPayload(
     client_t *client = sessionClient(session);
     result = clientSendMessage(
         client,
-        &session->tunReadPaused,
         key,
         nowMs,
         &msg);
