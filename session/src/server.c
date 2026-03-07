@@ -356,7 +356,7 @@ int serverRetryBlockedTunRoundRobin(server_t *server) {
     if (!sessionHasOverflow(session)) {
       continue;
     }
-    if (!sessionRetryOverflow(session, &server->activeConns[slot].tcpPoller, &server->tunPoller)) {
+    if (!sessionRetryOverflow(session, &server->activeConns[slot].tcpPoller, &server->tunPoller, ioEventTunWrite)) {
       return -1;
     }
   }
@@ -581,36 +581,34 @@ bool serverHeartbeatTick(long long nowMs, long long lastValidInboundMs, long lon
   return nowMs - lastValidInboundMs < timeoutMs;
 }
 
-bool serverServiceBackpressure(server_t *server, ioTcpPoller_t *tcpPoller, ioEvent_t event) {
+bool serverServiceBackpressure(server_t *server, int slot, ioEvent_t event) {
   long queued;
+  int ownerSlot;
+  ioTcpPoller_t *ownerPoller;
+  serverPendingRetry_t retry;
 
-  if (server == NULL || tcpPoller == NULL) {
-    return false;
-  }
-
-  if (serverHasPendingTunToTcp(server)) {
-    int ownerSlot = serverPendingTunToTcpOwner(server);
-    int slot = serverFindSlotByFd(server, tcpPoller->tcpFd);
-    if (slot < 0) {
-      return false;
-    }
-    if (event == ioEventTcpWrite && slot == ownerSlot) {
-      serverPendingRetry_t retry = serverRetryPendingTunToTcp(server, ownerSlot, tcpPoller);
-      if (retry == serverPendingRetryError) {
-        return false;
-      }
-    }
-  }
-
-  if (serverHasPendingTunToTcp(server)) {
+  if (server == NULL || event != ioEventTcpWrite || !serverHasPendingTunToTcp(server)) {
     return true;
   }
 
-  queued = ioTcpQueuedBytes(tcpPoller);
+  ownerSlot = serverPendingTunToTcpOwner(server);
+  if (slot != ownerSlot || !activeSlotIndexValid(server, ownerSlot) || !server->activeConns[ownerSlot].active) {
+    return true;
+  }
+  ownerPoller = &server->activeConns[ownerSlot].tcpPoller;
+  queued = ioTcpQueuedBytes(ownerPoller);
   if (queued < 0) {
     return false;
   }
   if (queued > IoPollerLowWatermark) {
+    return true;
+  }
+
+  retry = serverRetryPendingTunToTcp(server, ownerSlot, ownerPoller);
+  if (retry == serverPendingRetryError) {
+    return false;
+  }
+  if (serverHasPendingTunToTcp(server)) {
     return true;
   }
   if (!server->tunReadPaused) {
@@ -1101,7 +1099,7 @@ static bool serverDispatchTunIngressToSlot(
     close(connFd);
     return serverRemoveClient(server, slot);
   }
-  if (sessionFinalizeStep(session, &server->activeConns[slot].tcpPoller, ioEventTunRead, key) == sessionStepStop) {
+  if (sessionFinalizeStep(session, key) == sessionStepStop) {
     (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
     close(connFd);
     return serverRemoveClient(server, slot);
@@ -1172,7 +1170,7 @@ static bool serverFanoutTunIngressToAll(
       continue;
     }
 
-    if (sessionFinalizeStep(session, &server->activeConns[slot].tcpPoller, ioEventTunRead, key) == sessionStepStop) {
+    if (sessionFinalizeStep(session, key) == sessionStepStop) {
       (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
       close(connFd);
       return serverRemoveClient(server, slot);
@@ -1456,6 +1454,9 @@ int serverServeMultiClient(
         }
         if ((ev & EPOLLOUT) != 0) {
           if (!ioTcpServiceWriteEvent(&server.activeConns[slot].tcpPoller)) {
+            goto cleanup;
+          }
+          if (!serverServiceBackpressure(&server, slot, ioEventTcpWrite)) {
             goto cleanup;
           }
           if (!serverDispatchClient(&server, slot, ioEventTcpWrite)) {

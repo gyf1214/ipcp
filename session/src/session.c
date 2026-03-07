@@ -53,17 +53,6 @@ static void sessionResetClientHeartbeatState(session_t *session) {
       sessionNowMs(session));
 }
 
-static bool serviceBackpressure(
-    ioTcpPoller_t *tcpPoller, session_t *session, ioEvent_t event) {
-  if (session->isServer) {
-    server_t *server = sessionServer(session);
-    return serverServiceBackpressure(server, tcpPoller, event);
-  }
-
-  client_t *client = sessionClient(session);
-  return clientServiceBackpressure(client, session);
-}
-
 static sessionQueueResult_t queueTunWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
   long queued;
@@ -348,17 +337,26 @@ bool sessionHasOverflow(const session_t *session) {
   return session->overflowNbytes > 0;
 }
 
-bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller) {
+bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioEvent_t event) {
   long queued;
   if (session == NULL || tcpPoller == NULL || tunPoller == NULL) {
     return false;
   }
+  if (event != ioEventTunWrite) {
+    return true;
+  }
   if (session->overflowNbytes > 0) {
+    queued = ioTunQueuedBytes(tunPoller);
+    if (queued < 0) {
+      return false;
+    }
+    if (queued > IoPollerLowWatermark) {
+      return true;
+    }
     if (ioTunWrite(tunPoller, session->overflowBuf, session->overflowNbytes)) {
       session->overflowNbytes = 0;
     } else {
-      queued = ioTunQueuedBytes(tunPoller);
-      if (queued < 0 || queued + session->overflowNbytes <= IoPollerQueueCapacity) {
+      if (queued + session->overflowNbytes <= IoPollerQueueCapacity) {
         return false;
       }
     }
@@ -380,16 +378,9 @@ bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPol
 
 sessionStepResult_t sessionFinalizeStep(
     session_t *session,
-    ioTcpPoller_t *tcpPoller,
-    ioEvent_t event,
     const unsigned char key[ProtocolPskSize]) {
   long long now = sessionNowMs(session);
   long long timeoutMs = heartbeatTimeoutMs(session);
-
-  if (!serviceBackpressure(tcpPoller, session, event)) {
-    logf("backpressure handling failure");
-    return sessionStepStop;
-  }
 
   if (session->isServer) {
     bool ok = serverHeartbeatTick(now, session->lastValidInboundMs, timeoutMs);
@@ -426,7 +417,7 @@ sessionStepResult_t sessionHandleConnEvent(
   if (event == ioEventTcpRead && !pipeTcp(tcpPoller, tunPoller, key, session)) {
     return sessionStepStop;
   }
-  return sessionFinalizeStep(session, tcpPoller, event, key);
+  return sessionFinalizeStep(session, key);
 }
 
 sessionStepResult_t sessionStep(
@@ -442,7 +433,7 @@ sessionStepResult_t sessionStep(
     if (!pipeTun(tcpPoller, tunPoller, key, session)) {
       return sessionStepStop;
     }
-    return sessionFinalizeStep(session, tcpPoller, event, key);
+    return sessionFinalizeStep(session, key);
   }
   return sessionHandleConnEvent(session, tcpPoller, tunPoller, event, key);
 }

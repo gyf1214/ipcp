@@ -499,8 +499,53 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
   testAssertTrue(
       clientServiceBackpressure(
           &client,
-          session),
+          session,
+          ioEventTimeout),
       "client backpressure service should succeed without pending bytes");
+
+  sessionDestroy(session);
+  teardownSplitPollers(&poller);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
+static void testClientBackpressureServiceSkipsRetryOnTimeoutEvent(void) {
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  client_t client;
+  session_t *session;
+  const char tunPayload[] = "pending-tun";
+  const char tcpPayload[] = "pending-tcp";
+
+  setupPairs(tunPair, tcpPair);
+  testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
+  session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+  memset(&client, 0, sizeof(client));
+  client.tunPoller = &poller.tunPoller;
+  client.tcpPoller = &poller.tcpPoller;
+  sessionAttachClient(session, &client);
+
+  memcpy(session->overflowBuf, tunPayload, sizeof(tunPayload));
+  session->overflowNbytes = sizeof(tunPayload);
+  session->tcpReadPaused = true;
+  memcpy(client.runtimeOverflowBuf, tcpPayload, sizeof(tcpPayload));
+  client.runtimeOverflowNbytes = sizeof(tcpPayload);
+  client.tunReadPaused = true;
+
+  testAssertTrue(
+      clientServiceBackpressure(
+          &client,
+          session,
+          ioEventTimeout),
+      "client backpressure service should continue on timeout event");
+  testAssertTrue(session->overflowNbytes == (long)sizeof(tunPayload), "timeout event should not retry pending tun overflow");
+  testAssertTrue(client.runtimeOverflowNbytes == (long)sizeof(tcpPayload), "timeout event should not retry pending tcp overflow");
+  testAssertTrue(session->tcpReadPaused, "timeout event should keep tcp reads paused while overflow is pending");
+  testAssertTrue(client.tunReadPaused, "timeout event should keep tun reads paused while overflow is pending");
 
   sessionDestroy(session);
   teardownSplitPollers(&poller);
@@ -710,6 +755,7 @@ void runClientTests(void) {
   testClientInboundHandlerAcceptsHeartbeatAckAndRefreshesTimestamp();
   testClientHeartbeatTickSetsPendingAndTimestamps();
   testClientBackpressureServiceSucceedsWithoutPendingBytes();
+  testClientBackpressureServiceSkipsRetryOnTimeoutEvent();
   testClientHeartbeatUsesConfiguredInterval();
   testClientHeartbeatTimeoutUsesConfiguredTimeout();
   testClientHeartbeatRequestAndAckFlow();

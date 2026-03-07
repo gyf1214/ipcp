@@ -52,11 +52,9 @@ bool sessionPromoteFromPreAuth(
     const char *carryBuf,
     long carryNbytes);
 bool sessionHasOverflow(const session_t *session);
-bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller);
+bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioEvent_t event);
 sessionStepResult_t sessionFinalizeStep(
     session_t *session,
-    ioTcpPoller_t *tcpPoller,
-    ioEvent_t event,
     const unsigned char key[ProtocolPskSize]);
 sessionStepResult_t sessionHandleConnEvent(
     session_t *session,

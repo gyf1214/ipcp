@@ -115,7 +115,7 @@ sessionQueueResult_t serverHandleInboundMessage(
     long long *lastValidInboundMs,
     const protocolMessage_t *msg);
 bool serverHeartbeatTick(long long nowMs, long long lastValidInboundMs, long long timeoutMs);
-bool serverServiceBackpressure(server_t *server, ioTcpPoller_t *tcpPoller, ioEvent_t event);
+bool serverServiceBackpressure(server_t *server, int slot, ioEvent_t event);
 
 session_t *serverSessionAt(server_t *server, int slot);
 int serverConnFdAt(const server_t *server, int slot);

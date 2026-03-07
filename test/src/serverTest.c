@@ -858,6 +858,9 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(
       runSessionStepSplit(otherSession, otherPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "non-owner tcp write path should continue");
+  testAssertTrue(
+      serverServiceBackpressure(&server, slotB, ioEventTcpWrite),
+      "non-owner backpressure service should continue");
   testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "non-owner should not consume server pending");
 
   ownerPoller->outOffset = 0;
@@ -865,8 +868,12 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(
       runSessionStepSplit(ownerSession, ownerPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "owner tcp write path should continue after first drain");
+  testAssertTrue(
+      serverServiceBackpressure(&server, slotA, ioEventTcpWrite),
+      "owner backpressure service should continue above low watermark");
   queued = ioTcpQueuedBytes(ownerPoller);
   testAssertTrue(queued > IoPollerLowWatermark, "owner queue should remain above low watermark");
+  testAssertTrue(serverHasPendingTunToTcp(&server), "owner pending payload should remain while queue is above low watermark");
   testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
 
   ownerPoller->outOffset = 0;
@@ -875,7 +882,11 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       runSessionStepSplit(ownerSession, ownerPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "owner tcp write path should continue after second drain");
   queued = ioTcpQueuedBytes(ownerPoller);
-  testAssertTrue(queued <= IoPollerLowWatermark, "owner queue should drain to low watermark");
+  testAssertTrue(queued <= IoPollerLowWatermark, "owner queue should drain to low watermark before retry");
+  testAssertTrue(
+      serverServiceBackpressure(&server, slotA, ioEventTcpWrite),
+      "owner backpressure service should continue at low watermark");
+  testAssertTrue(!serverHasPendingTunToTcp(&server), "owner pending payload should clear once queue drains to low watermark");
   testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused at low watermark");
   testAssertTrue((server.tunPoller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
 
@@ -990,31 +1001,6 @@ static void testServerHeartbeatTickTimeoutBoundary(void) {
   testAssertTrue(!serverHeartbeatTick(9000, 0, 9000), "server heartbeat should stop at timeout boundary");
 }
 
-static void testServerBackpressureServiceSucceedsWithoutPendingBytes(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
-  testAssertTrue(
-      serverInit(&server, tunPair[0], 82, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server server init should succeed");
-  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
-  testAssertTrue(
-      serverServiceBackpressure(
-          &server,
-          &server.activeConns[0].tcpPoller,
-          ioEventTimeout),
-      "server backpressure service should succeed without pending bytes");
-
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
-}
-
 void runServerTests(void) {
   testServerServeMultiClientRejectsInvalidArgs();
   testServerAddRemoveAndReuseSlots();
@@ -1033,7 +1019,6 @@ void runServerTests(void) {
   testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload();
   testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp();
   testServerHeartbeatTickTimeoutBoundary();
-  testServerBackpressureServiceSucceedsWithoutPendingBytes();
   testServerHeartbeatTimeoutStopsSession();
   testServerHeartbeatTimeoutUsesConfiguredTimeout();
   testServerTunOverflowDisablesTunEpollinGlobally();

@@ -147,7 +147,7 @@ static void wireServerSession(session_t *session, server_t *server, splitPollers
   sessionAttachServer(session, server);
 }
 
-static void assertSessionStepAbortsWhenRuntimeMissing(bool isServer) {
+static void assertSessionStepBehaviorWhenRuntimeMissing(bool isServer, bool expectAbort) {
   splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
@@ -169,8 +169,13 @@ static void assertSessionStepAbortsWhenRuntimeMissing(bool isServer) {
   }
 
   testAssertTrue(waitpid(pid, &status, 0) == pid, "waitpid should succeed");
-  testAssertTrue(WIFSIGNALED(status), "child should terminate via signal");
-  testAssertTrue(WTERMSIG(status) == SIGABRT, "child should abort on missing runtime");
+  if (expectAbort) {
+    testAssertTrue(WIFSIGNALED(status), "child should terminate via signal");
+    testAssertTrue(WTERMSIG(status) == SIGABRT, "child should abort on missing runtime");
+  } else {
+    testAssertTrue(WIFEXITED(status), "child should exit cleanly");
+    testAssertTrue(WEXITSTATUS(status) == 0, "child should return success without runtime assertion");
+  }
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
@@ -181,12 +186,12 @@ static void testSessionApiSmoke(void) {
   sessionDestroy((session_t *)session);
 }
 
-static void testSessionServerRoleAssertsOnMissingRuntime(void) {
-  assertSessionStepAbortsWhenRuntimeMissing(true);
+static void testSessionServerRoleSkipsRuntimeAssertOnTimeout(void) {
+  assertSessionStepBehaviorWhenRuntimeMissing(true, false);
 }
 
 static void testSessionClientRoleAssertsOnMissingRuntime(void) {
-  assertSessionStepAbortsWhenRuntimeMissing(false);
+  assertSessionStepBehaviorWhenRuntimeMissing(false, true);
 }
 
 static void testSessionInitSeedsModeAndTimestamps(void) {
@@ -419,7 +424,10 @@ static void testBackpressurePauseAndResumeFlow(void) {
   testAssertTrue(read(tcpPair[1], drain, sizeof(drain)) > 0, "drain should consume queued bytes");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
-      "service backpressure should continue");
+      "tcp write event should continue");
+  testAssertTrue(
+      clientServiceBackpressure(&client, session, ioEventTcpWrite),
+      "client backpressure service should continue");
   testAssertTrue(client.runtimeOverflowNbytes == 0, "pending tcp payload should flush");
   testAssertTrue(!client.tunReadPaused, "tun read should resume when queue drains");
 
@@ -444,7 +452,7 @@ static void testSessionRetryOverflowFlushesAndResumesRead(void) {
 
   testAssertTrue(sessionHasOverflow(session), "session should report pending overflow");
   testAssertTrue(
-      sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller),
+      sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller, ioEventTunWrite),
       "session retry overflow should succeed");
   testAssertTrue(!sessionHasOverflow(session), "session overflow should clear after retry");
   testAssertTrue(!session->tcpReadPaused, "tcp read pause should clear after retry");
@@ -472,7 +480,7 @@ static void testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated(void)
   session->tcpReadPaused = true;
 
   testAssertTrue(
-      sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller),
+      sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller, ioEventTunWrite),
       "session retry overflow should stay alive when queue remains saturated");
   testAssertTrue(sessionHasOverflow(session), "session overflow should remain pending");
   testAssertTrue(session->tcpReadPaused, "tcp read should remain paused while overflow is pending");
@@ -558,7 +566,7 @@ static void testSharedTunWriteInterestIsRuntimeOwned(void) {
 }
 
 void runSessionTests(void) {
-  testSessionServerRoleAssertsOnMissingRuntime();
+  testSessionServerRoleSkipsRuntimeAssertOnTimeout();
   testSessionClientRoleAssertsOnMissingRuntime();
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();

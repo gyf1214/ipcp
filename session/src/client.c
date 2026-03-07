@@ -166,7 +166,8 @@ bool clientHeartbeatTick(
 
 bool clientServiceBackpressure(
     client_t *client,
-    session_t *session) {
+    session_t *session,
+    ioEvent_t event) {
   long queued;
   ioTcpPoller_t *tcpPoller;
   ioTunPoller_t *tunPoller;
@@ -180,22 +181,28 @@ bool clientServiceBackpressure(
     return false;
   }
 
-  if (!sessionRetryOverflow(session, tcpPoller, tunPoller)) {
+  if (!sessionRetryOverflow(session, tcpPoller, tunPoller, event)) {
     return false;
   }
 
-  if (client->runtimeOverflowNbytes > 0) {
+  if (event == ioEventTcpWrite && client->runtimeOverflowNbytes > 0) {
+    queued = ioTcpQueuedBytes(tcpPoller);
+    if (queued < 0) {
+      return false;
+    }
+    if (queued > IoPollerLowWatermark) {
+      return true;
+    }
     if (ioTcpWrite(tcpPoller, client->runtimeOverflowBuf, client->runtimeOverflowNbytes)) {
       client->runtimeOverflowNbytes = 0;
     } else {
-      queued = ioTcpQueuedBytes(tcpPoller);
-      if (queued < 0 || queued + client->runtimeOverflowNbytes <= IoPollerQueueCapacity) {
+      if (queued + client->runtimeOverflowNbytes <= IoPollerQueueCapacity) {
         return false;
       }
     }
   }
 
-  if (client->tunReadPaused && client->runtimeOverflowNbytes == 0) {
+  if (event == ioEventTcpWrite && client->tunReadPaused && client->runtimeOverflowNbytes == 0) {
     queued = ioTcpQueuedBytes(tcpPoller);
     if (queued < 0) {
       return false;
@@ -414,6 +421,9 @@ int clientServeConn(
   while (1) {
     event = ioPollersWait(&tunPoller, &tcpPoller, EPOLL_WAIT_MS);
     if (sessionStep(session, &tcpPoller, &tunPoller, event, key) == sessionStepStop) {
+      break;
+    }
+    if (!clientServiceBackpressure(&client, session, event)) {
       break;
     }
   }
