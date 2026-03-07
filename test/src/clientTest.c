@@ -680,6 +680,41 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   close(tcpPair[1]);
 }
 
+static void testClientHeartbeatStillSendsWhenInboundRecentlyActive(void) {
+  unsigned char key[ProtocolPskSize];
+  splitPollersFixture_t poller;
+  client_t client;
+  int tunPair[2];
+  int tcpPair[2];
+  char wire[ProtocolFrameSize];
+  long wireNbytes;
+  static const char payload[] = "recv-only";
+
+  memset(key, 0x25, sizeof(key));
+  setupPairs(tunPair, tcpPair);
+  testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
+  fakeNowMs = 0;
+  session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+  wireClientSession(session, &poller, &client);
+
+  fakeNowMs = 5500;
+  wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)(sizeof(payload) - 1), wire);
+  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(
+      runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
+      "client should continue after receiving inbound data");
+  testAssertTrue(client.lastDataRecvMs == 5500, "inbound data should refresh receive timestamp");
+  testAssertTrue(client.heartbeatPending, "client should send heartbeat request even when inbound data is recent");
+
+  sessionDestroy(session);
+  teardownSplitPollers(&poller);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
 static void testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
@@ -759,6 +794,7 @@ void runClientTests(void) {
   testClientHeartbeatUsesConfiguredInterval();
   testClientHeartbeatTimeoutUsesConfiguredTimeout();
   testClientHeartbeatRequestAndAckFlow();
+  testClientHeartbeatStillSendsWhenInboundRecentlyActive();
   testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds();
   testClientRejectsInboundHeartbeatRequest();
 }

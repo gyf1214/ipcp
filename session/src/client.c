@@ -134,9 +134,8 @@ bool clientHeartbeatTick(
 
   if (!client->heartbeatPending) {
     bool idleSend = nowMs - client->lastDataSentMs >= client->heartbeatIntervalMs;
-    bool idleRecv = nowMs - client->lastDataRecvMs >= client->heartbeatIntervalMs;
     bool intervalElapsed = nowMs - client->lastHeartbeatReqMs >= client->heartbeatIntervalMs;
-    if (idleSend && idleRecv && intervalElapsed) {
+    if (idleSend && intervalElapsed) {
       protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
       sessionQueueResult_t result = clientSendMessage(
           client,
