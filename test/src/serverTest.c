@@ -996,6 +996,56 @@ static void testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp(void
   close(tcpPair[1]);
 }
 
+static void testServerBackpressurePrioritizesHeartbeatAckBeforeRuntimePendingRetry(void) {
+  server_t server;
+  int tunPair[2];
+  int tcpPair[2];
+  long long lastValidInboundMs = 0;
+  char fill[IoPollerQueueCapacity];
+  unsigned char pendingPayload[128];
+  protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
+  sessionQueueResult_t result;
+
+  memset(fill, 'j', sizeof(fill));
+  memset(pendingPayload, 'k', sizeof(pendingPayload));
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
+  testAssertTrue(
+      serverInit(&server, tunPair[0], 82, 1, 1, &testHeartbeatCfg, NULL, NULL),
+      "server server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
+  testAssertTrue(
+      serverStorePendingTunToTcp(&server, 0, pendingPayload, sizeof(pendingPayload)),
+      "server should accept existing runtime pending payload");
+  testAssertTrue(
+      ioTcpWrite(&server.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity),
+      "prefill server tcp queue should succeed");
+
+  result = serverHandleInboundMessage(
+      &server,
+      &server.activeConns[0].tcpPoller,
+      testKey,
+      &lastValidInboundMs,
+      &req);
+  testAssertTrue(result == sessionQueueResultBlocked, "server heartbeat ack should block while runtime pending exists");
+  testAssertTrue(serverHasPendingTunToTcp(&server), "runtime pending should still be present before retry cycle");
+
+  server.activeConns[0].tcpPoller.outOffset = 0;
+  server.activeConns[0].tcpPoller.outNbytes = IoPollerLowWatermark;
+  testAssertTrue(
+      serverServiceBackpressure(&server, 0, ioEventTcpWrite),
+      "server backpressure service should continue on owner write event");
+  testAssertTrue(
+      serverHasPendingTunToTcp(&server),
+      "server should preserve runtime pending payload while prioritizing heartbeat ack retry");
+
+  serverDeinit(&server);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
 static void testServerHeartbeatTickTimeoutBoundary(void) {
   testAssertTrue(serverHeartbeatTick(8999, 0, 9000), "server heartbeat should allow pre-timeout interval");
   testAssertTrue(!serverHeartbeatTick(9000, 0, 9000), "server heartbeat should stop at timeout boundary");
@@ -1018,6 +1068,7 @@ void runServerTests(void) {
   testServerQueueWithDropSkipsOverflowWithoutPendingState();
   testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload();
   testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp();
+  testServerBackpressurePrioritizesHeartbeatAckBeforeRuntimePendingRetry();
   testServerHeartbeatTickTimeoutBoundary();
   testServerHeartbeatTimeoutStopsSession();
   testServerHeartbeatTimeoutUsesConfiguredTimeout();

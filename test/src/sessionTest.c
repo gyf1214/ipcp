@@ -426,7 +426,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
       runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
       "tcp write event should continue");
   testAssertTrue(
-      clientServiceBackpressure(&client, session, ioEventTcpWrite),
+      clientServiceBackpressure(&client, session, ioEventTcpWrite, key),
       "client backpressure service should continue");
   testAssertTrue(client.runtimeOverflowNbytes == 0, "pending tcp payload should flush");
   testAssertTrue(!client.tunReadPaused, "tun read should resume when queue drains");

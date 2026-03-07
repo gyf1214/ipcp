@@ -37,6 +37,7 @@ typedef struct {
   unsigned char key[ProtocolPskSize];
   unsigned char claim[SessionClaimSize];
   long claimNbytes;
+  bool heartbeatAckPending;
   bool active;
 } activeConn_t;
 

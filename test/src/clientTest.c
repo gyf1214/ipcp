@@ -435,7 +435,7 @@ static void testClientInboundHandlerAcceptsHeartbeatAckAndRefreshesTimestamp(voi
   client.tunPoller = &poller.tunPoller;
   client.tcpPoller = &poller.tcpPoller;
   clientResetHeartbeatState(&client, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs, 0);
-  client.heartbeatPending = true;
+  client.heartbeatAckPending = true;
 
   result = clientHandleInboundMessage(
       &client,
@@ -444,7 +444,7 @@ static void testClientInboundHandlerAcceptsHeartbeatAckAndRefreshesTimestamp(voi
       &ack);
   testAssertTrue(result == sessionQueueResultQueued, "client inbound ack should route through client handler");
   testAssertTrue(lastValidInboundMs == 1000, "client handler should refresh last valid inbound timestamp");
-  testAssertTrue(!client.heartbeatPending, "client handler should clear heartbeat pending on ack");
+  testAssertTrue(!client.heartbeatAckPending, "client handler should clear heartbeat pending on ack");
 
   teardownSplitPollers(&poller);
   close(tunPair[0]);
@@ -469,7 +469,7 @@ static void testClientHeartbeatTickSetsPendingAndTimestamps(void) {
 
   ok = clientHeartbeatTick(&client, 6000, testClientKey);
   testAssertTrue(ok, "client heartbeat tick should continue");
-  testAssertTrue(client.heartbeatPending, "client heartbeat handler should set pending when request queues");
+  testAssertTrue(client.heartbeatAckPending, "client heartbeat handler should set pending when request queues");
   testAssertTrue(client.heartbeatSentMs == 6000, "client heartbeat handler should capture send timestamp");
   testAssertTrue(client.lastHeartbeatReqMs == 6000, "client heartbeat handler should capture last request timestamp");
 
@@ -500,7 +500,8 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
       clientServiceBackpressure(
           &client,
           session,
-          ioEventTimeout),
+          ioEventTimeout,
+          testClientKey),
       "client backpressure service should succeed without pending bytes");
 
   sessionDestroy(session);
@@ -540,7 +541,8 @@ static void testClientBackpressureServiceSkipsRetryOnTimeoutEvent(void) {
       clientServiceBackpressure(
           &client,
           session,
-          ioEventTimeout),
+          ioEventTimeout,
+          testClientKey),
       "client backpressure service should continue on timeout event");
   testAssertTrue(session->overflowNbytes == (long)sizeof(tunPayload), "timeout event should not retry pending tun overflow");
   testAssertTrue(client.runtimeOverflowNbytes == (long)sizeof(tcpPayload), "timeout event should not retry pending tcp overflow");
@@ -578,13 +580,13 @@ static void testClientHeartbeatUsesConfiguredInterval(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
       "client should continue before configured heartbeat interval");
-  testAssertTrue(!client.heartbeatPending, "heartbeat should not be pending before configured interval");
+  testAssertTrue(!client.heartbeatAckPending, "heartbeat should not be pending before configured interval");
 
   fakeNowMs = 2000;
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
       "client should send heartbeat at configured interval");
-  testAssertTrue(client.heartbeatPending, "heartbeat should be pending at configured interval");
+  testAssertTrue(client.heartbeatAckPending, "heartbeat should be pending at configured interval");
 
   sessionDestroy(session);
   teardownSplitPollers(&poller);
@@ -617,7 +619,7 @@ static void testClientHeartbeatTimeoutUsesConfiguredTimeout(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
       "client should send heartbeat request");
-  testAssertTrue(client.heartbeatPending, "heartbeat request should be pending");
+  testAssertTrue(client.heartbeatAckPending, "heartbeat request should be pending");
 
   fakeNowMs = 7999;
   testAssertTrue(
@@ -657,20 +659,20 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
       "client should continue before heartbeat interval");
-  testAssertTrue(!client.heartbeatPending, "heartbeat should not be pending before idle interval");
+  testAssertTrue(!client.heartbeatAckPending, "heartbeat should not be pending before idle interval");
 
   fakeNowMs = 6000;
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
       "client should stay alive when sending heartbeat request");
-  testAssertTrue(client.heartbeatPending, "heartbeat should become pending after idle interval");
+  testAssertTrue(client.heartbeatAckPending, "heartbeat should become pending after idle interval");
 
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatAck, NULL, 0, wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
       "client should continue after heartbeat ack");
-  testAssertTrue(!client.heartbeatPending, "heartbeat pending should clear after ack");
+  testAssertTrue(!client.heartbeatAckPending, "heartbeat pending should clear after ack");
 
   sessionDestroy(session);
   teardownSplitPollers(&poller);
@@ -705,7 +707,7 @@ static void testClientHeartbeatStillSendsWhenInboundRecentlyActive(void) {
       runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
       "client should continue after receiving inbound data");
   testAssertTrue(client.lastDataRecvMs == 5500, "inbound data should refresh receive timestamp");
-  testAssertTrue(client.heartbeatPending, "client should send heartbeat request even when inbound data is recent");
+  testAssertTrue(client.heartbeatAckPending, "client should send heartbeat request even when inbound data is recent");
 
   sessionDestroy(session);
   teardownSplitPollers(&poller);
@@ -737,8 +739,67 @@ static void testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds(void) {
   testAssertTrue(
       runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
       "client heartbeat tick should continue when request enqueue is blocked");
-  testAssertTrue(!client.heartbeatPending, "heartbeat should remain non-pending when req enqueue is blocked");
-  testAssertTrue(client.runtimeOverflowNbytes > 0, "blocked heartbeat request should be retained as pending tcp write");
+  testAssertTrue(!client.heartbeatAckPending, "heartbeat should remain non-pending when req enqueue is blocked");
+  testAssertTrue(client.heartbeatReqPending, "blocked heartbeat request should stay pending for retry");
+  testAssertTrue(client.runtimeOverflowNbytes == 0, "blocked heartbeat request should not consume runtime overflow buffer");
+
+  sessionDestroy(session);
+  teardownSplitPollers(&poller);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
+static void testClientHeartbeatBlockedReqEventuallyTracksPendingForAck(void) {
+  unsigned char key[ProtocolPskSize];
+  splitPollersFixture_t poller;
+  client_t client;
+  int tunPair[2];
+  int tcpPair[2];
+  char fill[IoPollerQueueCapacity];
+  char wire[ProtocolFrameSize];
+  long wireNbytes;
+
+  memset(key, 0x26, sizeof(key));
+  memset(fill, 'i', sizeof(fill));
+  setupPairs(tunPair, tcpPair);
+  testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
+  fakeNowMs = 0;
+  session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+  wireClientSession(session, &poller, &client);
+
+  testAssertTrue(ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity), "prefill tcp queue should succeed");
+  fakeNowMs = 6000;
+  testAssertTrue(
+      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
+      "client heartbeat tick should continue when initial request enqueue is blocked");
+  testAssertTrue(!client.heartbeatAckPending, "heartbeat should not be pending before request is queued");
+
+  poller.tcpPoller.outOffset = 0;
+  poller.tcpPoller.outNbytes = IoPollerLowWatermark;
+  fakeNowMs = 6001;
+  testAssertTrue(
+      runSessionStep(session, &poller, ioEventTimeout, key) == sessionStepContinue,
+      "client should keep running while request stays pending on timeout tick");
+  testAssertTrue(client.heartbeatReqPending, "heartbeat request should stay pending before tcp write retry");
+  testAssertTrue(!client.heartbeatAckPending, "heartbeat ack wait should remain off before tcp write retry");
+  testAssertTrue(
+      clientServiceBackpressure(
+          &client,
+          session,
+          ioEventTcpWrite,
+          key),
+      "client backpressure service should retry heartbeat request on tcp write");
+  testAssertTrue(client.heartbeatAckPending, "client should track pending heartbeat after tcp write retry queues request");
+
+  wireNbytes = writeSecureWire(key, protocolMsgHeartbeatAck, NULL, 0, wire);
+  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(
+      runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
+      "client should accept ack for retried heartbeat request");
+  testAssertTrue(!client.heartbeatAckPending, "client should clear pending heartbeat after ack");
 
   sessionDestroy(session);
   teardownSplitPollers(&poller);
@@ -796,5 +857,6 @@ void runClientTests(void) {
   testClientHeartbeatRequestAndAckFlow();
   testClientHeartbeatStillSendsWhenInboundRecentlyActive();
   testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds();
+  testClientHeartbeatBlockedReqEventuallyTracksPendingForAck();
   testClientRejectsInboundHeartbeatRequest();
 }

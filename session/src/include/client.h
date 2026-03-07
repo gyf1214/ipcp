@@ -9,7 +9,8 @@ typedef struct client_t {
   bool tunReadPaused;
   long runtimeOverflowNbytes;
   char runtimeOverflowBuf[ProtocolFrameSize];
-  bool heartbeatPending;
+  bool heartbeatAckPending;
+  bool heartbeatReqPending;
   long long heartbeatSentMs;
   long long lastHeartbeatReqMs;
   long long lastDataSentMs;
@@ -45,7 +46,8 @@ bool clientHeartbeatTick(
 bool clientServiceBackpressure(
     client_t *client,
     session_t *session,
-    ioEvent_t event);
+    ioEvent_t event,
+    const unsigned char key[ProtocolPskSize]);
 
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg);
 int clientReadRawMsg(int fd, protocolRawMsg_t *msg);

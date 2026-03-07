@@ -178,6 +178,7 @@ int serverAddClient(
   memcpy(server->activeConns[activeSlot].key, key, ProtocolPskSize);
   memcpy(server->activeConns[activeSlot].claim, claim, (size_t)claimNbytes);
   server->activeConns[activeSlot].claimNbytes = claimNbytes;
+  server->activeConns[activeSlot].heartbeatAckPending = false;
   server->activeConns[activeSlot].active = true;
   server->activeCount++;
   return activeSlot;
@@ -198,6 +199,7 @@ bool serverRemoveClient(server_t *server, int slot) {
   memset(server->activeConns[slot].key, 0, sizeof(server->activeConns[slot].key));
   memset(server->activeConns[slot].claim, 0, sizeof(server->activeConns[slot].claim));
   server->activeConns[slot].claimNbytes = 0;
+  server->activeConns[slot].heartbeatAckPending = false;
   server->activeConns[slot].connFd = -1;
   server->activeConns[slot].session = NULL;
   server->activeConns[slot].active = false;
@@ -542,6 +544,22 @@ sessionQueueResult_t serverSendMessage(
   return serverQueueTcpWithBackpressure(server, tcpPoller, frame.buf, frame.nbytes);
 }
 
+static sessionQueueResult_t serverRetryHeartbeatAck(server_t *server, int slot) {
+  protocolMessage_t ack = {.type = protocolMsgHeartbeatAck, .nbytes = 0, .buf = NULL};
+  protocolFrame_t frame;
+
+  if (!activeSlotIndexValid(server, slot) || !server->activeConns[slot].active) {
+    return sessionQueueResultError;
+  }
+  if (protocolEncodeSecureMsg(&ack, server->activeConns[slot].key, &frame) != protocolStatusOk) {
+    return sessionQueueResultError;
+  }
+  return serverQueueTcpWithDrop(
+      &server->activeConns[slot].tcpPoller,
+      frame.buf,
+      frame.nbytes);
+}
+
 sessionQueueResult_t serverHandleInboundMessage(
     server_t *server,
     ioTcpPoller_t *tcpPoller,
@@ -553,6 +571,7 @@ sessionQueueResult_t serverHandleInboundMessage(
   if (server == NULL || tcpPoller == NULL || key == NULL || lastValidInboundMs == NULL || msg == NULL) {
     return sessionQueueResultError;
   }
+  (void)key;
 
   nowMs = serverNowMs(server);
   *lastValidInboundMs = nowMs;
@@ -562,13 +581,22 @@ sessionQueueResult_t serverHandleInboundMessage(
     return sessionQueueResultError;
   }
   if (msg->type == protocolMsgHeartbeatReq) {
-    protocolMessage_t ack = {.type = protocolMsgHeartbeatAck, .nbytes = 0, .buf = NULL};
-    sessionQueueResult_t result = serverSendMessage(server, tcpPoller, key, &ack);
-    if (result != sessionQueueResultQueued) {
+    int slot = serverFindSlotByFd(server, tcpPoller->tcpFd);
+    sessionQueueResult_t result;
+    if (slot < 0) {
+      return sessionQueueResultError;
+    }
+    server->activeConns[slot].heartbeatAckPending = true;
+    result = serverRetryHeartbeatAck(server, slot);
+    if (result == sessionQueueResultError) {
       return result;
     }
-    dbgf("heartbeat request received, sent ack");
-    return sessionQueueResultQueued;
+    if (result == sessionQueueResultQueued) {
+      server->activeConns[slot].heartbeatAckPending = false;
+      dbgf("heartbeat request received, sent ack");
+      return sessionQueueResultQueued;
+    }
+    return sessionQueueResultBlocked;
   }
   if (msg->type == protocolMsgHeartbeatAck) {
     logf("unexpected heartbeat ack");
@@ -587,7 +615,28 @@ bool serverServiceBackpressure(server_t *server, int slot, ioEvent_t event) {
   ioTcpPoller_t *ownerPoller;
   serverPendingRetry_t retry;
 
-  if (server == NULL || event != ioEventTcpWrite || !serverHasPendingTunToTcp(server)) {
+  if (server == NULL || event != ioEventTcpWrite || !activeSlotIndexValid(server, slot) || !server->activeConns[slot].active) {
+    return true;
+  }
+  ownerPoller = &server->activeConns[slot].tcpPoller;
+  queued = ioTcpQueuedBytes(ownerPoller);
+  if (queued < 0) {
+    return false;
+  }
+  if (queued > IoPollerLowWatermark) {
+    return true;
+  }
+  if (server->activeConns[slot].heartbeatAckPending) {
+    sessionQueueResult_t result = serverRetryHeartbeatAck(server, slot);
+    if (result == sessionQueueResultError) {
+      return false;
+    }
+    if (result == sessionQueueResultQueued) {
+      server->activeConns[slot].heartbeatAckPending = false;
+    }
+    return true;
+  }
+  if (!serverHasPendingTunToTcp(server)) {
     return true;
   }
 
@@ -596,13 +645,6 @@ bool serverServiceBackpressure(server_t *server, int slot, ioEvent_t event) {
     return true;
   }
   ownerPoller = &server->activeConns[ownerSlot].tcpPoller;
-  queued = ioTcpQueuedBytes(ownerPoller);
-  if (queued < 0) {
-    return false;
-  }
-  if (queued > IoPollerLowWatermark) {
-    return true;
-  }
 
   retry = serverRetryPendingTunToTcp(server, ownerSlot, ownerPoller);
   if (retry == serverPendingRetryError) {
