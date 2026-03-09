@@ -770,6 +770,7 @@ bool serverRemovePreAuthConn(server_t *server, int preAuthSlot) {
   memset(conn->serverNonce, 0, sizeof(conn->serverNonce));
   memset(conn->claim, 0, sizeof(conn->claim));
   conn->claimNbytes = 0;
+  memset(&conn->decoder, 0, sizeof(conn->decoder));
   memset(conn->tcpReadCarryBuf, 0, sizeof(conn->tcpReadCarryBuf));
   conn->tcpReadCarryNbytes = 0;
   memset(conn->authWriteBuf, 0, sizeof(conn->authWriteBuf));

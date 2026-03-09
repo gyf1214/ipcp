@@ -834,6 +834,116 @@ static void testServerHeartbeatTimeoutStopsSession(void) {
   close(tcpPair[1]);
 }
 
+static void testServerCreateAndRemovePreAuthConnResetsState(void) {
+  server_t server;
+  int tunPair[2];
+  int tcpPair[2];
+  int slot;
+  preAuthConn_t *conn;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
+  testAssertTrue(serverInit(&server, tunPair[0], 84, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+
+  slot = serverCreatePreAuthConn(&server, tcpPair[0], 12345);
+  testAssertTrue(slot >= 0, "pre-auth slot should be allocated");
+  conn = serverPreAuthAt(&server, slot);
+  testAssertTrue(conn != NULL, "pre-auth connection should be retrievable");
+  conn->decoder.frame.nbytes = 99;
+  conn->decoder.offset = 11;
+  conn->decoder.hasFrame = 1;
+  memcpy(conn->resolvedKey, testKey, sizeof(conn->resolvedKey));
+  memcpy(conn->serverNonce, testKey, sizeof(conn->serverNonce));
+  memcpy(conn->claim, claim2, sizeof(claim2));
+  conn->claimNbytes = (long)sizeof(claim2);
+  memset(conn->tcpReadCarryBuf, 'a', 8);
+  conn->tcpReadCarryNbytes = 8;
+  memset(conn->authWriteBuf, 'b', 6);
+  conn->authWriteOffset = 3;
+  conn->authWriteNbytes = 6;
+  conn->authState = 2;
+
+  testAssertTrue(serverRemovePreAuthConn(&server, slot), "pre-auth remove should succeed");
+  testAssertTrue(serverPreAuthAt(&server, slot) == NULL, "removed pre-auth slot should be inactive");
+  testAssertTrue(server.preAuthCount == 0, "pre-auth count should decrement after remove");
+  testAssertTrue(server.preAuthConns[slot].connFd == -1, "removed slot should reset conn fd");
+  testAssertTrue(server.preAuthConns[slot].claimNbytes == 0, "removed slot should clear claim length");
+  testAssertTrue(server.preAuthConns[slot].tcpReadCarryNbytes == 0, "removed slot should clear carry length");
+  testAssertTrue(server.preAuthConns[slot].authWriteOffset == 0, "removed slot should reset auth write offset");
+  testAssertTrue(server.preAuthConns[slot].authWriteNbytes == 0, "removed slot should reset auth write length");
+  testAssertTrue(server.preAuthConns[slot].authState == 0, "removed slot should reset auth state");
+  testAssertTrue(server.preAuthConns[slot].decoder.hasFrame == 0, "removed slot should clear decoder state");
+  testAssertTrue(server.preAuthConns[slot].decoder.offset == 0, "removed slot should clear decoder offset");
+  testAssertTrue(server.preAuthConns[slot].decoder.frame.nbytes == 0, "removed slot should clear decoder frame length");
+
+  serverDeinit(&server);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
+static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
+  server_t server;
+  int tunPair[2];
+  int tcpPair[2];
+  int slot;
+  preAuthConn_t *conn;
+  protocolDecoder_t helloDecoder;
+  char helloCarryBuf[ProtocolFrameSize];
+  long helloCarryNbytes = 5;
+  session_t *activeSession;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
+  testAssertTrue(serverInit(&server, tunPair[0], 85, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+
+  slot = serverCreatePreAuthConn(&server, tcpPair[0], 23456);
+  testAssertTrue(slot >= 0, "pre-auth slot should be allocated");
+  conn = serverPreAuthAt(&server, slot);
+  testAssertTrue(conn != NULL, "pre-auth connection should be retrievable");
+  conn->resolvedActiveSlot = 0;
+  memcpy(conn->resolvedKey, testKey, sizeof(conn->resolvedKey));
+  memcpy(conn->claim, claim2, sizeof(claim2));
+  conn->claimNbytes = (long)sizeof(claim2);
+  protocolDecoderInit(&conn->decoder);
+  conn->decoder.hasFrame = 1;
+  conn->decoder.offset = 7;
+  conn->decoder.frame.nbytes = 19;
+  memcpy(conn->decoder.frame.buf, "decoder-carry", 12);
+  memset(conn->tcpReadCarryBuf, 0, sizeof(conn->tcpReadCarryBuf));
+  memcpy(conn->tcpReadCarryBuf, "hello", (size_t)helloCarryNbytes);
+  conn->tcpReadCarryNbytes = helloCarryNbytes;
+
+  helloDecoder = conn->decoder;
+  memcpy(helloCarryBuf, conn->tcpReadCarryBuf, (size_t)helloCarryNbytes);
+  testAssertTrue(serverPromoteToActiveSlot(&server, slot), "promote should create active session");
+  testAssertTrue(server.preAuthCount == 0, "promote should remove pre-auth slot");
+  testAssertTrue(server.activeCount == 1, "promote should increment active count");
+  testAssertTrue(serverConnFdAt(&server, 0) == tcpPair[0], "promote should preserve connection fd");
+
+  activeSession = serverSessionAt(&server, 0);
+  testAssertTrue(activeSession != NULL, "promoted active session should exist");
+  testAssertTrue(
+      sessionPromoteFromPreAuth(activeSession, &helloDecoder, helloCarryBuf, helloCarryNbytes),
+      "session should accept transferred decoder/carry state");
+  testAssertTrue(activeSession->tcpDecoder.hasFrame == helloDecoder.hasFrame, "session decoder hasFrame should match");
+  testAssertTrue(activeSession->tcpDecoder.offset == helloDecoder.offset, "session decoder offset should match");
+  testAssertTrue(
+      activeSession->tcpDecoder.frame.nbytes == helloDecoder.frame.nbytes,
+      "session decoder frame length should match");
+  testAssertTrue(activeSession->tcpReadCarryNbytes == helloCarryNbytes, "session carry length should match");
+  testAssertTrue(
+      memcmp(activeSession->tcpReadCarryBuf, helloCarryBuf, (size_t)helloCarryNbytes) == 0,
+      "session carry bytes should match");
+
+  serverDeinit(&server);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
 static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
@@ -1164,6 +1274,8 @@ void runServerTests(void) {
   testServerHeartbeatTickTimeoutBoundary();
   testServerHeartbeatTimeoutStopsSession();
   testServerHeartbeatTimeoutUsesConfiguredTimeout();
+  testServerCreateAndRemovePreAuthConnResetsState();
+  testServerPromoteToActiveSlotAndApplyCarryState();
   testServerTunOverflowDisablesTunEpollinGlobally();
   testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark();
   testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin();
