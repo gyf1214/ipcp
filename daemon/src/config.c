@@ -177,32 +177,27 @@ static int parseMacClaim(const char *s, unsigned char out[SessionClaimSize], lon
   return 0;
 }
 
-static int parseTunSubnet(const cJSON *root, daemonConfig_t *cfg) {
-  const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, "tun_subnet");
-  char subnet[ConfigTextSize];
+static int parseServerTunIdentity(const cJSON *root, daemonConfig_t *cfg) {
+  char tunCidr[ConfigTextSize];
   char *slash = NULL;
   char *end = NULL;
   long prefix = 0;
-  struct in_addr networkAddr;
-  uint32_t networkHost = 0;
+  struct in_addr claimAddr;
+  uint32_t claimHost = 0;
   uint32_t maskHost = 0;
   uint32_t broadcastHost = 0;
-  uint32_t networkNet = 0;
   uint32_t broadcastNet = 0;
 
-  if (!cJSON_IsString(value) || value->valuestring == NULL) {
+  if (copyRequiredString(root, "tun_ip", tunCidr) != 0) {
     return -1;
   }
-  if (strlen(value->valuestring) >= sizeof(subnet)) {
-    return -1;
-  }
-  memcpy(subnet, value->valuestring, strlen(value->valuestring) + 1);
-  slash = strchr(subnet, '/');
+  memcpy(cfg->tunIP, tunCidr, strlen(tunCidr) + 1);
+  slash = strchr(tunCidr, '/');
   if (slash == NULL) {
     return -1;
   }
   *slash = '\0';
-  if (inet_pton(AF_INET, subnet, &networkAddr) != 1) {
+  if (inet_pton(AF_INET, tunCidr, &claimAddr) != 1) {
     return -1;
   }
   prefix = strtol(slash + 1, &end, 10);
@@ -210,24 +205,37 @@ static int parseTunSubnet(const cJSON *root, daemonConfig_t *cfg) {
     return -1;
   }
 
-  networkHost = ntohl(networkAddr.s_addr);
+  claimHost = ntohl(claimAddr.s_addr);
   if (prefix == 0) {
     maskHost = 0;
   } else {
     maskHost = 0xffffffffu << (32 - (unsigned int)prefix);
   }
-  if ((networkHost & ~maskHost) != 0) {
-    return -1;
-  }
 
-  broadcastHost = networkHost | ~maskHost;
-  networkNet = htonl(networkHost & maskHost);
+  broadcastHost = claimHost | ~maskHost;
   broadcastNet = htonl(broadcastHost);
 
-  cfg->tunSubnet.enabled = true;
-  cfg->tunSubnet.prefix = (int)prefix;
-  memcpy(cfg->tunSubnet.network, &networkNet, sizeof(cfg->tunSubnet.network));
-  memcpy(cfg->tunSubnet.broadcast, &broadcastNet, sizeof(cfg->tunSubnet.broadcast));
+  if (parseIPv4Claim(tunCidr, cfg->serverIdentity.claim, &cfg->serverIdentity.claimNbytes) != 0) {
+    return -1;
+  }
+  cfg->serverIdentity.directedBroadcastEnabled = prefix < 32;
+  memcpy(cfg->serverIdentity.directedBroadcast, &broadcastNet, sizeof(cfg->serverIdentity.directedBroadcast));
+  if (cJSON_GetObjectItemCaseSensitive(root, "tap_mac") != NULL) {
+    return -1;
+  }
+  return 0;
+}
+
+static int parseServerTapIdentity(const cJSON *root, daemonConfig_t *cfg) {
+  if (copyRequiredString(root, "tap_mac", cfg->tapMac) != 0 || !parseMacString(cfg->tapMac)) {
+    return -1;
+  }
+  if (parseMacClaim(cfg->tapMac, cfg->serverIdentity.claim, &cfg->serverIdentity.claimNbytes) != 0) {
+    return -1;
+  }
+  if (cJSON_GetObjectItemCaseSensitive(root, "tun_ip") != NULL) {
+    return -1;
+  }
   return 0;
 }
 
@@ -305,10 +313,14 @@ static int parseServerConfig(const cJSON *root, daemonConfig_t *cfg) {
     return -1;
   }
   if (cfg->ifMode == configIfModeTun) {
-    if (parseTunSubnet(root, cfg) != 0) {
+    if (parseServerTunIdentity(root, cfg) != 0) {
       return -1;
     }
-  } else if (cfg->ifMode != configIfModeTap) {
+  } else if (cfg->ifMode == configIfModeTap) {
+    if (parseServerTapIdentity(root, cfg) != 0) {
+      return -1;
+    }
+  } else {
     return -1;
   }
   return 0;

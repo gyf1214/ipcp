@@ -56,7 +56,7 @@ struct server_t {
   int maxPreAuthSessions;
   int preAuthCount;
   preAuthConn_t *preAuthConns;
-  sessionTunSubnet_t tunSubnet;
+  sessionServerIdentity_t serverIdentity;
   sessionHeartbeatConfig_t heartbeatCfg;
   sessionNowMsFn_t nowMsFn;
   void *nowCtx;
@@ -121,6 +121,8 @@ int serverConnFdAt(const server_t *server, int slot);
 const unsigned char *serverKeyAt(const server_t *server, int slot);
 bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, long claimNbytes);
 bool serverRouteTunIngressPacket(server_t *server, const char *ifModeLabel, const void *packet, long packetNbytes);
+bool serverRouteTcpIngressPacket(
+    server_t *server, int sourceSlot, const char *ifModeLabel, const void *packet, long packetNbytes);
 
 int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadlineMs);
 bool serverRemovePreAuthConn(server_t *server, int preAuthSlot);
@@ -133,7 +135,7 @@ int serverServeMultiClient(
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
     const char *ifModeLabel,
-    const sessionTunSubnet_t *tunSubnet,
+    const sessionServerIdentity_t *serverIdentity,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxActiveSessions,

@@ -281,7 +281,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
 static void testSessionTcpReadQueuesTunWrite(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
-  server_t server;
+  client_t client;
   int tunPair[2];
   int tcpPair[2];
   char wire[ProtocolFrameSize];
@@ -291,9 +291,9 @@ static void testSessionTcpReadQueuesTunWrite(void) {
 
   memset(key, 0x45, sizeof(key));
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
-  session_t *session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
+  session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
-  wireServerSession(session, &server, &poller);
+  wireClientSession(session, &poller, &client);
 
   wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)strlen(payload), wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
@@ -308,7 +308,6 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   testAssertTrue(memcmp(out, payload, strlen(payload)) == 0, "tun payload should match");
 
   sessionDestroy(session);
-  serverDeinit(&server);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
 }
 
@@ -367,7 +366,7 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
     testAssertTrue(write(tcpPair[1], inboundWire, (size_t)inboundNbytes) == inboundNbytes, "peer tcp write should succeed");
   }
   testAssertTrue(
-      sessionHandleConnEvent(serverSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key)
+      sessionHandleConnEvent(clientSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key)
       == sessionStepContinue,
       "conn event entrypoint should process tcp read");
   testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "tun write service should flush queued frame");
@@ -440,6 +439,8 @@ static void testSessionRetryOverflowFlushesAndResumesRead(void) {
 
   memcpy(session->overflowBuf, payload, sizeof(payload) - 1);
   session->overflowNbytes = (long)sizeof(payload) - 1;
+  session->overflowKind = sessionOverflowToTun;
+  session->overflowDestSlot = -1;
   session->tcpReadPaused = true;
 
   testAssertTrue(sessionHasOverflow(session), "session should report pending overflow");
@@ -469,6 +470,8 @@ static void testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated(void)
 
   memcpy(session->overflowBuf, payload, sizeof(payload) - 1);
   session->overflowNbytes = (long)sizeof(payload) - 1;
+  session->overflowKind = sessionOverflowToTun;
+  session->overflowDestSlot = -1;
   session->tcpReadPaused = true;
 
   testAssertTrue(
@@ -476,6 +479,85 @@ static void testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated(void)
       "session retry overflow should stay alive when queue remains saturated");
   testAssertTrue(sessionHasOverflow(session), "session overflow should remain pending");
   testAssertTrue(session->tcpReadPaused, "tcp read should remain paused while overflow is pending");
+
+  sessionDestroy(session);
+  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+}
+
+static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int sourcePair[2];
+  int destPairA[2];
+  int destPairB[2];
+  ioTcpPoller_t destPollerA;
+  ioTcpPoller_t destPollerB;
+  session_t *session;
+  char fill[IoPollerQueueCapacity];
+  char payload[128];
+  sessionQueueResult_t result;
+
+  memset(fill, 'q', sizeof(fill));
+  memset(payload, 'r', sizeof(payload));
+  setupSplitPollersFixture(&poller, tunPair, sourcePair);
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairA) == 0, "dest A pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairB) == 0, "dest B pair should be created");
+  testAssertTrue(ioTcpPollerInit(&destPollerA, poller.epollFd, destPairA[0]) == 0, "dest A poller init should succeed");
+  testAssertTrue(ioTcpPollerInit(&destPollerB, poller.epollFd, destPairB[0]) == 0, "dest B poller init should succeed");
+
+  session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+  testAssertTrue(ioTcpWrite(&destPollerA, fill, IoPollerQueueCapacity - 16), "dest A prefill should succeed");
+
+  result = sessionQueueTcpWithBackpressure(
+      &poller.tcpPoller,
+      &destPollerA,
+      session,
+      3,
+      payload,
+      sizeof(payload));
+  testAssertTrue(result == sessionQueueResultBlocked, "tcp backpressure queue should block on saturation");
+  testAssertTrue(session->overflowNbytes == (long)sizeof(payload), "session should store pending payload bytes");
+  testAssertTrue(session->overflowKind == sessionOverflowToClient, "pending kind should be to-client");
+  testAssertTrue(session->overflowDestSlot == 3, "pending destination slot should be recorded");
+  testAssertTrue(session->tcpReadPaused, "source tcp read should pause while pending");
+
+  result = sessionQueueTcpWithDrop(&destPollerA, session, 3, payload, 32);
+  testAssertTrue(result == sessionQueueResultBlocked, "drop queue should block same destination while pending exists");
+  result = sessionQueueTcpWithDrop(&destPollerB, session, 4, payload, 32);
+  testAssertTrue(result == sessionQueueResultQueued, "drop queue should allow other destination while pending exists");
+
+  testAssertTrue(sessionDropOverflow(session, &poller.tcpPoller, 2), "drop overflow non-match should be no-op");
+  testAssertTrue(session->overflowNbytes > 0, "non-match should preserve pending payload");
+  testAssertTrue(sessionDropOverflow(session, &poller.tcpPoller, 3), "drop overflow matching destination should succeed");
+  testAssertTrue(session->overflowNbytes == 0, "matching drop should clear pending payload");
+  testAssertTrue(!session->tcpReadPaused, "matching drop should resume source tcp read");
+
+  sessionDestroy(session);
+  teardownSplitPollersFixture(&poller, tunPair, sourcePair);
+  close(destPairA[0]);
+  close(destPairA[1]);
+  close(destPairB[0]);
+  close(destPairB[1]);
+}
+
+static void testSessionQueueTunWithDropNeverStoresPending(void) {
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  session_t *session;
+  const char payload[] = "tun-drop";
+  sessionQueueResult_t result;
+
+  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+  poller.tunPoller.frameCount = IoTunQueueFrameCapacity;
+  poller.tunPoller.queuedBytes = IoPollerQueueCapacity;
+
+  result = sessionQueueTunWithDrop(&poller.tunPoller, payload, (long)sizeof(payload) - 1);
+  testAssertTrue(result == sessionQueueResultBlocked, "tun drop queue should block on saturation");
+  testAssertTrue(session->overflowNbytes == 0, "tun drop queue should not store pending payload");
 
   sessionDestroy(session);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
@@ -515,4 +597,6 @@ void runSessionTests(void) {
   testBackpressurePauseAndResumeFlow();
   testSessionRetryOverflowFlushesAndResumesRead();
   testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated();
+  testSessionDestinationAwareTcpQueueAndDropApis();
+  testSessionQueueTunWithDropNeverStoresPending();
 }

@@ -19,11 +19,11 @@ typedef struct {
 } sessionHeartbeatConfig_t;
 
 typedef struct {
-  bool enabled;
-  unsigned char network[4];
-  int prefix;
-  unsigned char broadcast[4];
-} sessionTunSubnet_t;
+  unsigned char claim[SessionClaimSize];
+  long claimNbytes;
+  bool directedBroadcastEnabled;
+  unsigned char directedBroadcast[4];
+} sessionServerIdentity_t;
 
 int sessionRunServer(
     int tunFd,
@@ -31,7 +31,7 @@ int sessionRunServer(
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
     const char *ifModeLabel,
-    const sessionTunSubnet_t *tunSubnet,
+    const sessionServerIdentity_t *serverIdentity,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxActiveSessions,

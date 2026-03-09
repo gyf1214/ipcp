@@ -461,12 +461,11 @@ static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 63, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  server.tunSubnet.enabled = true;
-  server.tunSubnet.prefix = 24;
-  server.tunSubnet.broadcast[0] = 10;
-  server.tunSubnet.broadcast[1] = 250;
-  server.tunSubnet.broadcast[2] = 0;
-  server.tunSubnet.broadcast[3] = 255;
+  server.serverIdentity.directedBroadcastEnabled = true;
+  server.serverIdentity.directedBroadcast[0] = 10;
+  server.serverIdentity.directedBroadcast[1] = 250;
+  server.serverIdentity.directedBroadcast[2] = 0;
+  server.serverIdentity.directedBroadcast[3] = 255;
   testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
   testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
 
@@ -522,12 +521,11 @@ static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 64, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  server.tunSubnet.enabled = true;
-  server.tunSubnet.prefix = 24;
-  server.tunSubnet.broadcast[0] = 10;
-  server.tunSubnet.broadcast[1] = 250;
-  server.tunSubnet.broadcast[2] = 0;
-  server.tunSubnet.broadcast[3] = 255;
+  server.serverIdentity.directedBroadcastEnabled = true;
+  server.serverIdentity.directedBroadcast[0] = 10;
+  server.serverIdentity.directedBroadcast[1] = 250;
+  server.serverIdentity.directedBroadcast[2] = 0;
+  server.serverIdentity.directedBroadcast[3] = 255;
   testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
   testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
 
@@ -584,6 +582,117 @@ static void testServerQueueWithDropSkipsOverflowWithoutPendingState(void) {
   close(tunPair[1]);
   close(tcpPair[0]);
   close(tcpPair[1]);
+}
+
+static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
+  server_t server;
+  int tunPair[2];
+  int tcpPairA[2];
+  int tcpPairB[2];
+  unsigned char toPeer[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 2,
+      10, 0, 0, 3,
+  };
+  unsigned char toServer[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 2,
+      10, 0, 0, 1,
+  };
+  unsigned char broadcast[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 2,
+      255, 255, 255, 255,
+  };
+  unsigned char selfDest[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 2,
+      10, 0, 0, 2,
+  };
+  unsigned char unknownDest[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 2,
+      10, 0, 0, 99,
+  };
+  unsigned char multicast[] = {
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 2,
+      224, 1, 2, 3,
+  };
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B pair should be created");
+  testAssertTrue(serverInit(&server, tunPair[0], 83, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be active");
+  testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be active");
+  server.serverIdentity.claim[0] = 10;
+  server.serverIdentity.claim[1] = 0;
+  server.serverIdentity.claim[2] = 0;
+  server.serverIdentity.claim[3] = 1;
+  server.serverIdentity.claimNbytes = 4;
+  server.serverIdentity.directedBroadcastEnabled = true;
+  server.serverIdentity.directedBroadcast[0] = 10;
+  server.serverIdentity.directedBroadcast[1] = 0;
+  server.serverIdentity.directedBroadcast[2] = 0;
+  server.serverIdentity.directedBroadcast[3] = 255;
+
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, 0, "tun", toPeer, sizeof(toPeer)),
+      "unicast to other client should route");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "source client should not receive self echo");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "destination client should receive routed frame");
+
+  server.activeConns[0].tcpPoller.outNbytes = 0;
+  server.activeConns[1].tcpPoller.outNbytes = 0;
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, 0, "tun", toServer, sizeof(toServer)),
+      "unicast to server identity should route to tun");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "server-local route should not enqueue source tcp");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "server-local route should not enqueue peer tcp");
+  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "server-local route should enqueue tun payload");
+
+  server.tunPoller.queuedBytes = 0;
+  server.tunPoller.frameCount = 0;
+  server.activeConns[0].tcpPoller.outNbytes = 0;
+  server.activeConns[1].tcpPoller.outNbytes = 0;
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, 0, "tun", broadcast, sizeof(broadcast)),
+      "broadcast should fanout to peers and tun");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "broadcast should exclude source tcp");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "broadcast should fanout to peer tcp");
+  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "broadcast should enqueue tun payload");
+
+  server.tunPoller.queuedBytes = 0;
+  server.tunPoller.frameCount = 0;
+  server.activeConns[0].tcpPoller.outNbytes = 0;
+  server.activeConns[1].tcpPoller.outNbytes = 0;
+  testAssertTrue(serverRouteTcpIngressPacket(&server, 0, "tun", selfDest, sizeof(selfDest)), "self destination should drop");
+  testAssertTrue(serverRouteTcpIngressPacket(&server, 0, "tun", unknownDest, sizeof(unknownDest)), "unknown destination should drop");
+  testAssertTrue(serverRouteTcpIngressPacket(&server, 0, "tun", multicast, sizeof(multicast)), "multicast should drop");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue source tcp");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "drop cases should not queue peer tcp");
+  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) == 0, "drop cases should not queue tun payload");
+
+  serverDeinit(&server);
+  close(tcpPairA[0]);
+  close(tcpPairA[1]);
+  close(tcpPairB[0]);
+  close(tcpPairB[1]);
+  close(tunPair[0]);
+  close(tunPair[1]);
 }
 
 static void setupServerForSessionTest(
@@ -1021,6 +1130,7 @@ void runServerTests(void) {
   testServerFanoutTunBroadcastsBySubnetPolicy();
   testServerBroadcastFanoutSkipsSaturatedClient();
   testServerQueueWithDropSkipsOverflowWithoutPendingState();
+  testServerRoutesTcpIngressAcrossClientsAndTun();
   testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload();
   testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp();
   testServerBackpressurePrioritizesHeartbeatAckBeforeRuntimePendingRetry();

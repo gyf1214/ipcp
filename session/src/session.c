@@ -53,7 +53,7 @@ static void sessionResetClientHeartbeatState(session_t *session) {
       sessionNowMs(session));
 }
 
-static sessionQueueResult_t queueTunWithBackpressure(
+sessionQueueResult_t sessionQueueTunWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
   long queued;
 
@@ -74,6 +74,8 @@ static sessionQueueResult_t queueTunWithBackpressure(
   if (queued + nbytes > IoPollerQueueCapacity) {
     memcpy(session->overflowBuf, data, (size_t)nbytes);
     session->overflowNbytes = nbytes;
+    session->overflowKind = sessionOverflowToTun;
+    session->overflowDestSlot = -1;
     if (!session->tcpReadPaused) {
       if (!ioTcpSetReadEnabled(tcpPoller, false)) {
         return sessionQueueResultError;
@@ -83,6 +85,155 @@ static sessionQueueResult_t queueTunWithBackpressure(
     return sessionQueueResultBlocked;
   }
   return sessionQueueResultError;
+}
+
+sessionQueueResult_t sessionQueueTunWithDrop(ioTunPoller_t *tunPoller, const void *data, long nbytes) {
+  long queued;
+  if (tunPoller == NULL || data == NULL || nbytes <= 0) {
+    return sessionQueueResultError;
+  }
+  if (ioTunWrite(tunPoller, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+  queued = ioTunQueuedBytes(tunPoller);
+  if (queued < 0) {
+    return sessionQueueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    return sessionQueueResultBlocked;
+  }
+  return sessionQueueResultError;
+}
+
+sessionQueueResult_t sessionQueueTcpWithBackpressure(
+    ioTcpPoller_t *sourcePoller,
+    ioTcpPoller_t *destPoller,
+    session_t *session,
+    int destSlot,
+    const void *data,
+    long nbytes) {
+  long queued;
+
+  if (sourcePoller == NULL || destPoller == NULL || session == NULL || data == NULL || nbytes <= 0 || destSlot < 0) {
+    return sessionQueueResultError;
+  }
+  if (session->overflowNbytes > 0) {
+    return sessionQueueResultBlocked;
+  }
+  if (ioTcpWrite(destPoller, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+
+  queued = ioTcpQueuedBytes(destPoller);
+  if (queued < 0) {
+    return sessionQueueResultError;
+  }
+  if (queued + nbytes > IoPollerQueueCapacity) {
+    memcpy(session->overflowBuf, data, (size_t)nbytes);
+    session->overflowNbytes = nbytes;
+    session->overflowKind = sessionOverflowToClient;
+    session->overflowDestSlot = destSlot;
+    if (!session->tcpReadPaused) {
+      if (!ioTcpSetReadEnabled(sourcePoller, false)) {
+        return sessionQueueResultError;
+      }
+      session->tcpReadPaused = true;
+    }
+    return sessionQueueResultBlocked;
+  }
+  return sessionQueueResultError;
+}
+
+bool sessionOverflowTargetsDestSlot(const session_t *session, int destSlot) {
+  return session != NULL
+      && destSlot >= 0
+      && session->overflowNbytes > 0
+      && session->overflowKind == sessionOverflowToClient
+      && session->overflowDestSlot == destSlot;
+}
+
+sessionQueueResult_t sessionQueueTcpWithDrop(
+    ioTcpPoller_t *destPoller, session_t *session, int destSlot, const void *data, long nbytes) {
+  long used;
+
+  if (destPoller == NULL || session == NULL || data == NULL || nbytes <= 0 || destSlot < 0) {
+    return sessionQueueResultError;
+  }
+  if (sessionOverflowTargetsDestSlot(session, destSlot)) {
+    return sessionQueueResultBlocked;
+  }
+
+  used = destPoller->outOffset + destPoller->outNbytes;
+  if (used + nbytes > IoPollerQueueCapacity && destPoller->outOffset > 0) {
+    used = destPoller->outNbytes;
+  }
+  if (used + nbytes > IoPollerQueueCapacity) {
+    return sessionQueueResultBlocked;
+  }
+  if (ioTcpWrite(destPoller, data, nbytes)) {
+    return sessionQueueResultQueued;
+  }
+  return sessionQueueResultBlocked;
+}
+
+bool sessionDropOverflow(session_t *session, ioTcpPoller_t *sourcePoller, int destSlot) {
+  if (session == NULL || sourcePoller == NULL || destSlot < 0) {
+    return false;
+  }
+  if (!sessionOverflowTargetsDestSlot(session, destSlot)) {
+    return true;
+  }
+  session->overflowNbytes = 0;
+  session->overflowKind = sessionOverflowNone;
+  session->overflowDestSlot = -1;
+  if (session->tcpReadPaused) {
+    if (!ioTcpSetReadEnabled(sourcePoller, true)) {
+      return false;
+    }
+    session->tcpReadPaused = false;
+  }
+  return true;
+}
+
+bool sessionRetryOverflowToTcp(
+    session_t *session, ioTcpPoller_t *sourcePoller, ioTcpPoller_t *destPoller, int destSlot) {
+  long queued;
+  if (session == NULL || sourcePoller == NULL || destPoller == NULL || destSlot < 0) {
+    return false;
+  }
+  if (!sessionOverflowTargetsDestSlot(session, destSlot)) {
+    return true;
+  }
+
+  queued = ioTcpQueuedBytes(destPoller);
+  if (queued < 0) {
+    return false;
+  }
+  if (queued > IoPollerLowWatermark) {
+    return true;
+  }
+
+  if (ioTcpWrite(destPoller, session->overflowBuf, session->overflowNbytes)) {
+    session->overflowNbytes = 0;
+    session->overflowKind = sessionOverflowNone;
+    session->overflowDestSlot = -1;
+  } else if (queued + session->overflowNbytes <= IoPollerQueueCapacity) {
+    return false;
+  }
+
+  if (session->tcpReadPaused && session->overflowNbytes == 0) {
+    queued = ioTcpQueuedBytes(destPoller);
+    if (queued < 0) {
+      return false;
+    }
+    if (queued <= IoPollerLowWatermark) {
+      if (!ioTcpSetReadEnabled(sourcePoller, true)) {
+        return false;
+      }
+      session->tcpReadPaused = false;
+    }
+  }
+  return true;
 }
 
 static bool pipeTun(
@@ -166,9 +317,18 @@ static bool pipeTcpBytes(
       continue;
     }
 
-    if (msg.type == protocolMsgData) {
-      result = queueTunWithBackpressure(tcpPoller, tunPoller, session, msg.buf, msg.nbytes);
-      if (result == sessionQueueResultQueued && !session->isServer) {
+    if (msg.type == protocolMsgData && session->isServer) {
+      server_t *server = sessionServer(session);
+      int sourceSlot = serverFindSlotByFd(server, tcpPoller->tcpFd);
+      const char *ifModeLabel = server != NULL && server->serverIdentity.claimNbytes == 6 ? "tap" : "tun";
+      if (sourceSlot < 0 || !serverRouteTcpIngressPacket(server, sourceSlot, ifModeLabel, msg.buf, msg.nbytes)) {
+        return false;
+      }
+      result = sessionQueueResultQueued;
+      session->lastValidInboundMs = now;
+    } else if (msg.type == protocolMsgData) {
+      result = sessionQueueTunWithBackpressure(tcpPoller, tunPoller, session, msg.buf, msg.nbytes);
+      if (result == sessionQueueResultQueued) {
         client_t *client = sessionClient(session);
         client->lastDataRecvMs = now;
       }
@@ -293,6 +453,7 @@ void sessionReset(session_t *session) {
   now = sessionNowMs(session);
   protocolDecoderInit(&session->tcpDecoder);
   session->lastValidInboundMs = now;
+  session->overflowDestSlot = -1;
   sessionResetClientHeartbeatState(session);
 }
 
@@ -345,7 +506,7 @@ bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPol
   if (event != ioEventTunWrite) {
     return true;
   }
-  if (session->overflowNbytes > 0) {
+  if (session->overflowNbytes > 0 && session->overflowKind == sessionOverflowToTun) {
     queued = ioTunQueuedBytes(tunPoller);
     if (queued < 0) {
       return false;
@@ -355,6 +516,8 @@ bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPol
     }
     if (ioTunWrite(tunPoller, session->overflowBuf, session->overflowNbytes)) {
       session->overflowNbytes = 0;
+      session->overflowKind = sessionOverflowNone;
+      session->overflowDestSlot = -1;
     } else {
       if (queued + session->overflowNbytes <= IoPollerQueueCapacity) {
         return false;
@@ -444,7 +607,7 @@ int sessionRunServer(
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
     const char *ifModeLabel,
-    const sessionTunSubnet_t *tunSubnet,
+    const sessionServerIdentity_t *serverIdentity,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxActiveSessions,
@@ -455,7 +618,7 @@ int sessionRunServer(
       resolveClaimFn,
       resolveClaimCtx,
       ifModeLabel,
-      tunSubnet,
+      serverIdentity,
       authTimeoutMs,
       heartbeatCfg,
       maxActiveSessions,

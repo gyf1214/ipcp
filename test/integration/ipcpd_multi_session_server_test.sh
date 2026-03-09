@@ -192,7 +192,7 @@ cat > "$serverConfig" <<JSON
   "listen_port": 46100,
   "auth_timeout_ms": 5000,
   "max_pre_auth_sessions": 8,
-  "tun_subnet": "10.250.0.0/24",
+  "tun_ip": "10.250.0.1/24",
   "credentials": [
     { "tun_ip": "10.250.0.2", "key_file": "$keyFile" },
     { "tun_ip": "10.250.0.3", "key_file": "$keyFile" }

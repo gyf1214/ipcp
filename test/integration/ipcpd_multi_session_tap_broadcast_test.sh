@@ -142,6 +142,7 @@ cat > "$serverConfig" <<JSON
   "listen_port": 46200,
   "auth_timeout_ms": 5000,
   "max_pre_auth_sessions": 8,
+  "tap_mac": "02:11:22:33:44:01",
   "credentials": [
     { "tap_mac": "02:11:22:33:44:55", "key_file": "$keyFile" },
     { "tap_mac": "02:11:22:33:44:66", "key_file": "$keyFile" }

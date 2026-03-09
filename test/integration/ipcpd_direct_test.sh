@@ -81,15 +81,16 @@ run_case() {
   local claimField=""
   local claimValue=""
   local serverCredential=""
-  local serverTunSubnet=""
+  local serverIdentityLine=""
 
   if [[ "$ifMode" == "tun" ]]; then
     claimField="tun_ip"
     claimValue="10.250.0.2"
-    serverTunSubnet='  "tun_subnet": "10.250.0.0/30",'
+    serverIdentityLine='  "tun_ip": "10.250.0.1/30",'
   else
     claimField="tap_mac"
     claimValue="02:11:22:33:44:55"
+    serverIdentityLine='  "tap_mac": "02:11:22:33:44:01",'
   fi
   serverCredential="{ \"$claimField\": \"$claimValue\", \"key_file\": \"$keyFile\" }"
 
@@ -104,7 +105,7 @@ run_case() {
   "listen_port": 46000,
   "auth_timeout_ms": 5000,
   "max_pre_auth_sessions": 8,
-${serverTunSubnet}
+${serverIdentityLine}
   "credentials": [
     $serverCredential
   ]

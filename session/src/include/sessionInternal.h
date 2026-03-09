@@ -23,6 +23,12 @@ typedef enum {
   sessionQueueResultError,
 } sessionQueueResult_t;
 
+typedef enum {
+  sessionOverflowNone = 0,
+  sessionOverflowToTun,
+  sessionOverflowToClient,
+} sessionOverflowKind_t;
+
 struct session_t {
   bool isServer;
   void *runtime;
@@ -37,6 +43,8 @@ struct session_t {
   int heartbeatTimeoutMs;
   bool tcpReadPaused;
   long overflowNbytes;
+  sessionOverflowKind_t overflowKind;
+  int overflowDestSlot;
   char overflowBuf[ProtocolFrameSize];
 };
 
@@ -52,6 +60,22 @@ bool sessionPromoteFromPreAuth(
     const char *carryBuf,
     long carryNbytes);
 bool sessionHasOverflow(const session_t *session);
+bool sessionOverflowTargetsDestSlot(const session_t *session, int destSlot);
+sessionQueueResult_t sessionQueueTunWithBackpressure(
+    ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes);
+sessionQueueResult_t sessionQueueTunWithDrop(ioTunPoller_t *tunPoller, const void *data, long nbytes);
+sessionQueueResult_t sessionQueueTcpWithBackpressure(
+    ioTcpPoller_t *sourcePoller,
+    ioTcpPoller_t *destPoller,
+    session_t *session,
+    int destSlot,
+    const void *data,
+    long nbytes);
+sessionQueueResult_t sessionQueueTcpWithDrop(
+    ioTcpPoller_t *destPoller, session_t *session, int destSlot, const void *data, long nbytes);
+bool sessionRetryOverflowToTcp(
+    session_t *session, ioTcpPoller_t *sourcePoller, ioTcpPoller_t *destPoller, int destSlot);
+bool sessionDropOverflow(session_t *session, ioTcpPoller_t *sourcePoller, int destSlot);
 bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioEvent_t event);
 sessionStepResult_t sessionFinalizeStep(
     session_t *session,

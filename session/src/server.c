@@ -185,12 +185,27 @@ int serverAddClient(
 }
 
 bool serverRemoveClient(server_t *server, int slot) {
+  int sourceSlot;
+
   if (!activeSlotIndexValid(server, slot) || !server->activeConns[slot].active) {
     return false;
   }
 
   if (!serverDropPendingTunToTcpByOwner(server, slot)) {
     return false;
+  }
+  for (sourceSlot = 0; sourceSlot < server->maxActiveSessions; sourceSlot++) {
+    session_t *sourceSession;
+    if (!server->activeConns[sourceSlot].active) {
+      continue;
+    }
+    sourceSession = server->activeConns[sourceSlot].session;
+    if (sourceSession == NULL) {
+      continue;
+    }
+    if (!sessionDropOverflow(sourceSession, &server->activeConns[sourceSlot].tcpPoller, slot)) {
+      return false;
+    }
   }
   sessionDestroy(server->activeConns[slot].session);
   server->activeConns[slot].tcpPoller.outOffset = 0;
@@ -572,6 +587,39 @@ bool serverHeartbeatTick(long long nowMs, long long lastValidInboundMs, long lon
   return nowMs - lastValidInboundMs < timeoutMs;
 }
 
+static bool serverRetryPendingTcpToTcpForDestination(server_t *server, int destSlot) {
+  int i;
+  int start;
+
+  if (server == NULL || !activeSlotIndexValid(server, destSlot) || !server->activeConns[destSlot].active) {
+    return false;
+  }
+  if (server->maxActiveSessions <= 0) {
+    return true;
+  }
+
+  start = server->retryCursor % server->maxActiveSessions;
+  for (i = 0; i < server->maxActiveSessions; i++) {
+    int sourceSlot = (start + i) % server->maxActiveSessions;
+    session_t *sourceSession;
+    if (!server->activeConns[sourceSlot].active) {
+      continue;
+    }
+    sourceSession = server->activeConns[sourceSlot].session;
+    if (!sessionOverflowTargetsDestSlot(sourceSession, destSlot)) {
+      continue;
+    }
+    if (!sessionRetryOverflowToTcp(
+            sourceSession,
+            &server->activeConns[sourceSlot].tcpPoller,
+            &server->activeConns[destSlot].tcpPoller,
+            destSlot)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool serverServiceBackpressure(server_t *server, int slot, ioEvent_t event) {
   long queued;
   int ownerSlot;
@@ -598,6 +646,9 @@ bool serverServiceBackpressure(server_t *server, int slot, ioEvent_t event) {
       server->activeConns[slot].heartbeatAckPending = false;
     }
     return true;
+  }
+  if (!serverRetryPendingTcpToTcpForDestination(server, slot)) {
+    return false;
   }
   if (!serverHasPendingTunToTcp(server)) {
     return true;
@@ -1112,6 +1163,128 @@ static bool serverDispatchTunIngressToSlot(
   return true;
 }
 
+static bool claimsEqual(
+    const unsigned char *a, long aNbytes, const unsigned char *b, long bNbytes) {
+  return a != NULL && b != NULL && aNbytes > 0 && aNbytes == bNbytes && memcmp(a, b, (size_t)aNbytes) == 0;
+}
+
+static bool serverDispatchTcpIngressToSlot(
+    server_t *server,
+    int sourceSlot,
+    int destSlot,
+    const void *payload,
+    long payloadNbytes) {
+  session_t *sourceSession;
+  const unsigned char *destKey;
+  protocolMessage_t msg;
+  protocolFrame_t frame;
+  sessionQueueResult_t result;
+
+  if (server == NULL
+      || !activeSlotIndexValid(server, sourceSlot)
+      || !activeSlotIndexValid(server, destSlot)
+      || !server->activeConns[sourceSlot].active
+      || !server->activeConns[destSlot].active
+      || payload == NULL
+      || payloadNbytes <= 0) {
+    return false;
+  }
+  sourceSession = server->activeConns[sourceSlot].session;
+  destKey = serverKeyAt(server, destSlot);
+  if (sourceSession == NULL || destKey == NULL) {
+    return false;
+  }
+
+  msg.type = protocolMsgData;
+  msg.nbytes = payloadNbytes;
+  msg.buf = (const char *)payload;
+  if (protocolEncodeSecureMsg(&msg, destKey, &frame) != protocolStatusOk) {
+    return false;
+  }
+
+  result = sessionQueueTcpWithBackpressure(
+      &server->activeConns[sourceSlot].tcpPoller,
+      &server->activeConns[destSlot].tcpPoller,
+      sourceSession,
+      destSlot,
+      frame.buf,
+      frame.nbytes);
+  return result != sessionQueueResultError;
+}
+
+static bool serverBroadcastTcpIngressToClients(
+    server_t *server, int sourceSlot, const void *payload, long payloadNbytes) {
+  int destSlot;
+  session_t *sourceSession;
+
+  if (server == NULL
+      || !activeSlotIndexValid(server, sourceSlot)
+      || !server->activeConns[sourceSlot].active
+      || payload == NULL
+      || payloadNbytes <= 0) {
+    return false;
+  }
+  sourceSession = server->activeConns[sourceSlot].session;
+  if (sourceSession == NULL) {
+    return false;
+  }
+
+  for (destSlot = 0; destSlot < server->maxActiveSessions; destSlot++) {
+    const unsigned char *destKey;
+    protocolMessage_t msg;
+    protocolFrame_t frame;
+    sessionQueueResult_t result;
+    if (!server->activeConns[destSlot].active || destSlot == sourceSlot) {
+      continue;
+    }
+    destKey = serverKeyAt(server, destSlot);
+    if (destKey == NULL) {
+      return false;
+    }
+    msg.type = protocolMsgData;
+    msg.nbytes = payloadNbytes;
+    msg.buf = (const char *)payload;
+    if (protocolEncodeSecureMsg(&msg, destKey, &frame) != protocolStatusOk) {
+      return false;
+    }
+    result = sessionQueueTcpWithDrop(
+        &server->activeConns[destSlot].tcpPoller,
+        sourceSession,
+        destSlot,
+        frame.buf,
+        frame.nbytes);
+    if (result == sessionQueueResultError) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool serverQueueTcpIngressToTun(
+    server_t *server, int sourceSlot, const void *payload, long payloadNbytes, bool dropMode) {
+  session_t *sourceSession;
+  sessionQueueResult_t result;
+
+  if (server == NULL
+      || !activeSlotIndexValid(server, sourceSlot)
+      || !server->activeConns[sourceSlot].active
+      || payload == NULL
+      || payloadNbytes <= 0) {
+    return false;
+  }
+  sourceSession = server->activeConns[sourceSlot].session;
+  if (sourceSession == NULL) {
+    return false;
+  }
+  if (dropMode) {
+    result = sessionQueueTunWithDrop(&server->tunPoller, payload, payloadNbytes);
+  } else {
+    result = sessionQueueTunWithBackpressure(
+        &server->activeConns[sourceSlot].tcpPoller, &server->tunPoller, sourceSession, payload, payloadNbytes);
+  }
+  return result != sessionQueueResultError;
+}
+
 static bool serverTunDestinationIsLimitedBroadcast(const packetDestination_t *destination) {
   return destination != NULL
       && destination->claimNbytes == 4
@@ -1122,12 +1295,92 @@ static bool serverTunDestinationIsLimitedBroadcast(const packetDestination_t *de
 }
 
 static bool serverTunDestinationMatchesDirectedBroadcast(
+    const server_t *server, const packetDestination_t *destination);
+
+bool serverRouteTcpIngressPacket(
+    server_t *server, int sourceSlot, const char *ifModeLabel, const void *packet, long packetNbytes) {
+  packetParseMode_t mode;
+  packetDestination_t destination;
+  packetParseStatus_t parseStatus;
+  int destSlot;
+  bool isServerDestination;
+
+  if (server == NULL
+      || !activeSlotIndexValid(server, sourceSlot)
+      || !server->activeConns[sourceSlot].active
+      || ifModeLabel == NULL
+      || packet == NULL
+      || packetNbytes <= 0) {
+    return false;
+  }
+  if (strcmp(ifModeLabel, "tun") == 0) {
+    mode = packetParseModeTunIpv4;
+  } else if (strcmp(ifModeLabel, "tap") == 0) {
+    mode = packetParseModeTapEthernet;
+  } else {
+    return false;
+  }
+
+  parseStatus = packetParseDestination(mode, packet, packetNbytes, &destination);
+  if (parseStatus != packetParseStatusOk) {
+    return false;
+  }
+  if (destination.classification == packetDestinationDropMalformed
+      || destination.classification == packetDestinationDropMulticast) {
+    return true;
+  }
+
+  if (destination.classification == packetDestinationBroadcastL2) {
+    if (!serverBroadcastTcpIngressToClients(server, sourceSlot, packet, packetNbytes)) {
+      return false;
+    }
+    return serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+  }
+  if (mode == packetParseModeTunIpv4 && destination.classification == packetDestinationBroadcastL3Candidate) {
+    if (serverTunDestinationIsLimitedBroadcast(&destination)
+        || serverTunDestinationMatchesDirectedBroadcast(server, &destination)) {
+      if (!serverBroadcastTcpIngressToClients(server, sourceSlot, packet, packetNbytes)) {
+        return false;
+      }
+      return serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+    }
+    return true;
+  }
+
+  if (destination.classification != packetDestinationOk) {
+    return true;
+  }
+
+  if (mode == packetParseModeTunIpv4 && serverTunDestinationMatchesDirectedBroadcast(server, &destination)) {
+    if (!serverBroadcastTcpIngressToClients(server, sourceSlot, packet, packetNbytes)) {
+      return false;
+    }
+    return serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+  }
+
+  isServerDestination = claimsEqual(
+      destination.claim,
+      destination.claimNbytes,
+      server->serverIdentity.claim,
+      server->serverIdentity.claimNbytes);
+  if (isServerDestination) {
+    return serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, false);
+  }
+
+  destSlot = serverFindSlotByClaim(server, destination.claim, destination.claimNbytes);
+  if (destSlot < 0 || destSlot == sourceSlot) {
+    return true;
+  }
+  return serverDispatchTcpIngressToSlot(server, sourceSlot, destSlot, packet, packetNbytes);
+}
+
+static bool serverTunDestinationMatchesDirectedBroadcast(
     const server_t *server, const packetDestination_t *destination) {
   return server != NULL
       && destination != NULL
-      && server->tunSubnet.enabled
+      && server->serverIdentity.directedBroadcastEnabled
       && destination->claimNbytes == 4
-      && memcmp(destination->claim, server->tunSubnet.broadcast, 4) == 0;
+      && memcmp(destination->claim, server->serverIdentity.directedBroadcast, 4) == 0;
 }
 
 static bool serverFanoutTunIngressToAll(
@@ -1297,7 +1550,7 @@ int serverServeMultiClient(
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
     const char *ifModeLabel,
-    const sessionTunSubnet_t *tunSubnet,
+    const sessionServerIdentity_t *serverIdentity,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
     int maxActiveSessions,
@@ -1329,8 +1582,8 @@ int serverServeMultiClient(
           NULL)) {
     return -1;
   }
-  if (tunSubnet != NULL) {
-    server.tunSubnet = *tunSubnet;
+  if (serverIdentity != NULL) {
+    server.serverIdentity = *serverIdentity;
   }
 
   epollFd = epoll_create1(0);
