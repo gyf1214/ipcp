@@ -13,14 +13,6 @@
 #include "log.h"
 #include "packet.h"
 
-sessionStepResult_t sessionFinalizeStep(session_t *session, const unsigned char key[ProtocolPskSize]);
-sessionStepResult_t sessionHandleConnEvent(
-    session_t *session,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
-    ioEvent_t event,
-    const unsigned char key[ProtocolPskSize]);
-
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
   (void)ctx;

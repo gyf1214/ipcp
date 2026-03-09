@@ -126,6 +126,24 @@ static int fakeLookup(
   return 0;
 }
 
+static void testServerServeMultiClientRejectsInvalidArgs(void) {
+  testAssertTrue(
+      serverServeMultiClient(-1, -1, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
+      "server server should reject invalid fds");
+  testAssertTrue(
+      serverServeMultiClient(1, 2, NULL, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
+      "server server should reject null lookup callback");
+  testAssertTrue(
+      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, NULL, 2, 2) < 0,
+      "server server should reject null heartbeat config");
+  testAssertTrue(
+      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 0, 2) < 0,
+      "server server should reject non-positive max session count");
+  testAssertTrue(
+      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 0) < 0,
+      "server server should reject non-positive max pre-auth session count");
+}
+
 static void testSessionRunEntrypointsRejectInvalidConfigs(void) {
   sessionServerConfig_t serverCfg = {
       .tunFd = 3,
@@ -1333,6 +1351,7 @@ static void testServerHeartbeatTickTimeoutBoundary(void) {
 }
 
 void runServerTests(void) {
+  testServerServeMultiClientRejectsInvalidArgs();
   testSessionRunEntrypointsRejectInvalidConfigs();
   testServerAddRemoveAndReuseSlots();
   testServerActiveKeyBorrowUsesAuthoritativeStorage();

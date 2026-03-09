@@ -9,18 +9,6 @@
 #include "client.h"
 #include "server.h"
 
-int serverServeMultiClient(
-    int tunFd,
-    int listenFd,
-    sessionServerResolveClaimFn_t resolveClaimFn,
-    void *resolveClaimCtx,
-    sessionIfMode_t mode,
-    const sessionServerIdentity_t *serverIdentity,
-    int authTimeoutMs,
-    const sessionHeartbeatConfig_t *heartbeatCfg,
-    int maxActiveSessions,
-    int maxPreAuthSessions);
-
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
   (void)ctx;

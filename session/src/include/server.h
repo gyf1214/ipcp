@@ -131,3 +131,15 @@ int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadline
 bool serverRemovePreAuthConn(server_t *server, int preAuthSlot);
 preAuthConn_t *serverPreAuthAt(server_t *server, int preAuthSlot);
 bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot);
+
+int serverServeMultiClient(
+    int tunFd,
+    int listenFd,
+    sessionServerResolveClaimFn_t resolveClaimFn,
+    void *resolveClaimCtx,
+    sessionIfMode_t mode,
+    const sessionServerIdentity_t *serverIdentity,
+    int authTimeoutMs,
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    int maxActiveSessions,
+    int maxPreAuthSessions);
