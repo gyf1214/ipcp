@@ -26,6 +26,12 @@ static const unsigned char testKey[ProtocolPskSize] = {
 static const unsigned char claim2[] = {10, 0, 0, 2};
 static const unsigned char claim3[] = {10, 0, 0, 3};
 static const unsigned char claim4[] = {10, 0, 0, 4};
+static const sessionServerIdentity_t testServerIdentity = {
+    .claim = {10, 0, 0, 1},
+    .claimNbytes = 4,
+    .directedBroadcastEnabled = false,
+    .directedBroadcast = {0, 0, 0, 0},
+};
 static long long fakeNowMs = 0;
 
 typedef struct {
@@ -120,22 +126,45 @@ static int fakeLookup(
   return 0;
 }
 
-static void testServerServeMultiClientRejectsInvalidArgs(void) {
-  testAssertTrue(
-      serverServeMultiClient(-1, -1, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
-      "server server should reject invalid fds");
-  testAssertTrue(
-      serverServeMultiClient(1, 2, NULL, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
-      "server server should reject null lookup callback");
-  testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, NULL, 2, 2) < 0,
-      "server server should reject null heartbeat config");
-  testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 0, 2) < 0,
-      "server server should reject non-positive max session count");
-  testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 0) < 0,
-      "server server should reject non-positive max pre-auth session count");
+static void testSessionRunEntrypointsRejectInvalidConfigs(void) {
+  sessionServerConfig_t serverCfg = {
+      .tunFd = 3,
+      .listenFd = 4,
+      .resolveClaimFn = fakeLookup,
+      .resolveClaimCtx = NULL,
+      .mode = sessionIfModeTun,
+      .serverIdentity = &testServerIdentity,
+      .authTimeoutMs = 5000,
+      .heartbeat = testHeartbeatCfg,
+      .maxActiveSessions = 2,
+      .maxPreAuthSessions = 2,
+  };
+
+  testAssertTrue(sessionRunServer(NULL) < 0, "sessionRunServer should reject null config pointer");
+
+  serverCfg.tunFd = -1;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject invalid tun fd");
+  serverCfg.tunFd = 3;
+  serverCfg.listenFd = -1;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject invalid listen fd");
+  serverCfg.listenFd = 4;
+  serverCfg.resolveClaimFn = NULL;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject null resolve callback");
+  serverCfg.resolveClaimFn = fakeLookup;
+  serverCfg.authTimeoutMs = 0;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject non-positive auth timeout");
+  serverCfg.authTimeoutMs = 5000;
+  serverCfg.maxActiveSessions = 0;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject non-positive max active sessions");
+  serverCfg.maxActiveSessions = 2;
+  serverCfg.maxPreAuthSessions = 0;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject non-positive max pre-auth sessions");
+  serverCfg.maxPreAuthSessions = 2;
+  serverCfg.heartbeat.intervalMs = 0;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject non-positive heartbeat interval");
+  serverCfg.heartbeat.intervalMs = testHeartbeatCfg.intervalMs;
+  serverCfg.heartbeat.timeoutMs = testHeartbeatCfg.intervalMs;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject heartbeat timeout <= interval");
 }
 
 static void testServerAddRemoveAndReuseSlots(void) {
@@ -160,6 +189,56 @@ static void testServerAddRemoveAndReuseSlots(void) {
   reusedSlot = serverAddClient(&server, 0, 102, testKey, claim4, sizeof(claim4));
   testAssertTrue(reusedSlot == 0, "server should reuse first free slot");
   testAssertTrue(serverClientCount(&server) == 2, "client count should return to cap");
+
+  serverDeinit(&server);
+}
+
+static void testServerActiveKeyBorrowUsesAuthoritativeStorage(void) {
+  server_t server;
+  unsigned char zeroKey[ProtocolPskSize];
+  const unsigned char *borrowed;
+  const unsigned char *authoritative;
+
+  memset(zeroKey, 0, sizeof(zeroKey));
+  testAssertTrue(
+      serverInit(&server, 14, 15, 2, 2, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
+  testAssertTrue(
+      serverAddClient(&server, 0, 140, testKey, claim2, sizeof(claim2)) == 0,
+      "server should add active client");
+
+  borrowed = serverKeyAt(&server, 0);
+  authoritative = serverAuthoritativeKeyAt(&server, 0);
+  testAssertTrue(borrowed != NULL, "borrowed key should be available for active slot");
+  testAssertTrue(authoritative != NULL, "authoritative key should be available for slot");
+  testAssertTrue(borrowed == authoritative, "active key should borrow authoritative storage");
+  testAssertTrue(memcmp(authoritative, testKey, ProtocolPskSize) == 0, "authoritative slot should store resolved key");
+
+  testAssertTrue(serverRemoveClient(&server, 0), "remove should succeed");
+  authoritative = serverAuthoritativeKeyAt(&server, 0);
+  testAssertTrue(memcmp(authoritative, zeroKey, ProtocolPskSize) == 0, "authoritative key bytes should zeroize on remove");
+  testAssertTrue(server.activeConns[0].keyRef == NULL, "active slot should clear borrowed key reference on remove");
+  testAssertTrue(server.activeConns[0].keySlot == -1, "active slot should clear borrowed key slot index on remove");
+
+  serverDeinit(&server);
+}
+
+static void testServerRemoveClientClearsBorrowedPollerState(void) {
+  server_t server;
+
+  testAssertTrue(
+      serverInit(&server, 16, 17, 2, 2, &testHeartbeatCfg, NULL, NULL),
+      "server init should succeed");
+  testAssertTrue(
+      serverAddClient(&server, 0, 160, testKey, claim2, sizeof(claim2)) == 0,
+      "server should add active client");
+  testAssertTrue(server.activeConns[0].tcpPoller.tcpFd == 160, "active poller should borrow active connection fd");
+
+  testAssertTrue(serverRemoveClient(&server, 0), "remove should succeed");
+  testAssertTrue(server.activeConns[0].tcpPoller.tcpFd == -1, "remove should clear borrowed poller fd");
+  testAssertTrue(server.activeConns[0].tcpPoller.epollFd == -1, "remove should clear borrowed poller epoll fd");
+  testAssertTrue(server.activeConns[0].tcpPoller.events == 0, "remove should clear borrowed poller events");
+  testAssertTrue(server.activeConns[0].session == NULL, "remove should clear borrowed session reference");
 
   serverDeinit(&server);
 }
@@ -1254,8 +1333,10 @@ static void testServerHeartbeatTickTimeoutBoundary(void) {
 }
 
 void runServerTests(void) {
-  testServerServeMultiClientRejectsInvalidArgs();
+  testSessionRunEntrypointsRejectInvalidConfigs();
   testServerAddRemoveAndReuseSlots();
+  testServerActiveKeyBorrowUsesAuthoritativeStorage();
+  testServerRemoveClientClearsBorrowedPollerState();
   testServerRejectsBeyondMaxSessions();
   testServerFindSlotByFdAndPickEgress();
   testServerFindSlotByClaim();

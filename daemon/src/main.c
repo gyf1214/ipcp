@@ -50,12 +50,13 @@ static int listenTcp(
     configIfMode_t ifMode,
     const char *listenIP,
     int port,
-    const sessionServerIdentity_t *serverIdentity,
+    const daemonServerIdentity_t *serverIdentity,
     const cryptServerKeyStore_t *keyStore,
     int authTimeoutMs,
     int maxPreAuthSessions,
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   serverKeyLookupCtx_t lookupCtx;
+  sessionServerIdentity_t sessionIdentity;
   int tunFd = -1;
   int listenFd = ioTcpListen(listenIP, port);
   if (listenFd < 0) {
@@ -74,18 +75,20 @@ static int listenTcp(
 
   lookupCtx.store = keyStore;
   lookupCtx.ifMode = ifMode;
-  if (sessionRunServer(
-          tunFd,
-          listenFd,
-          serverLookupByClaim,
-          &lookupCtx,
-          toSessionIfMode(ifMode),
-          serverIdentity,
-          authTimeoutMs,
-          heartbeatCfg,
-          keyStore->count,
-          maxPreAuthSessions)
-      != 0) {
+  memcpy(&sessionIdentity, serverIdentity, sizeof(sessionIdentity));
+  sessionServerConfig_t sessionCfg = {
+      .tunFd = tunFd,
+      .listenFd = listenFd,
+      .resolveClaimFn = serverLookupByClaim,
+      .resolveClaimCtx = &lookupCtx,
+      .mode = toSessionIfMode(ifMode),
+      .serverIdentity = &sessionIdentity,
+      .authTimeoutMs = authTimeoutMs,
+      .heartbeat = *heartbeatCfg,
+      .maxActiveSessions = keyStore->count,
+      .maxPreAuthSessions = maxPreAuthSessions,
+  };
+  if (sessionRunServer(&sessionCfg) != 0) {
     close(tunFd);
     close(listenFd);
     return -1;
@@ -124,7 +127,15 @@ static int connTcp(
   }
   logf("connected to %s:%d", remoteIP, port);
 
-  if (sessionRunClient(tunFd, connFd, claim, claimNbytes, key, heartbeatCfg) != 0) {
+  sessionClientConfig_t sessionCfg = {
+      .tunFd = tunFd,
+      .connFd = connFd,
+      .claim = claim,
+      .claimNbytes = claimNbytes,
+      .key = key,
+      .heartbeat = *heartbeatCfg,
+  };
+  if (sessionRunClient(&sessionCfg) != 0) {
     errf("client session failed");
     goto cleanup;
   }

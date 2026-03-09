@@ -9,6 +9,18 @@
 #include "client.h"
 #include "server.h"
 
+int serverServeMultiClient(
+    int tunFd,
+    int listenFd,
+    sessionServerResolveClaimFn_t resolveClaimFn,
+    void *resolveClaimCtx,
+    sessionIfMode_t mode,
+    const sessionServerIdentity_t *serverIdentity,
+    int authTimeoutMs,
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    int maxActiveSessions,
+    int maxPreAuthSessions);
+
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
   (void)ctx;
@@ -602,38 +614,43 @@ sessionStepResult_t sessionStep(
   return sessionHandleConnEvent(session, tcpPoller, tunPoller, event, key);
 }
 
-int sessionRunServer(
-    int tunFd,
-    int listenFd,
-    sessionServerResolveClaimFn_t resolveClaimFn,
-    void *resolveClaimCtx,
-    sessionIfMode_t mode,
-    const sessionServerIdentity_t *serverIdentity,
-    int authTimeoutMs,
-    const sessionHeartbeatConfig_t *heartbeatCfg,
-    int maxActiveSessions,
-    int maxPreAuthSessions) {
+int sessionRunServer(const sessionServerConfig_t *cfg) {
+  if (cfg == NULL
+      || cfg->tunFd < 0
+      || cfg->listenFd < 0
+      || cfg->resolveClaimFn == NULL
+      || cfg->authTimeoutMs <= 0
+      || cfg->heartbeat.intervalMs <= 0
+      || cfg->heartbeat.timeoutMs <= cfg->heartbeat.intervalMs
+      || cfg->maxActiveSessions <= 0
+      || cfg->maxPreAuthSessions <= 0) {
+    return -1;
+  }
   return serverServeMultiClient(
-      tunFd,
-      listenFd,
-      resolveClaimFn,
-      resolveClaimCtx,
-      mode,
-      serverIdentity,
-      authTimeoutMs,
-      heartbeatCfg,
-      maxActiveSessions,
-      maxPreAuthSessions);
+      cfg->tunFd,
+      cfg->listenFd,
+      cfg->resolveClaimFn,
+      cfg->resolveClaimCtx,
+      cfg->mode,
+      cfg->serverIdentity,
+      cfg->authTimeoutMs,
+      &cfg->heartbeat,
+      cfg->maxActiveSessions,
+      cfg->maxPreAuthSessions);
 }
 
-int sessionRunClient(
-    int tunFd,
-    int connFd,
-    const unsigned char *claim,
-    long claimNbytes,
-    const unsigned char key[ProtocolPskSize],
-    const sessionHeartbeatConfig_t *heartbeatCfg) {
-  return clientServeConn(tunFd, connFd, claim, claimNbytes, key, heartbeatCfg);
+int sessionRunClient(const sessionClientConfig_t *cfg) {
+  if (cfg == NULL
+      || cfg->tunFd < 0
+      || cfg->connFd < 0
+      || cfg->claim == NULL
+      || cfg->claimNbytes <= 0
+      || cfg->key == NULL
+      || cfg->heartbeat.intervalMs <= 0
+      || cfg->heartbeat.timeoutMs <= cfg->heartbeat.intervalMs) {
+    return -1;
+  }
+  return clientServeConn(cfg->tunFd, cfg->connFd, cfg->claim, cfg->claimNbytes, cfg->key, &cfg->heartbeat);
 }
 
 bool sessionApiSmoke(void) {

@@ -34,7 +34,8 @@ typedef struct {
   int connFd;
   session_t *session;
   ioTcpPoller_t tcpPoller;
-  unsigned char key[ProtocolPskSize];
+  const unsigned char *keyRef;
+  int keySlot;
   unsigned char claim[SessionClaimSize];
   long claimNbytes;
   bool heartbeatAckPending;
@@ -49,6 +50,7 @@ struct server_t {
   int pendingOwnerSlot;
   long runtimeOverflowNbytes;
   unsigned char runtimeOverflowBuf[ProtocolFrameSize];
+  unsigned char *authoritativeKeys;
   int retryCursor;
   int maxActiveSessions;
   int activeCount;
@@ -120,6 +122,7 @@ bool serverServiceBackpressure(server_t *server, int slot, ioEvent_t event);
 session_t *serverSessionAt(server_t *server, int slot);
 int serverConnFdAt(const server_t *server, int slot);
 const unsigned char *serverKeyAt(const server_t *server, int slot);
+const unsigned char *serverAuthoritativeKeyAt(const server_t *server, int slot);
 bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, long claimNbytes);
 bool serverRouteTunIngressPacket(server_t *server, const void *packet, long packetNbytes);
 bool serverRouteTcpIngressPacket(server_t *server, int sourceConnFd, const void *packet, long packetNbytes);
@@ -128,15 +131,3 @@ int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadline
 bool serverRemovePreAuthConn(server_t *server, int preAuthSlot);
 preAuthConn_t *serverPreAuthAt(server_t *server, int preAuthSlot);
 bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot);
-
-int serverServeMultiClient(
-    int tunFd,
-    int listenFd,
-    sessionServerResolveClaimFn_t resolveClaimFn,
-    void *resolveClaimCtx,
-    sessionIfMode_t mode,
-    const sessionServerIdentity_t *serverIdentity,
-    int authTimeoutMs,
-    const sessionHeartbeatConfig_t *heartbeatCfg,
-    int maxActiveSessions,
-    int maxPreAuthSessions);

@@ -30,21 +30,27 @@ typedef enum {
   sessionIfModeTap,
 } sessionIfMode_t;
 
-int sessionRunServer(
-    int tunFd,
-    int listenFd,
-    sessionServerResolveClaimFn_t resolveClaimFn,
-    void *resolveClaimCtx,
-    sessionIfMode_t mode,
-    const sessionServerIdentity_t *serverIdentity,
-    int authTimeoutMs,
-    const sessionHeartbeatConfig_t *heartbeatCfg,
-    int maxActiveSessions,
-    int maxPreAuthSessions);
-int sessionRunClient(
-    int tunFd,
-    int connFd,
-    const unsigned char *claim,
-    long claimNbytes,
-    const unsigned char key[ProtocolPskSize],
-    const sessionHeartbeatConfig_t *heartbeatCfg);
+typedef struct {
+  int tunFd;
+  int listenFd;
+  sessionServerResolveClaimFn_t resolveClaimFn;
+  void *resolveClaimCtx;
+  sessionIfMode_t mode;
+  const sessionServerIdentity_t *serverIdentity;
+  int authTimeoutMs;
+  sessionHeartbeatConfig_t heartbeat;
+  int maxActiveSessions;
+  int maxPreAuthSessions;
+} sessionServerConfig_t;
+
+typedef struct {
+  int tunFd;
+  int connFd;
+  const unsigned char *claim;
+  long claimNbytes;
+  const unsigned char *key;
+  sessionHeartbeatConfig_t heartbeat;
+} sessionClientConfig_t;
+
+int sessionRunServer(const sessionServerConfig_t *cfg);
+int sessionRunClient(const sessionClientConfig_t *cfg);

@@ -177,6 +177,39 @@ static void testClientServeConnRejectsInvalidArgs(void) {
       "clientServeConn should reject invalid args");
 }
 
+static void testSessionRunClientRejectsInvalidConfig(void) {
+  sessionClientConfig_t cfg = {
+      .tunFd = 3,
+      .connFd = 4,
+      .claim = testClaim,
+      .claimNbytes = (long)sizeof(testClaim),
+      .key = testClientKey,
+      .heartbeat = heartbeatCfg,
+  };
+  testAssertTrue(sessionRunClient(NULL) != 0, "sessionRunClient should reject null config");
+
+  cfg.tunFd = -1;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject invalid tun fd");
+  cfg.tunFd = 3;
+  cfg.connFd = -1;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject invalid conn fd");
+  cfg.connFd = 4;
+  cfg.claim = NULL;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject null claim");
+  cfg.claim = testClaim;
+  cfg.claimNbytes = 0;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject non-positive claim length");
+  cfg.claimNbytes = (long)sizeof(testClaim);
+  cfg.key = NULL;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject null key");
+  cfg.key = testClientKey;
+  cfg.heartbeat.intervalMs = 0;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject non-positive heartbeat interval");
+  cfg.heartbeat.intervalMs = heartbeatCfg.intervalMs;
+  cfg.heartbeat.timeoutMs = heartbeatCfg.intervalMs;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject heartbeat timeout <= interval");
+}
+
 static void testClientWriteRawMsgWritesValidWireFrame(void) {
   int tcpPair[2];
   protocolRawMsg_t rawMsg;
@@ -844,6 +877,7 @@ void runClientTests(void) {
   testClientWriteSecureMsgWritesDecodablePayload();
   testClientReadSecureMsgSyncReadsValidWireFrame();
   testClientServeConnRejectsInvalidArgs();
+  testSessionRunClientRejectsInvalidConfig();
   testClientServeConnFailsOnInvalidChallengeLength();
   testClientServeConnHandshakeAndStopOnPeerClose();
   testClientSessionRuntimeWiringAcceptsClientContext();

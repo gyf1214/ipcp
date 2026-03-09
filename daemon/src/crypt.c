@@ -61,7 +61,7 @@ int cryptServerKeyStoreLoadFromConfig(cryptServerKeyStore_t *store, const daemon
       cryptServerKeyStoreZero(store);
       return -1;
     }
-    if (cred->claimNbytes <= 0 || cred->claimNbytes > SessionClaimSize) {
+    if (cred->claimNbytes <= 0 || cred->claimNbytes > DaemonClaimSize) {
       cryptServerKeyStoreZero(store);
       return -1;
     }

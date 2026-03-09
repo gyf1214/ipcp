@@ -16,6 +16,14 @@
 #include "sessionInternal.h"
 #include "testAssert.h"
 
+#define TestAssertServerRunSig(fnExpr) \
+  _Static_assert(_Generic((fnExpr), int (*)(const sessionServerConfig_t *): 1, default: 0), "sessionRunServer signature drift")
+#define TestAssertClientRunSig(fnExpr) \
+  _Static_assert(_Generic((fnExpr), int (*)(const sessionClientConfig_t *): 1, default: 0), "sessionRunClient signature drift")
+
+TestAssertServerRunSig(sessionRunServer);
+TestAssertClientRunSig(sessionRunClient);
+
 typedef struct {
   int epollFd;
   ioTunPoller_t tunPoller;
@@ -366,9 +374,8 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
     testAssertTrue(write(tcpPair[1], inboundWire, (size_t)inboundNbytes) == inboundNbytes, "peer tcp write should succeed");
   }
   testAssertTrue(
-      sessionHandleConnEvent(clientSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key)
-      == sessionStepContinue,
-      "conn event entrypoint should process tcp read");
+      sessionStep(clientSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key) == sessionStepContinue,
+      "sessionStep conn path should process tcp read");
   testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "tun write service should flush queued frame");
   {
     char received[128];
@@ -589,11 +596,32 @@ static void testSessionCreateRejectsInvalidHeartbeatConfig(void) {
   testAssertTrue(session == NULL, "session create should fail when timeout is not greater than interval");
 }
 
+static void testSessionTopLevelRunEntrypointsRejectNullConfig(void) {
+  testAssertTrue(sessionRunServer(NULL) < 0, "sessionRunServer should reject null config");
+  testAssertTrue(sessionRunClient(NULL) < 0, "sessionRunClient should reject null config");
+}
+
+static void testSessionStepRequiresBorrowedPollers(void) {
+  session_t *session;
+  unsigned char key[ProtocolPskSize];
+
+  memset(key, 0x33, sizeof(key));
+  session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+
+  testAssertTrue(
+      sessionStep(session, NULL, NULL, ioEventTcpRead, key) == sessionStepStop,
+      "sessionStep should stop when borrowed pollers are missing");
+  sessionDestroy(session);
+}
+
 void runSessionTests(void) {
   testSessionServerRoleSkipsRuntimeAssertOnTimeout();
   testSessionClientRoleAssertsOnMissingRuntime();
   testSessionCreateRejectsNullHeartbeatConfig();
   testSessionCreateRejectsInvalidHeartbeatConfig();
+  testSessionTopLevelRunEntrypointsRejectNullConfig();
+  testSessionStepRequiresBorrowedPollers();
   testSessionApiSmoke();
   testSessionInitSeedsModeAndTimestamps();
   testSessionResetClearsPendingAndPauseFlags();

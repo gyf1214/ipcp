@@ -13,6 +13,14 @@
 #include "log.h"
 #include "packet.h"
 
+sessionStepResult_t sessionFinalizeStep(session_t *session, const unsigned char key[ProtocolPskSize]);
+sessionStepResult_t sessionHandleConnEvent(
+    session_t *session,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
+    ioEvent_t event,
+    const unsigned char key[ProtocolPskSize]);
+
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
   (void)ctx;
@@ -41,6 +49,20 @@ static bool activeSlotIndexValid(const server_t *server, int slot) {
 
 static bool preAuthSlotIndexValid(const server_t *server, int slot) {
   return server != NULL && server->preAuthConns != NULL && slot >= 0 && slot < server->maxPreAuthSessions;
+}
+
+static unsigned char *serverAuthoritativeKeySlot(server_t *server, int slot) {
+  if (server == NULL || server->authoritativeKeys == NULL || slot < 0 || slot >= server->maxActiveSessions) {
+    return NULL;
+  }
+  return server->authoritativeKeys + ((size_t)slot * ProtocolPskSize);
+}
+
+static const unsigned char *serverAuthoritativeKeySlotConst(const server_t *server, int slot) {
+  if (server == NULL || server->authoritativeKeys == NULL || slot < 0 || slot >= server->maxActiveSessions) {
+    return NULL;
+  }
+  return server->authoritativeKeys + ((size_t)slot * ProtocolPskSize);
 }
 
 static bool runtimeTunEpollCtl(server_t *server, unsigned int events) {
@@ -87,9 +109,11 @@ bool serverInit(
   memset(server, 0, sizeof(*server));
   server->activeConns = calloc((size_t)maxActiveSessions, sizeof(*server->activeConns));
   server->preAuthConns = calloc((size_t)maxPreAuthSessions, sizeof(*server->preAuthConns));
-  if (server->activeConns == NULL || server->preAuthConns == NULL) {
+  server->authoritativeKeys = calloc((size_t)maxActiveSessions, ProtocolPskSize);
+  if (server->activeConns == NULL || server->preAuthConns == NULL || server->authoritativeKeys == NULL) {
     free(server->activeConns);
     free(server->preAuthConns);
+    free(server->authoritativeKeys);
     memset(server, 0, sizeof(*server));
     return false;
   }
@@ -120,6 +144,8 @@ bool serverInit(
 
   for (i = 0; i < server->maxActiveSessions; i++) {
     server->activeConns[i].connFd = -1;
+    server->activeConns[i].keyRef = NULL;
+    server->activeConns[i].keySlot = -1;
   }
   for (i = 0; i < server->maxPreAuthSessions; i++) {
     server->preAuthConns[i].connFd = -1;
@@ -146,6 +172,10 @@ void serverDeinit(server_t *server) {
 
   free(server->activeConns);
   free(server->preAuthConns);
+  if (server->authoritativeKeys != NULL) {
+    sodium_memzero(server->authoritativeKeys, (size_t)server->maxActiveSessions * ProtocolPskSize);
+  }
+  free(server->authoritativeKeys);
   memset(server, 0, sizeof(*server));
 }
 
@@ -157,9 +187,11 @@ int serverAddClient(
     const unsigned char *claim,
     long claimNbytes) {
   session_t *session;
+  unsigned char *keySlot;
 
   if (server == NULL
       || server->activeConns == NULL
+      || server->authoritativeKeys == NULL
       || connFd < 0
       || key == NULL
       || claim == NULL
@@ -168,6 +200,10 @@ int serverAddClient(
     return -1;
   }
   if (!activeSlotIndexValid(server, activeSlot)) {
+    return -1;
+  }
+  keySlot = serverAuthoritativeKeySlot(server, activeSlot);
+  if (keySlot == NULL) {
     return -1;
   }
   if (server->activeConns[activeSlot].active) {
@@ -191,7 +227,9 @@ int serverAddClient(
   server->activeConns[activeSlot].tcpPoller.outOffset = 0;
   server->activeConns[activeSlot].tcpPoller.outNbytes = 0;
   memset(server->activeConns[activeSlot].tcpPoller.outBuf, 0, sizeof(server->activeConns[activeSlot].tcpPoller.outBuf));
-  memcpy(server->activeConns[activeSlot].key, key, ProtocolPskSize);
+  memcpy(keySlot, key, ProtocolPskSize);
+  server->activeConns[activeSlot].keyRef = keySlot;
+  server->activeConns[activeSlot].keySlot = activeSlot;
   memcpy(server->activeConns[activeSlot].claim, claim, (size_t)claimNbytes);
   server->activeConns[activeSlot].claimNbytes = claimNbytes;
   server->activeConns[activeSlot].heartbeatAckPending = false;
@@ -224,10 +262,20 @@ bool serverRemoveClient(server_t *server, int slot) {
     }
   }
   sessionDestroy(server->activeConns[slot].session);
+  server->activeConns[slot].tcpPoller.epollFd = -1;
+  server->activeConns[slot].tcpPoller.tcpFd = -1;
+  server->activeConns[slot].tcpPoller.events = 0;
   server->activeConns[slot].tcpPoller.outOffset = 0;
   server->activeConns[slot].tcpPoller.outNbytes = 0;
   memset(server->activeConns[slot].tcpPoller.outBuf, 0, sizeof(server->activeConns[slot].tcpPoller.outBuf));
-  memset(server->activeConns[slot].key, 0, sizeof(server->activeConns[slot].key));
+  if (server->activeConns[slot].keySlot >= 0) {
+    unsigned char *keySlot = serverAuthoritativeKeySlot(server, server->activeConns[slot].keySlot);
+    if (keySlot != NULL) {
+      sodium_memzero(keySlot, ProtocolPskSize);
+    }
+  }
+  server->activeConns[slot].keyRef = NULL;
+  server->activeConns[slot].keySlot = -1;
   memset(server->activeConns[slot].claim, 0, sizeof(server->activeConns[slot].claim));
   server->activeConns[slot].claimNbytes = 0;
   server->activeConns[slot].heartbeatAckPending = false;
@@ -545,7 +593,7 @@ static sessionQueueResult_t serverRetryHeartbeatAck(server_t *server, int slot) 
   if (!activeSlotIndexValid(server, slot) || !server->activeConns[slot].active) {
     return sessionQueueResultError;
   }
-  if (protocolEncodeSecureMsg(&ack, server->activeConns[slot].key, &frame) != protocolStatusOk) {
+  if (protocolEncodeSecureMsg(&ack, serverKeyAt(server, slot), &frame) != protocolStatusOk) {
     return sessionQueueResultError;
   }
   return serverQueueTcpWithDrop(
@@ -707,7 +755,11 @@ const unsigned char *serverKeyAt(const server_t *server, int slot) {
   if (!activeSlotIndexValid(server, slot) || !server->activeConns[slot].active) {
     return NULL;
   }
-  return server->activeConns[slot].key;
+  return server->activeConns[slot].keyRef;
+}
+
+const unsigned char *serverAuthoritativeKeyAt(const server_t *server, int slot) {
+  return serverAuthoritativeKeySlotConst(server, slot);
 }
 
 bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, long claimNbytes) {

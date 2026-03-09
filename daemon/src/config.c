@@ -115,7 +115,7 @@ static int parseIPv4String(const char *s) {
   return inet_pton(AF_INET, s, &addr) == 1;
 }
 
-static int parseIPv4Claim(const char *s, unsigned char out[SessionClaimSize], long *outNbytes) {
+static int parseIPv4Claim(const char *s, unsigned char out[DaemonClaimSize], long *outNbytes) {
   struct in_addr addr;
   if (s == NULL || out == NULL || outNbytes == NULL) {
     return -1;
@@ -160,7 +160,7 @@ static int hexNibble(char c) {
   return -1;
 }
 
-static int parseMacClaim(const char *s, unsigned char out[SessionClaimSize], long *outNbytes) {
+static int parseMacClaim(const char *s, unsigned char out[DaemonClaimSize], long *outNbytes) {
   int i;
   if (s == NULL || out == NULL || outNbytes == NULL || !parseMacString(s)) {
     return -1;

@@ -78,15 +78,6 @@ bool sessionRetryOverflowToTcp(
     session_t *session, ioTcpPoller_t *sourcePoller, ioTcpPoller_t *destPoller, int destSlot);
 bool sessionDropOverflow(session_t *session, ioTcpPoller_t *sourcePoller, int destSlot);
 bool sessionRetryOverflow(session_t *session, ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, ioEvent_t event);
-sessionStepResult_t sessionFinalizeStep(
-    session_t *session,
-    const unsigned char key[ProtocolPskSize]);
-sessionStepResult_t sessionHandleConnEvent(
-    session_t *session,
-    ioTcpPoller_t *tcpPoller,
-    ioTunPoller_t *tunPoller,
-    ioEvent_t event,
-    const unsigned char key[ProtocolPskSize]);
 sessionStepResult_t sessionStep(
     session_t *session,
     ioTcpPoller_t *tcpPoller,

@@ -5,7 +5,7 @@
 
 typedef struct {
   configIfMode_t ifMode;
-  unsigned char claim[SessionClaimSize];
+  unsigned char claim[DaemonClaimSize];
   long claimNbytes;
   unsigned char key[ProtocolPskSize];
 } cryptServerKeyEntry_t;
