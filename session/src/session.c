@@ -159,7 +159,7 @@ sessionQueueResult_t sessionQueueTcpWithDrop(
   if (destPoller == NULL || session == NULL || data == NULL || nbytes <= 0 || destSlot < 0) {
     return sessionQueueResultError;
   }
-  if (sessionOverflowTargetsDestSlot(session, destSlot)) {
+  if (sessionHasOverflow(session)) {
     return sessionQueueResultBlocked;
   }
 

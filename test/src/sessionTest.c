@@ -525,7 +525,7 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
   result = sessionQueueTcpWithDrop(&destPollerA, session, 3, payload, 32);
   testAssertTrue(result == sessionQueueResultBlocked, "drop queue should block same destination while pending exists");
   result = sessionQueueTcpWithDrop(&destPollerB, session, 4, payload, 32);
-  testAssertTrue(result == sessionQueueResultQueued, "drop queue should allow other destination while pending exists");
+  testAssertTrue(result == sessionQueueResultBlocked, "drop queue should block other destination while pending exists");
 
   testAssertTrue(sessionDropOverflow(session, &poller.tcpPoller, 2), "drop overflow non-match should be no-op");
   testAssertTrue(session->overflowNbytes > 0, "non-match should preserve pending payload");
