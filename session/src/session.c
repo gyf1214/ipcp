@@ -87,10 +87,14 @@ sessionQueueResult_t sessionQueueTunWithBackpressure(
   return sessionQueueResultError;
 }
 
-sessionQueueResult_t sessionQueueTunWithDrop(ioTunPoller_t *tunPoller, const void *data, long nbytes) {
+sessionQueueResult_t sessionQueueTunWithDropForSession(
+    ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
   long queued;
-  if (tunPoller == NULL || data == NULL || nbytes <= 0) {
+  if (tunPoller == NULL || session == NULL || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
+  }
+  if (sessionHasOverflow(session)) {
+    return sessionQueueResultBlocked;
   }
   if (ioTunWrite(tunPoller, data, nbytes)) {
     return sessionQueueResultQueued;

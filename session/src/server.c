@@ -1277,7 +1277,7 @@ static bool serverQueueTcpIngressToTun(
     return false;
   }
   if (dropMode) {
-    result = sessionQueueTunWithDrop(&server->tunPoller, payload, payloadNbytes);
+    result = sessionQueueTunWithDropForSession(&server->tunPoller, sourceSession, payload, payloadNbytes);
   } else {
     result = sessionQueueTunWithBackpressure(
         &server->activeConns[sourceSlot].tcpPoller, &server->tunPoller, sourceSession, payload, payloadNbytes);

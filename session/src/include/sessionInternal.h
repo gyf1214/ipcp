@@ -63,7 +63,8 @@ bool sessionHasOverflow(const session_t *session);
 bool sessionOverflowTargetsDestSlot(const session_t *session, int destSlot);
 sessionQueueResult_t sessionQueueTunWithBackpressure(
     ioTcpPoller_t *tcpPoller, ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes);
-sessionQueueResult_t sessionQueueTunWithDrop(ioTunPoller_t *tunPoller, const void *data, long nbytes);
+sessionQueueResult_t sessionQueueTunWithDropForSession(
+    ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes);
 sessionQueueResult_t sessionQueueTcpWithBackpressure(
     ioTcpPoller_t *sourcePoller,
     ioTcpPoller_t *destPoller,

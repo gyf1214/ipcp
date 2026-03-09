@@ -541,7 +541,7 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
   close(destPairB[1]);
 }
 
-static void testSessionQueueTunWithDropNeverStoresPending(void) {
+static void testSessionQueueTunWithDropForSession(void) {
   splitPollersFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
@@ -555,9 +555,15 @@ static void testSessionQueueTunWithDropNeverStoresPending(void) {
   poller.tunPoller.frameCount = IoTunQueueFrameCapacity;
   poller.tunPoller.queuedBytes = IoPollerQueueCapacity;
 
-  result = sessionQueueTunWithDrop(&poller.tunPoller, payload, (long)sizeof(payload) - 1);
+  result = sessionQueueTunWithDropForSession(&poller.tunPoller, session, payload, (long)sizeof(payload) - 1);
   testAssertTrue(result == sessionQueueResultBlocked, "tun drop queue should block on saturation");
   testAssertTrue(session->overflowNbytes == 0, "tun drop queue should not store pending payload");
+
+  session->overflowNbytes = 8;
+  session->overflowKind = sessionOverflowToClient;
+  session->overflowDestSlot = 3;
+  result = sessionQueueTunWithDropForSession(&poller.tunPoller, session, payload, (long)sizeof(payload) - 1);
+  testAssertTrue(result == sessionQueueResultBlocked, "tun drop queue should block when source overflow is pending");
 
   sessionDestroy(session);
   teardownSplitPollersFixture(&poller, tunPair, tcpPair);
@@ -598,5 +604,5 @@ void runSessionTests(void) {
   testSessionRetryOverflowFlushesAndResumesRead();
   testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated();
   testSessionDestinationAwareTcpQueueAndDropApis();
-  testSessionQueueTunWithDropNeverStoresPending();
+  testSessionQueueTunWithDropForSession();
 }
