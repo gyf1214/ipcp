@@ -25,12 +25,17 @@ typedef struct {
   unsigned char directedBroadcast[4];
 } sessionServerIdentity_t;
 
+typedef enum {
+  sessionIfModeTun = 0,
+  sessionIfModeTap,
+} sessionIfMode_t;
+
 int sessionRunServer(
     int tunFd,
     int listenFd,
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
-    const char *ifModeLabel,
+    sessionIfMode_t mode,
     const sessionServerIdentity_t *serverIdentity,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,

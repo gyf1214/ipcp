@@ -57,6 +57,7 @@ struct server_t {
   int preAuthCount;
   preAuthConn_t *preAuthConns;
   sessionServerIdentity_t serverIdentity;
+  sessionIfMode_t mode;
   sessionHeartbeatConfig_t heartbeatCfg;
   sessionNowMsFn_t nowMsFn;
   void *nowCtx;
@@ -120,9 +121,8 @@ session_t *serverSessionAt(server_t *server, int slot);
 int serverConnFdAt(const server_t *server, int slot);
 const unsigned char *serverKeyAt(const server_t *server, int slot);
 bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, long claimNbytes);
-bool serverRouteTunIngressPacket(server_t *server, const char *ifModeLabel, const void *packet, long packetNbytes);
-bool serverRouteTcpIngressPacket(
-    server_t *server, int sourceSlot, const char *ifModeLabel, const void *packet, long packetNbytes);
+bool serverRouteTunIngressPacket(server_t *server, const void *packet, long packetNbytes);
+bool serverRouteTcpIngressPacket(server_t *server, int sourceConnFd, const void *packet, long packetNbytes);
 
 int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadlineMs);
 bool serverRemovePreAuthConn(server_t *server, int preAuthSlot);
@@ -134,7 +134,7 @@ int serverServeMultiClient(
     int listenFd,
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
-    const char *ifModeLabel,
+    sessionIfMode_t mode,
     const sessionServerIdentity_t *serverIdentity,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,

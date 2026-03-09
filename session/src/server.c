@@ -20,6 +20,21 @@ static long long defaultNowMs(void *ctx) {
   return (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
 }
 
+static bool serverPacketParseMode(const server_t *server, packetParseMode_t *outMode) {
+  if (server == NULL || outMode == NULL) {
+    return false;
+  }
+  if (server->mode == sessionIfModeTun) {
+    *outMode = packetParseModeTunIpv4;
+    return true;
+  }
+  if (server->mode == sessionIfModeTap) {
+    *outMode = packetParseModeTapEthernet;
+    return true;
+  }
+  return false;
+}
+
 static bool activeSlotIndexValid(const server_t *server, int slot) {
   return server != NULL && server->activeConns != NULL && slot >= 0 && slot < server->maxActiveSessions;
 }
@@ -98,6 +113,7 @@ bool serverInit(
   server->activeCount = 0;
   server->maxPreAuthSessions = maxPreAuthSessions;
   server->preAuthCount = 0;
+  server->mode = sessionIfModeTun;
   server->heartbeatCfg = *heartbeatCfg;
   server->nowMsFn = nowMsFn == NULL ? defaultNowMs : nowMsFn;
   server->nowCtx = nowCtx;
@@ -991,14 +1007,13 @@ static bool serverDispatchPreAuth(
     server_t *server,
     int preAuthSlot,
     ioEvent_t event,
-    const char *ifModeLabel,
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx) {
   preAuthConn_t *conn;
   long long nowMs;
 
   conn = serverPreAuthAt(server, preAuthSlot);
-  if (conn == NULL || resolveClaimFn == NULL || ifModeLabel == NULL) {
+  if (conn == NULL || resolveClaimFn == NULL) {
     return false;
   }
 
@@ -1023,8 +1038,8 @@ static bool serverDispatchPreAuth(
       return true;
     }
 
-    if ((strcmp(ifModeLabel, "tun") == 0 && !isValidTunClaim(conn->claim, conn->claimNbytes))
-        || (strcmp(ifModeLabel, "tap") == 0 && !isValidTapClaim(conn->claim, conn->claimNbytes))) {
+    if ((server->mode == sessionIfModeTun && !isValidTunClaim(conn->claim, conn->claimNbytes))
+        || (server->mode == sessionIfModeTap && !isValidTapClaim(conn->claim, conn->claimNbytes))) {
       return serverClosePreAuthConn(server, preAuthSlot);
     }
     if (resolveClaimFn(resolveClaimCtx, conn->claim, conn->claimNbytes, conn->resolvedKey, &conn->resolvedActiveSlot)
@@ -1298,26 +1313,29 @@ static bool serverTunDestinationMatchesDirectedBroadcast(
     const server_t *server, const packetDestination_t *destination);
 
 bool serverRouteTcpIngressPacket(
-    server_t *server, int sourceSlot, const char *ifModeLabel, const void *packet, long packetNbytes) {
+    server_t *server, int sourceConnFd, const void *packet, long packetNbytes) {
   packetParseMode_t mode;
   packetDestination_t destination;
   packetParseStatus_t parseStatus;
+  long long nowMs;
+  session_t *sourceSession;
+  int sourceSlot;
   int destSlot;
   bool isServerDestination;
+  bool handled;
 
   if (server == NULL
-      || !activeSlotIndexValid(server, sourceSlot)
-      || !server->activeConns[sourceSlot].active
-      || ifModeLabel == NULL
+      || sourceConnFd < 0
       || packet == NULL
       || packetNbytes <= 0) {
     return false;
   }
-  if (strcmp(ifModeLabel, "tun") == 0) {
-    mode = packetParseModeTunIpv4;
-  } else if (strcmp(ifModeLabel, "tap") == 0) {
-    mode = packetParseModeTapEthernet;
-  } else {
+  sourceSlot = serverFindSlotByFd(server, sourceConnFd);
+  if (!activeSlotIndexValid(server, sourceSlot) || !server->activeConns[sourceSlot].active) {
+    return false;
+  }
+  sourceSession = server->activeConns[sourceSlot].session;
+  if (sourceSession == NULL || !serverPacketParseMode(server, &mode)) {
     return false;
   }
 
@@ -1334,7 +1352,8 @@ bool serverRouteTcpIngressPacket(
     if (!serverBroadcastTcpIngressToClients(server, sourceSlot, packet, packetNbytes)) {
       return false;
     }
-    return serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+    handled = serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+    goto done;
   }
   if (mode == packetParseModeTunIpv4 && destination.classification == packetDestinationBroadcastL3Candidate) {
     if (serverTunDestinationIsLimitedBroadcast(&destination)
@@ -1342,20 +1361,24 @@ bool serverRouteTcpIngressPacket(
       if (!serverBroadcastTcpIngressToClients(server, sourceSlot, packet, packetNbytes)) {
         return false;
       }
-      return serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+      handled = serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+      goto done;
     }
-    return true;
+    handled = true;
+    goto done;
   }
 
   if (destination.classification != packetDestinationOk) {
-    return true;
+    handled = true;
+    goto done;
   }
 
   if (mode == packetParseModeTunIpv4 && serverTunDestinationMatchesDirectedBroadcast(server, &destination)) {
     if (!serverBroadcastTcpIngressToClients(server, sourceSlot, packet, packetNbytes)) {
       return false;
     }
-    return serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+    handled = serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, true);
+    goto done;
   }
 
   isServerDestination = claimsEqual(
@@ -1364,14 +1387,27 @@ bool serverRouteTcpIngressPacket(
       server->serverIdentity.claim,
       server->serverIdentity.claimNbytes);
   if (isServerDestination) {
-    return serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, false);
+    handled = serverQueueTcpIngressToTun(server, sourceSlot, packet, packetNbytes, false);
+    goto done;
   }
 
   destSlot = serverFindSlotByClaim(server, destination.claim, destination.claimNbytes);
   if (destSlot < 0 || destSlot == sourceSlot) {
-    return true;
+    handled = true;
+    goto done;
   }
-  return serverDispatchTcpIngressToSlot(server, sourceSlot, destSlot, packet, packetNbytes);
+  handled = serverDispatchTcpIngressToSlot(server, sourceSlot, destSlot, packet, packetNbytes);
+
+done:
+  if (!handled) {
+    return false;
+  }
+  nowMs = serverNowMs(server);
+  if (nowMs < 0) {
+    return false;
+  }
+  sourceSession->lastValidInboundMs = nowMs;
+  return true;
 }
 
 static bool serverTunDestinationMatchesDirectedBroadcast(
@@ -1438,21 +1474,16 @@ static bool serverFanoutTunIngressToAll(
   return true;
 }
 
-bool serverRouteTunIngressPacket(server_t *server, const char *ifModeLabel, const void *packet, long packetNbytes) {
+bool serverRouteTunIngressPacket(server_t *server, const void *packet, long packetNbytes) {
   packetParseMode_t mode;
   packetDestination_t destination;
   packetParseStatus_t parseStatus;
   int slot;
 
-  if (server == NULL || ifModeLabel == NULL || packet == NULL || packetNbytes <= 0) {
+  if (server == NULL || packet == NULL || packetNbytes <= 0) {
     return false;
   }
-
-  if (strcmp(ifModeLabel, "tun") == 0) {
-    mode = packetParseModeTunIpv4;
-  } else if (strcmp(ifModeLabel, "tap") == 0) {
-    mode = packetParseModeTapEthernet;
-  } else {
+  if (!serverPacketParseMode(server, &mode)) {
     return false;
   }
 
@@ -1491,13 +1522,13 @@ bool serverRouteTunIngressPacket(server_t *server, const char *ifModeLabel, cons
   return serverDispatchTunIngressToSlot(server, slot, packet, packetNbytes);
 }
 
-static bool serverHandleTunRead(server_t *server, const char *ifModeLabel) {
+static bool serverHandleTunRead(server_t *server) {
   char packet[ProtocolFrameSize];
   long packetNbytes = 0;
   long maxPayload = protocolMaxPlaintextSize() - ((long)sizeof(unsigned char) + ProtocolWireLengthSize);
   ioStatus_t status;
 
-  if (server == NULL || ifModeLabel == NULL || maxPayload <= 0 || maxPayload > (long)sizeof(packet)) {
+  if (server == NULL || maxPayload <= 0 || maxPayload > (long)sizeof(packet)) {
     return false;
   }
 
@@ -1509,7 +1540,7 @@ static bool serverHandleTunRead(server_t *server, const char *ifModeLabel) {
     return false;
   }
 
-  return serverRouteTunIngressPacket(server, ifModeLabel, packet, packetNbytes);
+  return serverRouteTunIngressPacket(server, packet, packetNbytes);
 }
 
 static bool serverTickAllClients(server_t *server) {
@@ -1527,7 +1558,6 @@ static bool serverTickAllClients(server_t *server) {
 
 static bool serverTickPreAuth(
     server_t *server,
-    const char *ifModeLabel,
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx) {
   int slot;
@@ -1537,7 +1567,7 @@ static bool serverTickPreAuth(
     if (conn == NULL) {
       continue;
     }
-    if (!serverDispatchPreAuth(server, slot, ioEventTimeout, ifModeLabel, resolveClaimFn, resolveClaimCtx)) {
+    if (!serverDispatchPreAuth(server, slot, ioEventTimeout, resolveClaimFn, resolveClaimCtx)) {
       return false;
     }
   }
@@ -1549,7 +1579,7 @@ int serverServeMultiClient(
     int listenFd,
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
-    const char *ifModeLabel,
+    sessionIfMode_t mode,
     const sessionServerIdentity_t *serverIdentity,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
@@ -1564,7 +1594,7 @@ int serverServeMultiClient(
   if (tunFd < 0
       || listenFd < 0
       || resolveClaimFn == NULL
-      || ifModeLabel == NULL
+      || (mode != sessionIfModeTun && mode != sessionIfModeTap)
       || authTimeoutMs <= 0
       || heartbeatCfg == NULL
       || maxActiveSessions <= 0
@@ -1585,6 +1615,7 @@ int serverServeMultiClient(
   if (serverIdentity != NULL) {
     server.serverIdentity = *serverIdentity;
   }
+  server.mode = mode;
 
   epollFd = epoll_create1(0);
   if (epollFd < 0) {
@@ -1657,12 +1688,12 @@ int serverServeMultiClient(
           }
           if ((ev & EPOLLIN) != 0
               && !serverDispatchPreAuth(
-                  &server, preAuthSlot, ioEventTcpRead, ifModeLabel, resolveClaimFn, resolveClaimCtx)) {
+                  &server, preAuthSlot, ioEventTcpRead, resolveClaimFn, resolveClaimCtx)) {
             goto cleanup;
           }
           if ((ev & EPOLLOUT) != 0
               && !serverDispatchPreAuth(
-                  &server, preAuthSlot, ioEventTcpWrite, ifModeLabel, resolveClaimFn, resolveClaimCtx)) {
+                  &server, preAuthSlot, ioEventTcpWrite, resolveClaimFn, resolveClaimCtx)) {
             goto cleanup;
           }
           continue;
@@ -1671,7 +1702,7 @@ int serverServeMultiClient(
 
       if (fd == tunFd) {
         if ((ev & EPOLLIN) != 0) {
-          if (!serverHandleTunRead(&server, ifModeLabel)) {
+          if (!serverHandleTunRead(&server)) {
             goto cleanup;
           }
         }
@@ -1724,7 +1755,7 @@ int serverServeMultiClient(
     if (!serverTickAllClients(&server)) {
       goto cleanup;
     }
-    if (!serverTickPreAuth(&server, ifModeLabel, resolveClaimFn, resolveClaimCtx)) {
+    if (!serverTickPreAuth(&server, resolveClaimFn, resolveClaimCtx)) {
       goto cleanup;
     }
   }

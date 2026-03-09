@@ -122,19 +122,19 @@ static int fakeLookup(
 
 static void testServerServeMultiClientRejectsInvalidArgs(void) {
   testAssertTrue(
-      serverServeMultiClient(-1, -1, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
+      serverServeMultiClient(-1, -1, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
       "server server should reject invalid fds");
   testAssertTrue(
-      serverServeMultiClient(1, 2, NULL, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
+      serverServeMultiClient(1, 2, NULL, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
       "server server should reject null lookup callback");
   testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, NULL, 2, 2) < 0,
+      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, NULL, 2, 2) < 0,
       "server server should reject null heartbeat config");
   testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 0, 2) < 0,
+      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 0, 2) < 0,
       "server server should reject non-positive max session count");
   testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, "tun", NULL, 5000, &testHeartbeatCfg, 2, 0) < 0,
+      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 0) < 0,
       "server server should reject non-positive max pre-auth session count");
 }
 
@@ -334,7 +334,7 @@ static void testServerRoutesTunIngressByClaimMatch(void) {
       "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, "tun", payload, sizeof(payload)),
+      serverRouteTunIngressPacket(&server, payload, sizeof(payload)),
       "tun ingress routing should succeed for matching claim");
   testAssertTrue(
       server.activeConns[0].tcpPoller.outNbytes == 0,
@@ -378,9 +378,9 @@ static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(v
       serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
       "slot A should be added");
 
-  testAssertTrue(serverRouteTunIngressPacket(&server, "tun", unmatched, sizeof(unmatched)), "unmatched route should not fail");
-  testAssertTrue(serverRouteTunIngressPacket(&server, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
-  testAssertTrue(serverRouteTunIngressPacket(&server, "tun", malformed, sizeof(malformed)), "malformed drop should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&server, unmatched, sizeof(unmatched)), "unmatched route should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&server, multicast, sizeof(multicast)), "multicast drop should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&server, malformed, sizeof(malformed)), "malformed drop should not fail");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue to any client");
 
   serverDeinit(&server);
@@ -405,11 +405,12 @@ static void testServerFanoutTapBroadcastToAllClients(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 62, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  server.mode = sessionIfModeTap;
   testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
   testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, "tap", tapBroadcast, sizeof(tapBroadcast)),
+      serverRouteTunIngressPacket(&server, tapBroadcast, sizeof(tapBroadcast)),
       "tap broadcast fanout should not fail");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive tap broadcast");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive tap broadcast");
@@ -470,7 +471,7 @@ static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
   testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, "tun", directedBroadcast, sizeof(directedBroadcast)),
+      serverRouteTunIngressPacket(&server, directedBroadcast, sizeof(directedBroadcast)),
       "directed broadcast fanout should not fail");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive directed broadcast");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive directed broadcast");
@@ -478,7 +479,7 @@ static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, "tun", limitedBroadcast, sizeof(limitedBroadcast)),
+      serverRouteTunIngressPacket(&server, limitedBroadcast, sizeof(limitedBroadcast)),
       "limited broadcast fanout should not fail");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive limited broadcast");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive limited broadcast");
@@ -486,12 +487,12 @@ static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, "tun", nonMatchingDirected, sizeof(nonMatchingDirected)),
+      serverRouteTunIngressPacket(&server, nonMatchingDirected, sizeof(nonMatchingDirected)),
       "non-matching directed broadcast should not fail");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
 
-  testAssertTrue(serverRouteTunIngressPacket(&server, "tun", multicast, sizeof(multicast)), "multicast drop should not fail");
+  testAssertTrue(serverRouteTunIngressPacket(&server, multicast, sizeof(multicast)), "multicast drop should not fail");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "multicast should not queue client A");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "multicast should not queue client B");
 
@@ -533,7 +534,7 @@ static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
   server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, "tun", limitedBroadcast, sizeof(limitedBroadcast)),
+      serverRouteTunIngressPacket(&server, limitedBroadcast, sizeof(limitedBroadcast)),
       "broadcast fanout with saturation should not fail");
   testAssertTrue(
       server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity,
@@ -636,6 +637,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B pair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 83, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  server.mode = sessionIfModeTun;
   testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be active");
   testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be active");
   server.serverIdentity.claim[0] = 10;
@@ -650,7 +652,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.serverIdentity.directedBroadcast[3] = 255;
 
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, 0, "tun", toPeer, sizeof(toPeer)),
+      serverRouteTcpIngressPacket(&server, tcpPairA[0], toPeer, sizeof(toPeer)),
       "unicast to other client should route");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "source client should not receive self echo");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "destination client should receive routed frame");
@@ -658,7 +660,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, 0, "tun", toServer, sizeof(toServer)),
+      serverRouteTcpIngressPacket(&server, tcpPairA[0], toServer, sizeof(toServer)),
       "unicast to server identity should route to tun");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "server-local route should not enqueue source tcp");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "server-local route should not enqueue peer tcp");
@@ -669,7 +671,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, 0, "tun", broadcast, sizeof(broadcast)),
+      serverRouteTcpIngressPacket(&server, tcpPairA[0], broadcast, sizeof(broadcast)),
       "broadcast should fanout to peers and tun");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "broadcast should exclude source tcp");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "broadcast should fanout to peer tcp");
@@ -679,9 +681,11 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.tunPoller.frameCount = 0;
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
-  testAssertTrue(serverRouteTcpIngressPacket(&server, 0, "tun", selfDest, sizeof(selfDest)), "self destination should drop");
-  testAssertTrue(serverRouteTcpIngressPacket(&server, 0, "tun", unknownDest, sizeof(unknownDest)), "unknown destination should drop");
-  testAssertTrue(serverRouteTcpIngressPacket(&server, 0, "tun", multicast, sizeof(multicast)), "multicast should drop");
+  testAssertTrue(serverRouteTcpIngressPacket(&server, tcpPairA[0], selfDest, sizeof(selfDest)), "self destination should drop");
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, tcpPairA[0], unknownDest, sizeof(unknownDest)),
+      "unknown destination should drop");
+  testAssertTrue(serverRouteTcpIngressPacket(&server, tcpPairA[0], multicast, sizeof(multicast)), "multicast should drop");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue source tcp");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "drop cases should not queue peer tcp");
   testAssertTrue(ioTunQueuedBytes(&server.tunPoller) == 0, "drop cases should not queue tun payload");

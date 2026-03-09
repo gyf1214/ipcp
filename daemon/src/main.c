@@ -25,8 +25,11 @@ typedef struct {
   configIfMode_t ifMode;
 } serverKeyLookupCtx_t;
 
-static const char *ifModeLabel(configIfMode_t mode) {
-  return mode == configIfModeTap ? "tap" : "tun";
+static sessionIfMode_t toSessionIfMode(configIfMode_t mode) {
+  if (mode == configIfModeTap) {
+    return sessionIfModeTap;
+  }
+  return sessionIfModeTun;
 }
 
 static int serverLookupByClaim(
@@ -76,7 +79,7 @@ static int listenTcp(
           listenFd,
           serverLookupByClaim,
           &lookupCtx,
-          ifModeLabel(ifMode),
+          toSessionIfMode(ifMode),
           serverIdentity,
           authTimeoutMs,
           heartbeatCfg,

@@ -323,13 +323,10 @@ static bool pipeTcpBytes(
 
     if (msg.type == protocolMsgData && session->isServer) {
       server_t *server = sessionServer(session);
-      int sourceSlot = serverFindSlotByFd(server, tcpPoller->tcpFd);
-      const char *ifModeLabel = server != NULL && server->serverIdentity.claimNbytes == 6 ? "tap" : "tun";
-      if (sourceSlot < 0 || !serverRouteTcpIngressPacket(server, sourceSlot, ifModeLabel, msg.buf, msg.nbytes)) {
+      if (!serverRouteTcpIngressPacket(server, tcpPoller->tcpFd, msg.buf, msg.nbytes)) {
         return false;
       }
       result = sessionQueueResultQueued;
-      session->lastValidInboundMs = now;
     } else if (msg.type == protocolMsgData) {
       result = sessionQueueTunWithBackpressure(tcpPoller, tunPoller, session, msg.buf, msg.nbytes);
       if (result == sessionQueueResultQueued) {
@@ -610,7 +607,7 @@ int sessionRunServer(
     int listenFd,
     sessionServerResolveClaimFn_t resolveClaimFn,
     void *resolveClaimCtx,
-    const char *ifModeLabel,
+    sessionIfMode_t mode,
     const sessionServerIdentity_t *serverIdentity,
     int authTimeoutMs,
     const sessionHeartbeatConfig_t *heartbeatCfg,
@@ -621,7 +618,7 @@ int sessionRunServer(
       listenFd,
       resolveClaimFn,
       resolveClaimCtx,
-      ifModeLabel,
+      mode,
       serverIdentity,
       authTimeoutMs,
       heartbeatCfg,
