@@ -632,6 +632,12 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
       10, 0, 0, 2,
       224, 1, 2, 3,
   };
+  unsigned char malformed[] = {0x45, 0x00, 0x00, 0x14};
+  unsigned char tapBroadcast[] = {
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+      0x02, 0x00, 0x5e, 0x00, 0x00, 0x01,
+      0x08, 0x00,
+  };
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A pair should be created");
@@ -650,10 +656,14 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.serverIdentity.directedBroadcast[1] = 0;
   server.serverIdentity.directedBroadcast[2] = 0;
   server.serverIdentity.directedBroadcast[3] = 255;
+  server.activeConns[0].session->lastValidInboundMs = 0;
 
   testAssertTrue(
       serverRouteTcpIngressPacket(&server, tcpPairA[0], toPeer, sizeof(toPeer)),
       "unicast to other client should route");
+  testAssertTrue(
+      server.activeConns[0].session->lastValidInboundMs > 0,
+      "valid tcp ingress should refresh source session inbound timestamp");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "source client should not receive self echo");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "destination client should receive routed frame");
 
@@ -686,9 +696,22 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
       serverRouteTcpIngressPacket(&server, tcpPairA[0], unknownDest, sizeof(unknownDest)),
       "unknown destination should drop");
   testAssertTrue(serverRouteTcpIngressPacket(&server, tcpPairA[0], multicast, sizeof(multicast)), "multicast should drop");
+  testAssertTrue(serverRouteTcpIngressPacket(&server, tcpPairA[0], malformed, sizeof(malformed)), "malformed should drop");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue source tcp");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "drop cases should not queue peer tcp");
   testAssertTrue(ioTunQueuedBytes(&server.tunPoller) == 0, "drop cases should not queue tun payload");
+
+  server.mode = sessionIfModeTap;
+  server.tunPoller.queuedBytes = 0;
+  server.tunPoller.frameCount = 0;
+  server.activeConns[0].tcpPoller.outNbytes = 0;
+  server.activeConns[1].tcpPoller.outNbytes = 0;
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, tcpPairA[0], tapBroadcast, sizeof(tapBroadcast)),
+      "tap broadcast should fanout to peers and tun");
+  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "tap broadcast should exclude source tcp");
+  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "tap broadcast should fanout to peer tcp");
+  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "tap broadcast should enqueue tun payload");
 
   serverDeinit(&server);
   close(tcpPairA[0]);
