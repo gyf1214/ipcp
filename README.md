@@ -130,7 +130,6 @@ Supported schema:
   - `if_mode: "tap"` requires top-level `tap_mac`
   - `if_mode: "tun"` entries use `tun_ip` + `key_file`
   - `if_mode: "tap"` entries use `tap_mac` + `key_file`
-  - legacy `tun_subnet` is accepted but ignored
   - Top-level server `key_file` is not accepted
 
 ### Secret file
