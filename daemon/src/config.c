@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <arpa/inet.h>
 #include <sodium.h>
 
@@ -176,6 +177,68 @@ static int parseMacClaim(const char *s, unsigned char out[SessionClaimSize], lon
   return 0;
 }
 
+static int parseServerTunIdentity(const cJSON *root, daemonConfig_t *cfg) {
+  char tunCidr[ConfigTextSize];
+  char *slash = NULL;
+  char *end = NULL;
+  long prefix = 0;
+  struct in_addr claimAddr;
+  uint32_t claimHost = 0;
+  uint32_t maskHost = 0;
+  uint32_t broadcastHost = 0;
+  uint32_t broadcastNet = 0;
+
+  if (copyRequiredString(root, "tun_ip", tunCidr) != 0) {
+    return -1;
+  }
+  memcpy(cfg->tunIP, tunCidr, strlen(tunCidr) + 1);
+  slash = strchr(tunCidr, '/');
+  if (slash == NULL) {
+    return -1;
+  }
+  *slash = '\0';
+  if (inet_pton(AF_INET, tunCidr, &claimAddr) != 1) {
+    return -1;
+  }
+  prefix = strtol(slash + 1, &end, 10);
+  if (slash[1] == '\0' || end == NULL || *end != '\0' || prefix < 0 || prefix > 32) {
+    return -1;
+  }
+
+  claimHost = ntohl(claimAddr.s_addr);
+  if (prefix == 0) {
+    maskHost = 0;
+  } else {
+    maskHost = 0xffffffffu << (32 - (unsigned int)prefix);
+  }
+
+  broadcastHost = claimHost | ~maskHost;
+  broadcastNet = htonl(broadcastHost);
+
+  if (parseIPv4Claim(tunCidr, cfg->serverIdentity.claim, &cfg->serverIdentity.claimNbytes) != 0) {
+    return -1;
+  }
+  cfg->serverIdentity.directedBroadcastEnabled = prefix < 32;
+  memcpy(cfg->serverIdentity.directedBroadcast, &broadcastNet, sizeof(cfg->serverIdentity.directedBroadcast));
+  if (cJSON_GetObjectItemCaseSensitive(root, "tap_mac") != NULL) {
+    return -1;
+  }
+  return 0;
+}
+
+static int parseServerTapIdentity(const cJSON *root, daemonConfig_t *cfg) {
+  if (copyRequiredString(root, "tap_mac", cfg->tapMac) != 0 || !parseMacString(cfg->tapMac)) {
+    return -1;
+  }
+  if (parseMacClaim(cfg->tapMac, cfg->serverIdentity.claim, &cfg->serverIdentity.claimNbytes) != 0) {
+    return -1;
+  }
+  if (cJSON_GetObjectItemCaseSensitive(root, "tun_ip") != NULL) {
+    return -1;
+  }
+  return 0;
+}
+
 static int parseServerCredentials(const cJSON *root, daemonConfig_t *cfg) {
   const cJSON *list = cJSON_GetObjectItemCaseSensitive(root, "credentials");
   int count = 0;
@@ -247,6 +310,17 @@ static int parseServerConfig(const cJSON *root, daemonConfig_t *cfg) {
     return -1;
   }
   if (parseServerCredentials(root, cfg) != 0) {
+    return -1;
+  }
+  if (cfg->ifMode == configIfModeTun) {
+    if (parseServerTunIdentity(root, cfg) != 0) {
+      return -1;
+    }
+  } else if (cfg->ifMode == configIfModeTap) {
+    if (parseServerTapIdentity(root, cfg) != 0) {
+      return -1;
+    }
+  } else {
     return -1;
   }
   return 0;

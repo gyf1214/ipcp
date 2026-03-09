@@ -20,4 +20,15 @@
 #define panicf(fmt, ...)    do { errf(fmt, ##__VA_ARGS__); abort(); } while (0)
 #define perrf(fmt, ...)     panicf(fmt": %s", ##__VA_ARGS__, strerror(errno))
 
+#ifdef NDEBUG
+#define dbgAssertf(cond)    do {} while (0)
+#else
+#define dbgAssertf(cond)    do {            \
+  int dbgAssertCond = !!(cond);             \
+  if (!dbgAssertCond) {                     \
+    panicf("Assertion error: %s", #cond);   \
+  }                                         \
+} while (0)
+#endif
+
 const char *logTimeStr();

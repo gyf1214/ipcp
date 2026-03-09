@@ -81,13 +81,16 @@ run_case() {
   local claimField=""
   local claimValue=""
   local serverCredential=""
+  local serverIdentityLine=""
 
   if [[ "$ifMode" == "tun" ]]; then
     claimField="tun_ip"
     claimValue="10.250.0.2"
+    serverIdentityLine='  "tun_ip": "10.250.0.1/30",'
   else
     claimField="tap_mac"
     claimValue="02:11:22:33:44:55"
+    serverIdentityLine='  "tap_mac": "02:11:22:33:44:01",'
   fi
   serverCredential="{ \"$claimField\": \"$claimValue\", \"key_file\": \"$keyFile\" }"
 
@@ -102,6 +105,7 @@ run_case() {
   "listen_port": 46000,
   "auth_timeout_ms": 5000,
   "max_pre_auth_sessions": 8,
+${serverIdentityLine}
   "credentials": [
     $serverCredential
   ]
@@ -148,10 +152,31 @@ JSON
 
   ns_exec "$serverNs" ip addr add 10.250.0.1/30 dev "$ifName"
   ns_exec "$clientNs" ip addr add 10.250.0.2/30 dev "$ifName"
+  if [[ "$ifMode" == "tap" ]]; then
+    ns_exec "$clientNs" ip link set dev "$ifName" address "$claimValue"
+  fi
   ns_exec "$serverNs" ip link set "$ifName" up
   ns_exec "$clientNs" ip link set "$ifName" up
 
-  ns_exec "$clientNs" timeout 10 ping -c 3 -W 1 10.250.0.1 || result=$?
+  if [[ "$ifMode" == "tap" ]]; then
+    local serverMac
+    serverMac="$(ns_exec "$serverNs" cat "/sys/class/net/$ifName/address")"
+    ns_exec "$serverNs" ip neigh replace 10.250.0.2 lladdr "$claimValue" dev "$ifName" nud permanent
+    ns_exec "$clientNs" ip neigh replace 10.250.0.1 lladdr "$serverMac" dev "$ifName" nud permanent
+  fi
+
+  if [[ "$ifMode" == "tun" ]]; then
+    ns_exec "$clientNs" timeout 10 ping -c 3 -W 1 10.250.0.1 || result=$?
+  else
+    if ns_exec "$clientNs" timeout 10 ping -c 3 -W 1 10.250.0.1 >/dev/null 2>&1; then
+      echo "expected tap phase-1 direct ping to be dropped" >&2
+      result=1
+    fi
+    if ! kill -0 "$clientPid" >/dev/null 2>&1 || ! kill -0 "$serverPid" >/dev/null 2>&1; then
+      echo "expected tap phase-1 processes to remain connected" >&2
+      result=1
+    fi
+  fi
 
   if [[ -n "$clientPid" ]]; then
     kill "$clientPid" >/dev/null 2>&1 || true

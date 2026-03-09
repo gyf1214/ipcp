@@ -43,6 +43,7 @@ typedef struct {
   int heartbeatTimeoutMs;
   int authTimeoutMs;
   int maxPreAuthSessions;
+  sessionServerIdentity_t serverIdentity;
   daemonServerCredential_t serverCredentials[ConfigMaxServerCredentials];
   int serverCredentialCount;
 } daemonConfig_t;

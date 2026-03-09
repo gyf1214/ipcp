@@ -126,6 +126,8 @@ Supported schema:
   - `if_mode: "tun"` requires `tun_ip`
   - `if_mode: "tap"` requires `tap_mac`
 - Server mode requires `auth_timeout_ms` and `credentials` list:
+  - `if_mode: "tun"` requires top-level `tun_ip` CIDR (for example `10.250.0.1/24`)
+  - `if_mode: "tap"` requires top-level `tap_mac`
   - `if_mode: "tun"` entries use `tun_ip` + `key_file`
   - `if_mode: "tap"` entries use `tap_mac` + `key_file`
   - Top-level server `key_file` is not accepted
@@ -148,6 +150,7 @@ head -c 32 /dev/urandom > secret.key
   "listen_ip": "0.0.0.0",
   "listen_port": 5000,
   "auth_timeout_ms": 5000,
+  "tun_ip": "10.10.0.1/24",
   "credentials": [
     {
       "tun_ip": "10.10.0.2",

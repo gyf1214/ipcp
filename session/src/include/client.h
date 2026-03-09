@@ -3,6 +3,52 @@
 #include "protocol.h"
 #include "sessionInternal.h"
 
+typedef struct client_t {
+  ioTunPoller_t *tunPoller;
+  ioTcpPoller_t *tcpPoller;
+  bool tunReadPaused;
+  long runtimeOverflowNbytes;
+  char runtimeOverflowBuf[ProtocolFrameSize];
+  bool heartbeatAckPending;
+  bool heartbeatReqPending;
+  long long heartbeatSentMs;
+  long long lastHeartbeatReqMs;
+  long long lastDataSentMs;
+  long long lastDataRecvMs;
+  int heartbeatIntervalMs;
+  int heartbeatTimeoutMs;
+} client_t;
+
+void clientResetHeartbeatState(
+    client_t *client,
+    int heartbeatIntervalMs,
+    int heartbeatTimeoutMs,
+    long long nowMs);
+
+sessionQueueResult_t clientQueueTcpWithBackpressure(
+    client_t *client,
+    const void *data,
+    long nbytes);
+sessionQueueResult_t clientSendMessage(
+    client_t *client,
+    const unsigned char key[ProtocolPskSize],
+    long long nowMs,
+    const protocolMessage_t *msg);
+sessionQueueResult_t clientHandleInboundMessage(
+    client_t *client,
+    long long nowMs,
+    long long *lastValidInboundMs,
+    const protocolMessage_t *msg);
+bool clientHeartbeatTick(
+    client_t *client,
+    long long nowMs,
+    const unsigned char key[ProtocolPskSize]);
+bool clientServiceBackpressure(
+    client_t *client,
+    session_t *session,
+    ioEvent_t event,
+    const unsigned char key[ProtocolPskSize]);
+
 int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg);
 int clientReadRawMsg(int fd, protocolRawMsg_t *msg);
 int clientWriteSecureMsg(

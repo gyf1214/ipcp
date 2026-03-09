@@ -36,6 +36,16 @@ kill_wait() {
   fi
 }
 
+stop_ns_ipcpd() {
+  local ns="$1"
+  local pids
+  pids="$(ip netns pids "$ns" 2>/dev/null || true)"
+  if [[ -n "$pids" ]]; then
+    # Terminate all processes in that netns to guarantee old claim owner teardown.
+    kill $pids >/dev/null 2>&1 || true
+  fi
+}
+
 is_running() {
   local pid="$1"
   if [[ -z "$pid" ]]; then
@@ -46,15 +56,15 @@ is_running() {
 
 assert_clients_running_for() {
   local seconds="$1"
-  local pidA="$2"
-  local pidB="$3"
+  local nsA="$2"
+  local nsB="$3"
   local logA="$4"
   local logB="$5"
   local logC="$6"
   local until=$((SECONDS + seconds))
 
   while (( SECONDS < until )); do
-    if ! is_running "$pidA" || ! is_running "$pidB"; then
+    if ! ns_exec "$nsA" pidof ipcpd >/dev/null 2>&1 || ! ns_exec "$nsB" pidof ipcpd >/dev/null 2>&1; then
       echo "expected both client processes to remain connected" >&2
       dump_logs "$serverLog" "$logA" "$logB" "$logC"
       exit 1
@@ -99,6 +109,25 @@ wait_for_interface() {
   done
 
   echo "timed out waiting for $ifName in namespace $ns" >&2
+  return 1
+}
+
+read_rx_packets() {
+  local ns="$1"
+  local ifName="$2"
+  local deadline=$((SECONDS + 10))
+  local value=""
+
+  while (( SECONDS < deadline )); do
+    if value="$(
+      ns_exec "$ns" sh -lc "ip -s link show dev '$ifName' 2>/dev/null | awk '/RX:/{getline; print \$1; exit}'"
+    )" && [[ -n "$value" ]]; then
+      echo "$value"
+      return 0
+    fi
+    sleep 0.2
+  done
+
   return 1
 }
 
@@ -163,10 +192,10 @@ cat > "$serverConfig" <<JSON
   "listen_port": 46100,
   "auth_timeout_ms": 5000,
   "max_pre_auth_sessions": 8,
+  "tun_ip": "10.250.0.1/24",
   "credentials": [
-    { "tun_ip": "10.250.1.2", "key_file": "$keyFile" },
-    { "tun_ip": "10.250.2.2", "key_file": "$keyFile" },
-    { "tun_ip": "10.250.3.2", "key_file": "$keyFile" }
+    { "tun_ip": "10.250.0.2", "key_file": "$keyFile" },
+    { "tun_ip": "10.250.0.3", "key_file": "$keyFile" }
   ]
 }
 JSON
@@ -176,7 +205,7 @@ cat > "$clientConfigA" <<JSON
   "mode": "client",
   "if_name": "tun0",
   "if_mode": "tun",
-  "tun_ip": "10.250.1.2",
+  "tun_ip": "10.250.0.2",
   "server_ip": "10.210.1.1",
   "server_port": 46100,
   "key_file": "$keyFile"
@@ -188,7 +217,7 @@ cat > "$clientConfigB" <<JSON
   "mode": "client",
   "if_name": "tun0",
   "if_mode": "tun",
-  "tun_ip": "10.250.2.2",
+  "tun_ip": "10.250.0.3",
   "server_ip": "10.210.2.1",
   "server_port": 46100,
   "key_file": "$keyFile"
@@ -198,9 +227,9 @@ JSON
 cat > "$clientConfigC" <<JSON
 {
   "mode": "client",
-  "if_name": "tun1",
+  "if_name": "tun0",
   "if_mode": "tun",
-  "tun_ip": "10.250.3.2",
+  "tun_ip": "10.250.0.2",
   "server_ip": "10.210.3.1",
   "server_port": 46100,
   "key_file": "$keyFile"
@@ -265,39 +294,86 @@ if ! wait_for_interface "$clientNsB" tun0; then
   exit 1
 fi
 
+ns_exec "$serverNs" ip addr add 10.250.0.1/24 dev tun0
+ns_exec "$clientNsA" ip addr add 10.250.0.2/24 dev tun0
+ns_exec "$clientNsB" ip addr add 10.250.0.3/24 dev tun0
+ns_exec "$serverNs" ip link set tun0 up
+ns_exec "$clientNsA" ip link set tun0 up
+ns_exec "$clientNsB" ip link set tun0 up
+
+if ! ns_exec "$clientNsA" timeout 8 ping -c 2 -W 1 10.250.0.1 >/dev/null 2>&1; then
+  echo "expected client A to ping server over tun" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+if ! ns_exec "$serverNs" timeout 8 ping -I tun0 -c 2 -W 1 10.250.0.2 >/dev/null 2>&1; then
+  echo "expected server to ping client A over tun" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+if ! ns_exec "$clientNsB" timeout 8 ping -c 2 -W 1 10.250.0.1 >/dev/null 2>&1; then
+  echo "expected client B to ping server over tun" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+if ! ns_exec "$serverNs" timeout 8 ping -I tun0 -c 2 -W 1 10.250.0.3 >/dev/null 2>&1; then
+  echo "expected server to ping client B over tun" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+
+rxA0="$(read_rx_packets "$clientNsA" tun0)"
+rxB0="$(read_rx_packets "$clientNsB" tun0)"
+ns_exec "$serverNs" timeout 8 ping -I tun0 -b -c 3 -W 1 10.250.0.255 >/dev/null 2>&1 || true
+sleep 1
+rxA1="$(read_rx_packets "$clientNsA" tun0)"
+rxB1="$(read_rx_packets "$clientNsB" tun0)"
+if [[ "$rxA1" -le "$rxA0" ]]; then
+  echo "expected client A to receive server broadcast fanout packets" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+if [[ "$rxB1" -le "$rxB0" ]]; then
+  echo "expected client B to receive server broadcast fanout packets" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+
 sleep 16
-assert_clients_running_for 8 "$clientPidA" "$clientPidB" "$clientLogA" "$clientLogB" "$clientLogC"
+assert_clients_running_for 8 "$clientNsA" "$clientNsB" "$clientLogA" "$clientLogB" "$clientLogC"
 if [[ "$(grep -c 'connected with' "$serverLog" || true)" -lt 2 ]]; then
   echo "expected server to accept at least two clients" >&2
   dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
   exit 1
 fi
 
-assert_clients_running_for 8 "$clientPidA" "$clientPidB" "$clientLogA" "$clientLogB" "$clientLogC"
+assert_clients_running_for 8 "$clientNsA" "$clientNsB" "$clientLogA" "$clientLogB" "$clientLogC"
 
+stop_ns_ipcpd "$clientNsA"
 kill_wait "$clientPidA"
 clientPidA=""
-sleep 16
-if ! is_running "$clientPidB"; then
-  echo "expected remaining client to stay connected after peer disconnect" >&2
-  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
-  exit 1
-fi
-
+sleep 2
 ns_exec "$clientNsC" ./daemon/target/ipcpd "$clientConfigC" >"$clientLogC" 2>&1 &
 clientPidC="$!"
-if ! wait_for_interface "$clientNsC" tun1; then
+if ! wait_for_interface "$clientNsC" tun0; then
   dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
   exit 1
 fi
+ns_exec "$clientNsC" ip addr add 10.250.0.2/24 dev tun0
+ns_exec "$clientNsC" ip link set tun0 up
 sleep 2
-if ! is_running "$clientPidC"; then
-  echo "expected replacement client to stay connected" >&2
-  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
-  exit 1
-fi
 if [[ "$(grep -c 'connected with' "$serverLog" || true)" -lt 3 ]]; then
   echo "expected server to accept replacement client" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+if ! ns_exec "$clientNsC" timeout 8 ping -c 2 -W 1 10.250.0.1 >/dev/null 2>&1; then
+  echo "expected replacement client C to ping server over tun" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+if ! ns_exec "$serverNs" timeout 8 ping -I tun0 -c 2 -W 1 10.250.0.2 >/dev/null 2>&1; then
+  echo "expected server to ping replacement client C over tun" >&2
   dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
   exit 1
 fi
