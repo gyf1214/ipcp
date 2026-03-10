@@ -1,3 +1,5 @@
+#include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stddef.h>
@@ -559,6 +561,58 @@ static void testIoPollerHeadersAndLowWatermarkEdge(void) {
   close(socketFds[1]);
 }
 
+static void testIoReactorTcpWritableRearmGapAfterFlush(void) {
+  ioReactor_t reactor;
+  ioTcpPoller_t tcpPoller;
+  ioPollerCallbacks_t callbacks = {0};
+  int socketFds[2];
+  char payload[] = "rearm-gap";
+  char peerBuf[32];
+  int flags;
+  int attempts;
+  ssize_t nread;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&tcpPoller, 0, sizeof(tcpPoller));
+  tcpPoller.epollFd = -1;
+  tcpPoller.tcpFd = socketFds[0];
+  tcpPoller.events = EPOLLRDHUP;
+  tcpPoller.poller.kind = ioPollerTcp;
+  tcpPoller.poller.fd = socketFds[0];
+  tcpPoller.poller.events = tcpPoller.events;
+
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &tcpPoller.poller, &callbacks, NULL, true),
+      "tcp poller add should succeed");
+
+  testAssertTrue(ioTcpWrite(&tcpPoller, payload, (long)sizeof(payload)), "first queue write should succeed");
+  for (attempts = 0; attempts < 5 && ioTcpQueuedBytes(&tcpPoller) > 0; attempts++) {
+    testAssertTrue(ioReactorStep(&reactor, 50) == ioReactorStepReady, "first writable drain should progress");
+  }
+  testAssertTrue(ioTcpQueuedBytes(&tcpPoller) == 0, "first write should fully flush");
+  testAssertTrue(
+      (tcpPoller.poller.events & EPOLLOUT) != 0,
+      "reactor callback header should incorrectly retain writable interest after flush");
+  testAssertTrue(read(socketFds[1], peerBuf, sizeof(payload)) == (long)sizeof(payload), "peer should read first payload");
+
+  testAssertTrue(ioTcpWrite(&tcpPoller, payload, (long)sizeof(payload)), "second queue write should succeed");
+  testAssertTrue(
+      ioReactorStep(&reactor, 20) == ioReactorStepTimeout,
+      "second write stalls without manual write-service workaround");
+
+  flags = fcntl(socketFds[1], F_GETFL, 0);
+  testAssertTrue(flags >= 0, "peer flags fetch should succeed");
+  testAssertTrue(fcntl(socketFds[1], F_SETFL, flags | O_NONBLOCK) == 0, "peer should become nonblocking");
+  nread = read(socketFds[1], peerBuf, sizeof(peerBuf));
+  testAssertTrue(nread < 0 && (errno == EAGAIN || errno == EWOULDBLOCK), "second payload should remain queued");
+
+  ioReactorDeinit(&reactor);
+  close(socketFds[0]);
+  close(socketFds[1]);
+}
+
 static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
   ioListenPoller_t listenPoller;
   ioTcpPoller_t acceptedPoller;
@@ -609,5 +663,6 @@ void runIoTests(void) {
   testIoReactorStepTimeoutAndStop();
   testIoReactorStepRemoveStopsCallbackChain();
   testIoPollerHeadersAndLowWatermarkEdge();
+  testIoReactorTcpWritableRearmGapAfterFlush();
   testIoListenPollerAcceptNonBlockingInitializesTcpPoller();
 }
