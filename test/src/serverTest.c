@@ -34,36 +34,6 @@ static const sessionServerIdentity_t testServerIdentity = {
 };
 static long long fakeNowMs = 0;
 
-typedef struct {
-  int epollFd;
-  ioTunPoller_t tunPoller;
-  ioTcpPoller_t tcpPoller;
-} splitPollersFixture_t;
-
-static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd) {
-  if (poller == NULL) {
-    return -1;
-  }
-  poller->epollFd = epoll_create1(0);
-  if (poller->epollFd < 0) {
-    return -1;
-  }
-  if (ioTunPollerInit(&poller->tunPoller, poller->epollFd, tunFd) < 0
-      || ioTcpPollerInit(&poller->tcpPoller, poller->epollFd, tcpFd) < 0) {
-    close(poller->epollFd);
-    poller->epollFd = -1;
-    return -1;
-  }
-  return 0;
-}
-
-static void teardownSplitPollers(splitPollersFixture_t *poller) {
-  if (poller != NULL && poller->epollFd >= 0) {
-    close(poller->epollFd);
-    poller->epollFd = -1;
-  }
-}
-
 static long long fakeNow(void *ctx) {
   (void)ctx;
   return fakeNowMs;
@@ -80,7 +50,8 @@ static sessionStepResult_t runSessionStepSplit(
 
 static sessionStepResult_t runSessionStepWithSuppressedStderr(
     session_t *session,
-    splitPollersFixture_t *poller,
+    ioTcpPoller_t *tcpPoller,
+    ioTunPoller_t *tunPoller,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]) {
   int savedStderr = dup(STDERR_FILENO);
@@ -94,30 +65,12 @@ static sessionStepResult_t runSessionStepWithSuppressedStderr(
   testAssertTrue(dup2(nullFd, STDERR_FILENO) >= 0, "redirect stderr should succeed");
   close(nullFd);
 
-  result = sessionStep(session, &poller->tcpPoller, &poller->tunPoller, event, key);
+  result = sessionStep(session, tcpPoller, tunPoller, event, key);
 
   fflush(stderr);
   testAssertTrue(dup2(savedStderr, STDERR_FILENO) >= 0, "restore stderr should succeed");
   close(savedStderr);
   return result;
-}
-
-static void wireServerSession(session_t *session, server_t *server, splitPollersFixture_t *poller) {
-  memset(server, 0, sizeof(*server));
-  testAssertTrue(
-      serverInit(
-          server,
-          poller->tunPoller.poller.fd,
-          poller->tcpPoller.poller.fd,
-          1,
-          1,
-          &testHeartbeatCfg,
-          NULL,
-          NULL),
-      "server server init should succeed");
-  server->tunPoller.poller.epollFd = poller->tunPoller.poller.epollFd;
-  server->tunPoller.poller.events = poller->tunPoller.poller.events;
-  sessionAttachServer(session, server);
 }
 
 static int fakeLookup(
@@ -914,28 +867,32 @@ static void teardownServerForSessionTest(
 
 static void testServerHeartbeatTimeoutStopsSession(void) {
   unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
   server_t server;
   int tunPair[2];
   int tcpPair[2];
+  int slot;
+  session_t *session;
+  ioTcpPoller_t *tcpPoller;
 
   memset(key, 0x11, sizeof(key));
+  fakeNowMs = 0;
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
-  fakeNowMs = 0;
-  session_t *session = sessionCreate(true, &testHeartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-  wireServerSession(session, &server, &poller);
+  testAssertTrue(
+      serverInit(&server, tunPair[0], 84, 1, 1, &testHeartbeatCfg, fakeNow, NULL),
+      "server init should succeed");
+  slot = serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "server should add active client");
+  session = serverSessionAt(&server, slot);
+  tcpPoller = &server.activeConns[slot].tcpPoller;
+  testAssertTrue(session != NULL, "session should be retrievable from server active slot");
 
   fakeNowMs = 15000;
   testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key) == sessionStepStop,
+      runSessionStepWithSuppressedStderr(session, tcpPoller, &server.tunPoller, ioEventTimeout, key) == sessionStepStop,
       "server should stop after heartbeat timeout");
 
-  sessionDestroy(session);
   serverDeinit(&server);
-  teardownSplitPollers(&poller);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);
@@ -1054,36 +1011,40 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
 
 static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
   unsigned char key[ProtocolPskSize];
-  splitPollersFixture_t poller;
   server_t server;
   int tunPair[2];
   int tcpPair[2];
+  int slot;
+  session_t *session;
+  ioTcpPoller_t *tcpPoller;
   sessionHeartbeatConfig_t heartbeatCfg = {
       .intervalMs = 3000,
       .timeoutMs = 9000,
   };
 
   memset(key, 0x33, sizeof(key));
+  fakeNowMs = 0;
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
-  fakeNowMs = 0;
-  session_t *session = sessionCreate(true, &heartbeatCfg, fakeNow, NULL);
-  testAssertTrue(session != NULL, "session create should succeed");
-  wireServerSession(session, &server, &poller);
+  testAssertTrue(
+      serverInit(&server, tunPair[0], 85, 1, 1, &heartbeatCfg, fakeNow, NULL),
+      "server init should succeed");
+  slot = serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "server should add active client");
+  session = serverSessionAt(&server, slot);
+  tcpPoller = &server.activeConns[slot].tcpPoller;
+  testAssertTrue(session != NULL, "session should be retrievable from server active slot");
 
   fakeNowMs = 8999;
   testAssertTrue(
-      sessionStep(session, &poller.tcpPoller, &poller.tunPoller, ioEventTimeout, key) == sessionStepContinue,
+      sessionStep(session, tcpPoller, &server.tunPoller, ioEventTimeout, key) == sessionStepContinue,
       "server should continue before configured timeout");
   fakeNowMs = 9000;
   testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key) == sessionStepStop,
+      runSessionStepWithSuppressedStderr(session, tcpPoller, &server.tunPoller, ioEventTimeout, key) == sessionStepStop,
       "server should stop at configured timeout");
 
-  sessionDestroy(session);
   serverDeinit(&server);
-  teardownSplitPollers(&poller);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);

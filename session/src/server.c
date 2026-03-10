@@ -207,7 +207,7 @@ int serverAddClient(
     return -1;
   }
 
-  session = sessionCreate(true, &server->heartbeatCfg, NULL, NULL);
+  session = sessionCreate(true, &server->heartbeatCfg, server->nowMsFn, server->nowCtx);
   if (session == NULL) {
     return -1;
   }
