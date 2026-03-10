@@ -368,6 +368,18 @@ static void testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty(void) {
   close(listenFd);
 }
 
+static void testIoReactorPublicContracts(void) {
+  ioReactor_t reactor;
+  ioPoller_t poller;
+
+  testAssertTrue(sizeof(reactor) > 0, "reactor type should be defined");
+  testAssertTrue(sizeof(poller) > 0, "poller type should be defined");
+  testAssertTrue(ioPollerStop != ioPollerContinue, "poller actions should be distinct");
+  testAssertTrue(ioPollerRemove != ioPollerContinue, "poller remove action should be distinct");
+  testAssertTrue(ioReactorStepReady != ioReactorStepTimeout, "reactor step results should be distinct");
+  testAssertTrue(ioPollerListen != ioPollerTcp, "poller kinds should be distinct");
+}
+
 void runIoTests(void) {
   testIoReadSomeOk();
   testIoReadSomeClosed();
@@ -386,4 +398,5 @@ void runIoTests(void) {
   testIoTcpConnectRejectInvalidIp();
   testIoTcpListenBacklogIsGreaterThanOne();
   testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty();
+  testIoReactorPublicContracts();
 }

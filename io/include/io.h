@@ -28,6 +28,58 @@ typedef enum {
   ioIfModeTap,
 } ioIfMode_t;
 
+typedef struct ioReactor_t ioReactor_t;
+typedef struct ioPoller_t ioPoller_t;
+typedef struct ioListenPoller_t ioListenPoller_t;
+
+typedef enum {
+  ioPollerContinue = 0,
+  ioPollerRemove,
+  ioPollerStop,
+} ioPollerAction_t;
+
+typedef enum {
+  ioReactorStepReady = 0,
+  ioReactorStepTimeout,
+  ioReactorStepStop,
+  ioReactorStepError,
+} ioReactorStepResult_t;
+
+typedef enum {
+  ioPollerListen = 0,
+  ioPollerTcp,
+  ioPollerTun,
+} ioPollerKind_t;
+
+typedef ioPollerAction_t (*ioClosedFn_t)(void *ctx, ioPoller_t *poller);
+typedef ioPollerAction_t (*ioLowWatermarkFn_t)(void *ctx, ioPoller_t *poller, long queuedBytes);
+typedef ioPollerAction_t (*ioReadableFn_t)(void *ctx, ioReactor_t *reactor, ioPoller_t *poller);
+
+typedef struct {
+  ioClosedFn_t onClosed;
+  ioLowWatermarkFn_t onLowWatermark;
+  ioReadableFn_t onReadable;
+} ioPollerCallbacks_t;
+
+struct ioReactor_t {
+  int epollFd;
+};
+
+struct ioPoller_t {
+  int epollFd;
+  int fd;
+  unsigned int events;
+  ioPollerKind_t kind;
+  const ioPollerCallbacks_t *callbacks;
+  void *ctx;
+  bool readEnabled;
+};
+
+struct ioListenPoller_t {
+  ioPoller_t poller;
+  int listenFd;
+};
+
 typedef struct {
   int epollFd;
   int tcpFd;
