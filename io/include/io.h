@@ -114,6 +114,17 @@ typedef enum {
 ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes);
 ioStatus_t ioTcpRead(int tcpFd, void *buf, long capacity, long *outNbytes);
 ioStatus_t ioTunRead(int tunFd, void *buf, long capacity, long *outNbytes);
+
+bool ioReactorInit(ioReactor_t *reactor);
+void ioReactorDeinit(ioReactor_t *reactor);
+bool ioReactorAddPoller(
+    ioReactor_t *reactor,
+    ioPoller_t *poller,
+    const ioPollerCallbacks_t *callbacks,
+    void *ctx,
+    bool readEnabled);
+bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled);
+
 int ioTunOpen(const char *ifName, ioIfMode_t mode);
 int ioTcpListen(const char *listenIP, int port);
 int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort);

@@ -51,6 +51,13 @@ static int pollerCtl(int epollFd, int op, int fd, unsigned int events) {
   return epoll_ctl(epollFd, op, fd, &event);
 }
 
+static int pollerCtlPoller(int epollFd, int op, ioPoller_t *poller, unsigned int events) {
+  struct epoll_event event;
+  event.events = events;
+  event.data.ptr = poller;
+  return epoll_ctl(epollFd, op, poller->fd, &event);
+}
+
 static int pollerAdd(int epollFd, int fd, unsigned int events) {
   return pollerCtl(epollFd, EPOLL_CTL_ADD, fd, events);
 }
@@ -251,6 +258,75 @@ static bool tunSetReadEnabled(ioTunPoller_t *poller, bool enabled) {
     return false;
   }
   poller->events = nextEvents;
+  return true;
+}
+
+bool ioReactorInit(ioReactor_t *reactor) {
+  if (reactor == NULL) {
+    return false;
+  }
+  reactor->epollFd = epoll_create1(0);
+  return reactor->epollFd >= 0;
+}
+
+void ioReactorDeinit(ioReactor_t *reactor) {
+  if (reactor == NULL) {
+    return;
+  }
+  if (reactor->epollFd >= 0) {
+    close(reactor->epollFd);
+  }
+  reactor->epollFd = -1;
+}
+
+bool ioReactorAddPoller(
+    ioReactor_t *reactor,
+    ioPoller_t *poller,
+    const ioPollerCallbacks_t *callbacks,
+    void *ctx,
+    bool readEnabled) {
+  unsigned int events;
+
+  if (reactor == NULL || poller == NULL || callbacks == NULL || reactor->epollFd < 0 || poller->fd < 0) {
+    return false;
+  }
+
+  events = EPOLLRDHUP;
+  if ((poller->events & EPOLLOUT) != 0) {
+    events |= EPOLLOUT;
+  }
+  if (readEnabled) {
+    events |= EPOLLIN;
+  }
+
+  poller->epollFd = reactor->epollFd;
+  poller->callbacks = callbacks;
+  poller->ctx = ctx;
+  poller->readEnabled = readEnabled;
+  poller->events = events;
+
+  return pollerCtlPoller(reactor->epollFd, EPOLL_CTL_ADD, poller, events) == 0;
+}
+
+bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled) {
+  unsigned int events;
+
+  if (poller == NULL || poller->epollFd < 0 || poller->fd < 0) {
+    return false;
+  }
+
+  events = poller->events;
+  if (enabled) {
+    events |= EPOLLIN;
+  } else {
+    events &= ~EPOLLIN;
+  }
+  if (pollerCtlPoller(poller->epollFd, EPOLL_CTL_MOD, poller, events) < 0) {
+    return false;
+  }
+
+  poller->events = events;
+  poller->readEnabled = enabled;
   return true;
 }
 

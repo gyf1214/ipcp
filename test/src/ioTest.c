@@ -380,6 +380,38 @@ static void testIoReactorPublicContracts(void) {
   testAssertTrue(ioPollerListen != ioPollerTcp, "poller kinds should be distinct");
 }
 
+static void testIoReactorInitAndAddPoller(void) {
+  ioReactor_t reactor;
+  ioPoller_t poller;
+  ioPollerCallbacks_t callbacks = {0};
+  int pipeFds[2];
+
+  memset(&reactor, 0, sizeof(reactor));
+  memset(&poller, 0, sizeof(poller));
+  testAssertTrue(pipe(pipeFds) == 0, "pipe should be created");
+
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+  poller.fd = pipeFds[0];
+  poller.kind = ioPollerTcp;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &poller, &callbacks, &poller, true),
+      "ioReactorAddPoller should register poller");
+  testAssertTrue(poller.epollFd == reactor.epollFd, "poller should bind reactor epoll fd");
+  testAssertTrue(poller.callbacks == &callbacks, "poller should store callback table");
+  testAssertTrue(poller.ctx == &poller, "poller should store callback context");
+  testAssertTrue((poller.events & EPOLLIN) != 0, "add should register read interest");
+
+  testAssertTrue(ioReactorSetPollerReadEnabled(&poller, false), "read disable should succeed");
+  testAssertTrue((poller.events & EPOLLIN) == 0, "read disable should clear EPOLLIN bit");
+  testAssertTrue(ioReactorSetPollerReadEnabled(&poller, true), "read enable should succeed");
+  testAssertTrue((poller.events & EPOLLIN) != 0, "read enable should set EPOLLIN bit");
+
+  ioReactorDeinit(&reactor);
+  testAssertTrue(reactor.epollFd == -1, "ioReactorDeinit should reset epoll fd");
+  close(pipeFds[0]);
+  close(pipeFds[1]);
+}
+
 void runIoTests(void) {
   testIoReadSomeOk();
   testIoReadSomeClosed();
@@ -399,4 +431,5 @@ void runIoTests(void) {
   testIoTcpListenBacklogIsGreaterThanOne();
   testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty();
   testIoReactorPublicContracts();
+  testIoReactorInitAndAddPoller();
 }
