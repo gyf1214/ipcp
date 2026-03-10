@@ -29,33 +29,142 @@ static const sessionHeartbeatConfig_t heartbeatCfg = {
 static long long fakeNowMs = 0;
 
 typedef struct {
-  int epollFd;
+  ioReactor_t reactor;
   ioTunPoller_t tunPoller;
   ioTcpPoller_t tcpPoller;
+  ioEvent_t capturedEvents[32];
+  int capturedHead;
+  int capturedTail;
+  int capturedCount;
 } splitPollersFixture_t;
+
+static void splitPollersCaptureEvent(splitPollersFixture_t *poller, ioEvent_t event) {
+  if (poller == NULL || poller->capturedCount >= (int)(sizeof(poller->capturedEvents) / sizeof(poller->capturedEvents[0]))) {
+    return;
+  }
+  poller->capturedEvents[poller->capturedTail] = event;
+  poller->capturedTail = (poller->capturedTail + 1) % (int)(sizeof(poller->capturedEvents) / sizeof(poller->capturedEvents[0]));
+  poller->capturedCount++;
+}
+
+static bool splitPollersPopEvent(splitPollersFixture_t *poller, ioEvent_t *outEvent) {
+  if (poller == NULL || outEvent == NULL || poller->capturedCount <= 0) {
+    return false;
+  }
+  *outEvent = poller->capturedEvents[poller->capturedHead];
+  poller->capturedHead = (poller->capturedHead + 1) % (int)(sizeof(poller->capturedEvents) / sizeof(poller->capturedEvents[0]));
+  poller->capturedCount--;
+  return true;
+}
+
+static ioPollerAction_t splitPollerCaptureReadable(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
+  splitPollersFixture_t *fixture = (splitPollersFixture_t *)ctx;
+  (void)reactor;
+  if (fixture == NULL || poller == NULL) {
+    return ioPollerContinue;
+  }
+  if (poller->kind == ioPollerTun) {
+    splitPollersCaptureEvent(fixture, ioEventTunRead);
+  } else if (poller->kind == ioPollerTcp) {
+    splitPollersCaptureEvent(fixture, ioEventTcpRead);
+  }
+  return ioPollerContinue;
+}
+
+static ioPollerAction_t splitPollerCaptureLowWatermark(void *ctx, ioPoller_t *poller, long queuedBytes) {
+  splitPollersFixture_t *fixture = (splitPollersFixture_t *)ctx;
+  (void)queuedBytes;
+  if (fixture == NULL || poller == NULL) {
+    return ioPollerContinue;
+  }
+  if (poller->kind == ioPollerTun) {
+    splitPollersCaptureEvent(fixture, ioEventTunWrite);
+  } else if (poller->kind == ioPollerTcp) {
+    splitPollersCaptureEvent(fixture, ioEventTcpWrite);
+  }
+  return ioPollerContinue;
+}
+
+static const ioPollerCallbacks_t splitPollerCallbacks = {
+    .onClosed = NULL,
+    .onLowWatermark = splitPollerCaptureLowWatermark,
+    .onReadable = splitPollerCaptureReadable,
+};
 
 static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd) {
   if (poller == NULL) {
     return -1;
   }
-  poller->epollFd = epoll_create1(0);
-  if (poller->epollFd < 0) {
+  if (!ioReactorInit(&poller->reactor)) {
     return -1;
   }
-  if (ioTunPollerInit(&poller->tunPoller, poller->epollFd, tunFd) < 0
-      || ioTcpPollerInit(&poller->tcpPoller, poller->epollFd, tcpFd) < 0) {
-    close(poller->epollFd);
-    poller->epollFd = -1;
+  poller->capturedHead = 0;
+  poller->capturedTail = 0;
+  poller->capturedCount = 0;
+
+  memset(&poller->tunPoller, 0, sizeof(poller->tunPoller));
+  poller->tunPoller.poller.epollFd = -1;
+  poller->tunPoller.poller.fd = tunFd;
+  poller->tunPoller.poller.events = EPOLLRDHUP;
+  poller->tunPoller.poller.kind = ioPollerTun;
+  if (!ioReactorAddPoller(&poller->reactor, &poller->tunPoller.poller, &splitPollerCallbacks, poller, true)) {
+    ioReactorDeinit(&poller->reactor);
+    return -1;
+  }
+
+  memset(&poller->tcpPoller, 0, sizeof(poller->tcpPoller));
+  poller->tcpPoller.poller.epollFd = -1;
+  poller->tcpPoller.poller.fd = tcpFd;
+  poller->tcpPoller.poller.events = EPOLLRDHUP;
+  poller->tcpPoller.poller.kind = ioPollerTcp;
+  if (!ioReactorAddPoller(&poller->reactor, &poller->tcpPoller.poller, &splitPollerCallbacks, poller, true)) {
+    ioReactorDeinit(&poller->reactor);
     return -1;
   }
   return 0;
 }
 
 static void teardownSplitPollers(splitPollersFixture_t *poller) {
-  if (poller != NULL && poller->epollFd >= 0) {
-    close(poller->epollFd);
-    poller->epollFd = -1;
+  if (poller != NULL) {
+    ioReactorDeinit(&poller->reactor);
   }
+}
+
+static bool waitCapturedEvent(splitPollersFixture_t *poller, int timeoutMs, ioEvent_t *outEvent) {
+  int attempts;
+
+  if (poller == NULL || outEvent == NULL) {
+    return false;
+  }
+  for (attempts = 0; attempts < 6; attempts++) {
+    ioReactorStepResult_t step;
+    if (splitPollersPopEvent(poller, outEvent)) {
+      return true;
+    }
+    step = ioReactorStep(&poller->reactor, timeoutMs);
+    if (step == ioReactorStepError || step == ioReactorStepStop) {
+      return false;
+    }
+    if (splitPollersPopEvent(poller, outEvent)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool waitCapturedEventOfKind(splitPollersFixture_t *poller, int timeoutMs, ioEvent_t expected) {
+  int attempts;
+  ioEvent_t event;
+
+  for (attempts = 0; attempts < 8; attempts++) {
+    if (!waitCapturedEvent(poller, timeoutMs, &event)) {
+      return false;
+    }
+    if (event == expected) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static int writeAll(int fd, const void *buf, long nbytes) {
@@ -609,6 +718,7 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   int tcpPair[2];
   char wire[ProtocolFrameSize];
   long wireNbytes;
+  ioEvent_t event;
 
   memset(key, 0x22, sizeof(key));
   setupPairs(tunPair, tcpPair);
@@ -631,8 +741,10 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
 
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatAck, NULL, 0, wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
+  event = ioEventTcpRead;
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
       "client should continue after heartbeat ack");
   testAssertTrue(!client.heartbeatAckPending, "heartbeat pending should clear after ack");
 
@@ -653,6 +765,7 @@ static void testClientHeartbeatStillSendsWhenInboundRecentlyActive(void) {
   char wire[ProtocolFrameSize];
   long wireNbytes;
   static const char payload[] = "recv-only";
+  ioEvent_t event;
 
   memset(key, 0x25, sizeof(key));
   setupPairs(tunPair, tcpPair);
@@ -665,8 +778,10 @@ static void testClientHeartbeatStillSendsWhenInboundRecentlyActive(void) {
   fakeNowMs = 5500;
   wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)(sizeof(payload) - 1), wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
+  event = ioEventTcpRead;
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
       "client should continue after receiving inbound data");
   testAssertTrue(client.lastDataRecvMs == 5500, "inbound data should refresh receive timestamp");
   testAssertTrue(client.heartbeatAckPending, "client should send heartbeat request even when inbound data is recent");
@@ -722,6 +837,7 @@ static void testClientHeartbeatBlockedReqEventuallyTracksPendingForAck(void) {
   char fill[IoPollerQueueCapacity];
   char wire[ProtocolFrameSize];
   long wireNbytes;
+  ioEvent_t event;
 
   memset(key, 0x26, sizeof(key));
   memset(fill, 'i', sizeof(fill));
@@ -758,8 +874,10 @@ static void testClientHeartbeatBlockedReqEventuallyTracksPendingForAck(void) {
 
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatAck, NULL, 0, wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
+  event = ioEventTcpRead;
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
       "client should accept ack for retried heartbeat request");
   testAssertTrue(!client.heartbeatAckPending, "client should clear pending heartbeat after ack");
 
@@ -779,6 +897,7 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
   int tcpPair[2];
   char wire[ProtocolFrameSize];
   long wireNbytes;
+  ioEvent_t event;
 
   memset(key, 0x23, sizeof(key));
   setupPairs(tunPair, tcpPair);
@@ -788,8 +907,10 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
   wireClientSession(session, &poller, &client);
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatReq, NULL, 0, wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
+  event = ioEventTcpRead;
   testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &poller, ioEventTcpRead, key) == sessionStepStop,
+      runSessionStepWithSuppressedStderr(session, &poller, event, key) == sessionStepStop,
       "client should stop on inbound heartbeat request");
 
   sessionDestroy(session);

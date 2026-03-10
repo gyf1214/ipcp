@@ -25,9 +25,13 @@ TestAssertServerRunSig(sessionRunServer);
 TestAssertClientRunSig(sessionRunClient);
 
 typedef struct {
-  int epollFd;
+  ioReactor_t reactor;
   ioTunPoller_t tunPoller;
   ioTcpPoller_t tcpPoller;
+  ioEvent_t capturedEvents[32];
+  int capturedHead;
+  int capturedTail;
+  int capturedCount;
 } splitPollersFixture_t;
 
 static long long fakeNowMs = 0;
@@ -36,32 +40,148 @@ static const sessionHeartbeatConfig_t defaultHeartbeatCfg = {
     .timeoutMs = 15000,
 };
 
+static void splitPollersCaptureEvent(splitPollersFixture_t *poller, ioEvent_t event) {
+  if (poller == NULL || poller->capturedCount >= (int)(sizeof(poller->capturedEvents) / sizeof(poller->capturedEvents[0]))) {
+    return;
+  }
+  poller->capturedEvents[poller->capturedTail] = event;
+  poller->capturedTail = (poller->capturedTail + 1) % (int)(sizeof(poller->capturedEvents) / sizeof(poller->capturedEvents[0]));
+  poller->capturedCount++;
+}
+
+static bool splitPollersPopEvent(splitPollersFixture_t *poller, ioEvent_t *outEvent) {
+  if (poller == NULL || outEvent == NULL || poller->capturedCount <= 0) {
+    return false;
+  }
+  *outEvent = poller->capturedEvents[poller->capturedHead];
+  poller->capturedHead = (poller->capturedHead + 1) % (int)(sizeof(poller->capturedEvents) / sizeof(poller->capturedEvents[0]));
+  poller->capturedCount--;
+  return true;
+}
+
+static ioPollerAction_t splitPollerCaptureReadable(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
+  splitPollersFixture_t *fixture = (splitPollersFixture_t *)ctx;
+  (void)reactor;
+  if (fixture == NULL || poller == NULL) {
+    return ioPollerContinue;
+  }
+  if (poller->kind == ioPollerTun) {
+    splitPollersCaptureEvent(fixture, ioEventTunRead);
+  } else if (poller->kind == ioPollerTcp) {
+    splitPollersCaptureEvent(fixture, ioEventTcpRead);
+  }
+  return ioPollerContinue;
+}
+
+static ioPollerAction_t splitPollerCaptureLowWatermark(void *ctx, ioPoller_t *poller, long queuedBytes) {
+  splitPollersFixture_t *fixture = (splitPollersFixture_t *)ctx;
+  (void)queuedBytes;
+  if (fixture == NULL || poller == NULL) {
+    return ioPollerContinue;
+  }
+  if (poller->kind == ioPollerTun) {
+    splitPollersCaptureEvent(fixture, ioEventTunWrite);
+  } else if (poller->kind == ioPollerTcp) {
+    splitPollersCaptureEvent(fixture, ioEventTcpWrite);
+  }
+  return ioPollerContinue;
+}
+
+static const ioPollerCallbacks_t splitPollerCallbacks = {
+    .onClosed = NULL,
+    .onLowWatermark = splitPollerCaptureLowWatermark,
+    .onReadable = splitPollerCaptureReadable,
+};
+
 static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd) {
   if (poller == NULL) {
     return -1;
   }
-  poller->epollFd = epoll_create1(0);
-  if (poller->epollFd < 0) {
+  if (!ioReactorInit(&poller->reactor)) {
     return -1;
   }
-  if (ioTunPollerInit(&poller->tunPoller, poller->epollFd, tunFd) < 0
-      || ioTcpPollerInit(&poller->tcpPoller, poller->epollFd, tcpFd) < 0) {
-    close(poller->epollFd);
-    poller->epollFd = -1;
+  poller->capturedHead = 0;
+  poller->capturedTail = 0;
+  poller->capturedCount = 0;
+
+  memset(&poller->tunPoller, 0, sizeof(poller->tunPoller));
+  poller->tunPoller.poller.epollFd = -1;
+  poller->tunPoller.poller.fd = tunFd;
+  poller->tunPoller.poller.events = EPOLLRDHUP;
+  poller->tunPoller.poller.kind = ioPollerTun;
+  if (!ioReactorAddPoller(&poller->reactor, &poller->tunPoller.poller, &splitPollerCallbacks, poller, true)) {
+    ioReactorDeinit(&poller->reactor);
+    return -1;
+  }
+
+  memset(&poller->tcpPoller, 0, sizeof(poller->tcpPoller));
+  poller->tcpPoller.poller.epollFd = -1;
+  poller->tcpPoller.poller.fd = tcpFd;
+  poller->tcpPoller.poller.events = EPOLLRDHUP;
+  poller->tcpPoller.poller.kind = ioPollerTcp;
+  if (!ioReactorAddPoller(&poller->reactor, &poller->tcpPoller.poller, &splitPollerCallbacks, poller, true)) {
+    ioReactorDeinit(&poller->reactor);
     return -1;
   }
   return 0;
 }
 
 static void teardownSplitPollers(splitPollersFixture_t *poller) {
-  if (poller != NULL && poller->epollFd >= 0) {
-    close(poller->epollFd);
-    poller->epollFd = -1;
+  if (poller != NULL) {
+    ioReactorDeinit(&poller->reactor);
   }
 }
 
-static ioEvent_t waitSplitPollers(splitPollersFixture_t *poller, int timeoutMs) {
-  return ioPollersWait(&poller->tunPoller, &poller->tcpPoller, timeoutMs);
+static bool drainTcpQueueWithReactor(splitPollersFixture_t *poller, int timeoutMs) {
+  int attempts;
+
+  if (poller == NULL) {
+    return false;
+  }
+  for (attempts = 0; attempts < 5 && ioTcpQueuedBytes(&poller->tcpPoller) > 0; attempts++) {
+    ioReactorStepResult_t step = ioReactorStep(&poller->reactor, timeoutMs);
+    if (step == ioReactorStepError || step == ioReactorStepStop) {
+      return false;
+    }
+  }
+  return ioTcpQueuedBytes(&poller->tcpPoller) == 0;
+}
+
+static bool waitCapturedEvent(splitPollersFixture_t *poller, int timeoutMs, ioEvent_t *outEvent) {
+  int attempts;
+
+  if (poller == NULL || outEvent == NULL) {
+    return false;
+  }
+  for (attempts = 0; attempts < 6; attempts++) {
+    ioReactorStepResult_t step;
+    if (splitPollersPopEvent(poller, outEvent)) {
+      return true;
+    }
+    step = ioReactorStep(&poller->reactor, timeoutMs);
+    if (step == ioReactorStepError || step == ioReactorStepStop) {
+      return false;
+    }
+    if (splitPollersPopEvent(poller, outEvent)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool waitCapturedEventOfKind(splitPollersFixture_t *poller, int timeoutMs, ioEvent_t expected) {
+  int attempts;
+  ioEvent_t event;
+
+  for (attempts = 0; attempts < 8; attempts++) {
+    if (!waitCapturedEvent(poller, timeoutMs, &event)) {
+      return false;
+    }
+    if (event == expected) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static long long fakeNow(void *ctx) {
@@ -221,6 +341,7 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   int tcpPair[2];
   char fill[IoPollerQueueCapacity];
   char tunPayload[128];
+  ioEvent_t event;
 
   memset(key, 0x55, sizeof(key));
   memset(fill, 'f', sizeof(fill));
@@ -232,12 +353,14 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   testAssertTrue(session != NULL, "session create should succeed");
   wireClientSession(session, &poller, &client);
 
+  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTunRead), "reactor callback should capture tun readable event");
+  event = ioEventTunRead;
   testAssertTrue(
       ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 32),
       "prefill tcp queue should succeed");
-  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
       "session should stay alive on overflow backpressure");
   testAssertTrue(client.runtimeOverflowNbytes > 0, "pending tcp bytes should be tracked");
   testAssertTrue(client.tunReadPaused, "tun read should be paused under overflow");
@@ -263,6 +386,7 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   protocolDecoder_t decoder;
   protocolMessage_t msg;
   long consumed = 0;
+  ioEvent_t event;
 
   memset(key, 0x44, sizeof(key));
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
@@ -271,14 +395,13 @@ static void testSessionTunReadQueuesEncryptedTcpFrame(void) {
   wireClientSession(session, &poller, &client);
 
   testAssertTrue(write(tunPair[1], payload, strlen(payload)) == (long)strlen(payload), "tun write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTunRead), "reactor callback should capture tun readable event");
+  event = ioEventTunRead;
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
       "tun read event should continue");
 
-  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should be available");
-  testAssertTrue(
-      runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
-      "tcp write event should continue");
+  testAssertTrue(drainTcpQueueWithReactor(&poller, 100), "reactor should flush queued tcp payload");
   nbytes = read(tcpPair[1], out, sizeof(out));
   testAssertTrue(nbytes > 0, "tcp peer should receive encrypted wire frame");
 
@@ -304,6 +427,7 @@ static void testSessionTcpReadQueuesTunWrite(void) {
   long wireNbytes;
   char out[128];
   char payload[] = "tcp-payload";
+  ioEvent_t event;
 
   memset(key, 0x45, sizeof(key));
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
@@ -313,8 +437,10 @@ static void testSessionTcpReadQueuesTunWrite(void) {
 
   wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)strlen(payload), wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
+  event = ioEventTcpRead;
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTcpRead, key) == sessionStepContinue,
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
       "tcp read event should continue");
   testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "server tun write service should flush payload");
 
@@ -340,6 +466,7 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
   protocolDecoder_t decoder;
   protocolMessage_t decodedMsg;
   long consumed = 0;
+  ioEvent_t event;
 
   memset(key, 0x60, sizeof(key));
   setupSplitPollersFixture(&poller, tunPair, tcpPair);
@@ -353,10 +480,12 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
   testAssertTrue(
       write(tunPair[1], payload, sizeof(payload) - 1) == (ssize_t)(sizeof(payload) - 1),
       "tun peer write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTunRead), "reactor callback should capture tun readable event");
+  event = ioEventTunRead;
   testAssertTrue(
-      sessionStep(clientSession, &poller.tcpPoller, &poller.tunPoller, ioEventTunRead, key) == sessionStepContinue,
+      sessionStep(clientSession, &poller.tcpPoller, &poller.tunPoller, event, key) == sessionStepContinue,
       "tun read event should queue encrypted tcp frame");
-  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should be available");
+  testAssertTrue(drainTcpQueueWithReactor(&poller, 100), "reactor should flush queued tcp payload");
   testAssertTrue(ioTcpServiceWriteEvent(&poller.tcpPoller), "tcp write service should flush queued data");
 
   protocolDecoderInit(&decoder);
@@ -381,8 +510,10 @@ static void testSessionSplitEntrypointsForTunPayloadAndConnEvents(void) {
         key, protocolMsgData, "event-path", (long)strlen("event-path"), inboundWire);
     testAssertTrue(write(tcpPair[1], inboundWire, (size_t)inboundNbytes) == inboundNbytes, "peer tcp write should succeed");
   }
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
+  event = ioEventTcpRead;
   testAssertTrue(
-      sessionStep(clientSession, &poller.tcpPoller, &poller.tunPoller, ioEventTcpRead, key) == sessionStepContinue,
+      sessionStep(clientSession, &poller.tcpPoller, &poller.tunPoller, event, key) == sessionStepContinue,
       "sessionStep conn path should process tcp read");
   testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "tun write service should flush queued frame");
   {
@@ -407,6 +538,7 @@ static void testBackpressurePauseAndResumeFlow(void) {
   char fill[IoPollerQueueCapacity];
   char tunPayload[64];
   char drain[IoPollerQueueCapacity];
+  ioEvent_t event;
 
   memset(key, 0x46, sizeof(key));
   memset(fill, 'x', sizeof(fill));
@@ -416,23 +548,27 @@ static void testBackpressurePauseAndResumeFlow(void) {
   testAssertTrue(session != NULL, "session create should succeed");
   wireClientSession(session, &poller, &client);
 
+  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTunRead), "reactor callback should capture tun readable event");
+  event = ioEventTunRead;
   testAssertTrue(
       ioTcpWrite(&poller.tcpPoller, fill, IoPollerQueueCapacity - 16),
       "prefill should succeed");
-  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
       "overflow path should continue");
   testAssertTrue(client.tunReadPaused, "tun read should be paused");
   testAssertTrue(client.runtimeOverflowNbytes > 0, "pending tcp payload should be retained");
 
-  testAssertTrue(waitSplitPollers(&poller, 100) == ioEventTcpWrite, "tcp write event should arrive");
+  testAssertTrue(drainTcpQueueWithReactor(&poller, 100), "reactor should flush queued tcp payload");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTcpWrite), "reactor callback should capture tcp writable low-watermark event");
+  event = ioEventTcpWrite;
   testAssertTrue(read(tcpPair[1], drain, sizeof(drain)) > 0, "drain should consume queued bytes");
   testAssertTrue(
-      runSessionStep(session, &poller, ioEventTcpWrite, key) == sessionStepContinue,
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
       "tcp write event should continue");
   testAssertTrue(
-      clientServiceBackpressure(&client, session, ioEventTcpWrite, key),
+      clientServiceBackpressure(&client, session, event, key),
       "client backpressure service should continue");
   testAssertTrue(client.runtimeOverflowNbytes == 0, "pending tcp payload should flush");
   testAssertTrue(!client.tunReadPaused, "tun read should resume when queue drains");
@@ -517,8 +653,8 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
   setupSplitPollersFixture(&poller, tunPair, sourcePair);
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairA) == 0, "dest A pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairB) == 0, "dest B pair should be created");
-  testAssertTrue(ioTcpPollerInit(&destPollerA, poller.epollFd, destPairA[0]) == 0, "dest A poller init should succeed");
-  testAssertTrue(ioTcpPollerInit(&destPollerB, poller.epollFd, destPairB[0]) == 0, "dest B poller init should succeed");
+  testAssertTrue(ioTcpPollerInit(&destPollerA, poller.reactor.epollFd, destPairA[0]) == 0, "dest A poller init should succeed");
+  testAssertTrue(ioTcpPollerInit(&destPollerB, poller.reactor.epollFd, destPairB[0]) == 0, "dest B poller init should succeed");
 
   session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");

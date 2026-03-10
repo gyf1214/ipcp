@@ -149,4 +149,3 @@ bool ioTcpSetReadEnabled(ioTcpPoller_t *poller, bool enabled);
 bool ioTunSetReadEnabled(ioTunPoller_t *poller, bool enabled);
 long ioTcpQueuedBytes(const ioTcpPoller_t *poller);
 long ioTunQueuedBytes(const ioTunPoller_t *poller);
-ioEvent_t ioPollersWait(ioTunPoller_t *tunPoller, ioTcpPoller_t *tcpPoller, int timeoutMs);
