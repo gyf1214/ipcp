@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stddef.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -12,9 +13,66 @@
 
 #include "io.h"
 
+#define ioContainerOf(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+
+static ioTcpPoller_t *tcpFromPoller(ioPoller_t *poller) {
+  if (poller == NULL || poller->kind != ioPollerTcp) {
+    return NULL;
+  }
+  return ioContainerOf(poller, ioTcpPoller_t, poller);
+}
+
+static ioTunPoller_t *tunFromPoller(ioPoller_t *poller) {
+  if (poller == NULL || poller->kind != ioPollerTun) {
+    return NULL;
+  }
+  return ioContainerOf(poller, ioTunPoller_t, poller);
+}
+
+static void tcpSyncHeaderFromLegacy(ioTcpPoller_t *poller) {
+  poller->poller.epollFd = poller->epollFd;
+  poller->poller.fd = poller->tcpFd;
+  poller->poller.events = poller->events;
+  poller->poller.kind = ioPollerTcp;
+  poller->poller.readEnabled = (poller->events & EPOLLIN) != 0;
+}
+
+static void tcpSyncLegacyFromHeader(ioTcpPoller_t *poller) {
+  poller->epollFd = poller->poller.epollFd;
+  poller->tcpFd = poller->poller.fd;
+  poller->events = poller->poller.events;
+}
+
+static void tunSyncHeaderFromLegacy(ioTunPoller_t *poller) {
+  poller->poller.epollFd = poller->epollFd;
+  poller->poller.fd = poller->tunFd;
+  poller->poller.events = poller->events;
+  poller->poller.kind = ioPollerTun;
+  poller->poller.readEnabled = (poller->events & EPOLLIN) != 0;
+}
+
+static void tunSyncLegacyFromHeader(ioTunPoller_t *poller) {
+  poller->epollFd = poller->poller.epollFd;
+  poller->tunFd = poller->poller.fd;
+  poller->events = poller->poller.events;
+}
+
+static void listenSyncHeaderFromLegacy(ioListenPoller_t *poller) {
+  poller->poller.epollFd = -1;
+  poller->poller.fd = poller->listenFd;
+  poller->poller.events = EPOLLIN | EPOLLRDHUP;
+  poller->poller.kind = ioPollerListen;
+  poller->poller.readEnabled = true;
+}
+
+static void pollerSyncLegacyFromHeader(ioPoller_t *poller) {
+  (void)poller;
+}
+
 typedef struct {
   int epollFd;
   int fd;
+  ioPoller_t *header;
   unsigned int *events;
   long *outOffset;
   long *outNbytes;
@@ -22,10 +80,12 @@ typedef struct {
 } ioQueueState_t;
 
 static ioQueueState_t tcpQueueState(ioTcpPoller_t *poller) {
+  bool useHeader = poller->poller.callbacks != NULL;
   ioQueueState_t state = {
-    .epollFd = poller->epollFd,
-    .fd = poller->tcpFd,
-    .events = &poller->events,
+    .epollFd = useHeader ? poller->poller.epollFd : poller->epollFd,
+    .fd = useHeader ? poller->poller.fd : poller->tcpFd,
+    .header = &poller->poller,
+    .events = useHeader ? &poller->poller.events : &poller->events,
     .outOffset = &poller->outOffset,
     .outNbytes = &poller->outNbytes,
     .outBuf = poller->outBuf,
@@ -63,10 +123,21 @@ static int pollerAdd(int epollFd, int fd, unsigned int events) {
 }
 
 static int pollerMod(ioQueueState_t state, unsigned int events) {
-  if (pollerCtl(state.epollFd, EPOLL_CTL_MOD, state.fd, events) < 0) {
+  int rc;
+
+  if (state.header != NULL && state.header->callbacks != NULL) {
+    rc = pollerCtlPoller(state.epollFd, EPOLL_CTL_MOD, state.header, events);
+  } else {
+    rc = pollerCtl(state.epollFd, EPOLL_CTL_MOD, state.fd, events);
+  }
+  if (rc < 0) {
     return -1;
   }
   *state.events = events;
+  if (state.header != NULL) {
+    state.header->events = events;
+    state.header->readEnabled = (events & EPOLLIN) != 0;
+  }
   return 0;
 }
 
@@ -203,6 +274,10 @@ static bool tunQueueWrite(ioTunPoller_t *poller, const void *data, long nbytes) 
 }
 
 static int tunQueueFlush(ioTunPoller_t *poller) {
+  if (poller->poller.callbacks != NULL) {
+    tunSyncLegacyFromHeader(poller);
+  }
+
   while (poller->frameCount > 0) {
     const long start = poller->frames[poller->frameHead].start;
     const long nbytes = poller->frames[poller->frameHead].nbytes;
@@ -231,17 +306,33 @@ static int tunQueueFlush(ioTunPoller_t *poller) {
     return -1;
   }
 
-  if ((poller->events & EPOLLOUT) != 0 && pollerCtl(poller->epollFd, EPOLL_CTL_MOD, poller->tunFd, poller->events & ~EPOLLOUT) < 0) {
-    return -1;
+  if ((poller->events & EPOLLOUT) != 0) {
+    int rc;
+    if (poller->poller.callbacks != NULL) {
+      rc = pollerCtlPoller(poller->epollFd, EPOLL_CTL_MOD, &poller->poller, poller->events & ~EPOLLOUT);
+    } else {
+      rc = pollerCtl(poller->epollFd, EPOLL_CTL_MOD, poller->tunFd, poller->events & ~EPOLLOUT);
+    }
+    if (rc < 0) {
+      return -1;
+    }
   }
   poller->events &= ~EPOLLOUT;
+  poller->poller.events = poller->events;
+  poller->poller.readEnabled = (poller->events & EPOLLIN) != 0;
   return 0;
 }
 
 static bool tunSetReadEnabled(ioTunPoller_t *poller, bool enabled) {
   unsigned int nextEvents;
 
-  if (poller == NULL || poller->epollFd < 0) {
+  if (poller == NULL) {
+    return false;
+  }
+  if (poller->poller.callbacks != NULL) {
+    tunSyncLegacyFromHeader(poller);
+  }
+  if (poller->epollFd < 0) {
     return false;
   }
 
@@ -254,10 +345,16 @@ static bool tunSetReadEnabled(ioTunPoller_t *poller, bool enabled) {
   if (nextEvents == poller->events) {
     return true;
   }
-  if (pollerCtl(poller->epollFd, EPOLL_CTL_MOD, poller->tunFd, nextEvents) < 0) {
+  if (poller->poller.callbacks != NULL) {
+    if (pollerCtlPoller(poller->epollFd, EPOLL_CTL_MOD, &poller->poller, nextEvents) < 0) {
+      return false;
+    }
+  } else if (pollerCtl(poller->epollFd, EPOLL_CTL_MOD, poller->tunFd, nextEvents) < 0) {
     return false;
   }
   poller->events = nextEvents;
+  poller->poller.events = poller->events;
+  poller->poller.readEnabled = (poller->events & EPOLLIN) != 0;
   return true;
 }
 
@@ -304,6 +401,7 @@ bool ioReactorAddPoller(
   poller->ctx = ctx;
   poller->readEnabled = readEnabled;
   poller->events = events;
+  pollerSyncLegacyFromHeader(poller);
 
   return pollerCtlPoller(reactor->epollFd, EPOLL_CTL_ADD, poller, events) == 0;
 }
@@ -327,6 +425,7 @@ bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled) {
 
   poller->events = events;
   poller->readEnabled = enabled;
+  pollerSyncLegacyFromHeader(poller);
   return true;
 }
 
@@ -342,10 +441,45 @@ static ioReactorStepResult_t ioReactorApplyAction(ioPoller_t *poller, ioPollerAc
       return ioReactorStepError;
     }
     poller->epollFd = -1;
+    poller->events = 0;
+    pollerSyncLegacyFromHeader(poller);
     *removed = true;
     return ioReactorStepReady;
   }
   return ioReactorStepError;
+}
+
+static bool pollerServiceWritable(ioPoller_t *poller, long *outBefore, long *outAfter) {
+  ioTcpPoller_t *tcp = tcpFromPoller(poller);
+  ioTunPoller_t *tun = tunFromPoller(poller);
+
+  if (outBefore == NULL || outAfter == NULL) {
+    return false;
+  }
+
+  if (tcp != NULL) {
+    *outBefore = tcp->outNbytes;
+    if (pollerFlushQueue(tcpQueueState(tcp)) < 0) {
+      return false;
+    }
+    *outAfter = tcp->outNbytes;
+    tcpSyncHeaderFromLegacy(tcp);
+    return true;
+  }
+
+  if (tun != NULL) {
+    *outBefore = tun->queuedBytes;
+    if (tunQueueFlush(tun) < 0) {
+      return false;
+    }
+    *outAfter = tun->queuedBytes;
+    tunSyncHeaderFromLegacy(tun);
+    return true;
+  }
+
+  *outBefore = -1;
+  *outAfter = -1;
+  return true;
 }
 
 ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs) {
@@ -368,6 +502,8 @@ ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs) {
   for (i = 0; i < n; i++) {
     ioPoller_t *poller = (ioPoller_t *)events[i].data.ptr;
     ioReactorStepResult_t result;
+    long queuedBefore = -1;
+    long queuedAfter = -1;
     bool removed = false;
 
     if (poller == NULL || poller->callbacks == NULL) {
@@ -381,6 +517,26 @@ ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs) {
       }
       if (removed) {
         continue;
+      }
+    }
+
+    if ((events[i].events & EPOLLOUT) != 0) {
+      if (!pollerServiceWritable(poller, &queuedBefore, &queuedAfter)) {
+        return ioReactorStepError;
+      }
+      if (poller->callbacks->onLowWatermark != NULL
+          && queuedBefore > IoPollerLowWatermark
+          && queuedAfter <= IoPollerLowWatermark) {
+        result = ioReactorApplyAction(
+            poller,
+            poller->callbacks->onLowWatermark(poller->ctx, poller, queuedAfter),
+            &removed);
+        if (result == ioReactorStepStop || result == ioReactorStepError) {
+          return result;
+        }
+        if (removed) {
+          continue;
+        }
       }
     }
 
@@ -600,6 +756,102 @@ int ioTcpConnect(const char *remoteIP, int port) {
   return connFd;
 }
 
+bool ioListenPollerListen(ioListenPoller_t *poller, const char *listenIP, int port) {
+  int listenFd;
+
+  if (poller == NULL) {
+    return false;
+  }
+
+  listenFd = ioTcpListen(listenIP, port);
+  if (listenFd < 0) {
+    return false;
+  }
+  if (pollerSetNonBlocking(listenFd) < 0) {
+    close(listenFd);
+    return false;
+  }
+
+  memset(poller, 0, sizeof(*poller));
+  poller->listenFd = listenFd;
+  listenSyncHeaderFromLegacy(poller);
+  return true;
+}
+
+ioStatus_t ioListenPollerAcceptNonBlocking(
+    ioListenPoller_t *listenPoller,
+    ioTcpPoller_t *outTcpPoller,
+    char *peerIp,
+    long peerIpSize,
+    int *peerPort) {
+  ioStatus_t status;
+  int connFd = -1;
+
+  if (listenPoller == NULL || outTcpPoller == NULL || listenPoller->listenFd < 0) {
+    return ioStatusError;
+  }
+
+  status = ioTcpAcceptNonBlocking(listenPoller->listenFd, &connFd, peerIp, peerIpSize, peerPort);
+  if (status != ioStatusOk) {
+    return status;
+  }
+
+  memset(outTcpPoller, 0, sizeof(*outTcpPoller));
+  outTcpPoller->epollFd = -1;
+  outTcpPoller->tcpFd = connFd;
+  outTcpPoller->events = EPOLLIN | EPOLLRDHUP;
+  tcpSyncHeaderFromLegacy(outTcpPoller);
+  return ioStatusOk;
+}
+
+bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port) {
+  int connFd;
+
+  if (poller == NULL) {
+    return false;
+  }
+
+  connFd = ioTcpConnect(remoteIP, port);
+  if (connFd < 0) {
+    return false;
+  }
+  if (pollerSetNonBlocking(connFd) < 0) {
+    close(connFd);
+    return false;
+  }
+
+  memset(poller, 0, sizeof(*poller));
+  poller->epollFd = -1;
+  poller->tcpFd = connFd;
+  poller->events = EPOLLIN | EPOLLRDHUP;
+  tcpSyncHeaderFromLegacy(poller);
+  return true;
+}
+
+bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode) {
+  int tunFd;
+
+  if (poller == NULL) {
+    return false;
+  }
+
+  tunFd = ioTunOpen(ifName, mode);
+  if (tunFd < 0) {
+    return false;
+  }
+  if (pollerSetNonBlocking(tunFd) < 0) {
+    close(tunFd);
+    return false;
+  }
+
+  memset(poller, 0, sizeof(*poller));
+  poller->epollFd = -1;
+  poller->tunFd = tunFd;
+  poller->events = EPOLLIN | EPOLLRDHUP;
+  tunSyncHeaderFromLegacy(poller);
+  return true;
+}
+
 int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd) {
   if (poller == NULL || tcpFd < 0 || epollFd < 0) {
     return -1;
@@ -614,6 +866,9 @@ int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd) {
   poller->events = EPOLLIN | EPOLLRDHUP;
   poller->outOffset = 0;
   poller->outNbytes = 0;
+  poller->poller.callbacks = NULL;
+  poller->poller.ctx = NULL;
+  tcpSyncHeaderFromLegacy(poller);
 
   if (pollerAdd(epollFd, tcpFd, poller->events) < 0) {
     return -1;
@@ -639,6 +894,9 @@ int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd) {
   poller->frameHead = 0;
   poller->frameTail = 0;
   poller->frameCount = 0;
+  poller->poller.callbacks = NULL;
+  poller->poller.ctx = NULL;
+  tunSyncHeaderFromLegacy(poller);
 
   if (pollerAdd(epollFd, tunFd, poller->events) < 0) {
     return -1;
@@ -647,15 +905,25 @@ int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd) {
 }
 
 bool ioTcpWrite(ioTcpPoller_t *poller, const void *data, long nbytes) {
+  bool ok;
   if (poller == NULL) {
     return false;
   }
-  return pollerQueueWrite(tcpQueueState(poller), data, nbytes);
+  ok = pollerQueueWrite(tcpQueueState(poller), data, nbytes);
+  if (poller->poller.callbacks != NULL) {
+    tcpSyncLegacyFromHeader(poller);
+  } else {
+    tcpSyncHeaderFromLegacy(poller);
+  }
+  return ok;
 }
 
 bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes) {
   if (poller == NULL) {
     return false;
+  }
+  if (poller->poller.callbacks != NULL) {
+    tunSyncLegacyFromHeader(poller);
   }
   if (!tunQueueWrite(poller, data, nbytes)) {
     return false;
@@ -663,39 +931,66 @@ bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes) {
   if (poller->epollFd < 0 || (poller->events & EPOLLOUT) != 0) {
     return true;
   }
-  if (pollerCtl(poller->epollFd, EPOLL_CTL_MOD, poller->tunFd, poller->events | EPOLLOUT) < 0) {
+  if (poller->poller.callbacks != NULL) {
+    if (pollerCtlPoller(poller->epollFd, EPOLL_CTL_MOD, &poller->poller, poller->events | EPOLLOUT) < 0) {
+      return false;
+    }
+  } else if (pollerCtl(poller->epollFd, EPOLL_CTL_MOD, poller->tunFd, poller->events | EPOLLOUT) < 0) {
     return false;
   }
   poller->events |= EPOLLOUT;
+  poller->poller.events = poller->events;
+  poller->poller.readEnabled = (poller->events & EPOLLIN) != 0;
+  tunSyncHeaderFromLegacy(poller);
   return true;
 }
 
 bool ioTcpServiceWriteEvent(ioTcpPoller_t *poller) {
+  bool ok;
   if (poller == NULL || poller->epollFd < 0) {
     return false;
   }
-  return pollerFlushQueue(tcpQueueState(poller)) == 0;
+  ok = pollerFlushQueue(tcpQueueState(poller)) == 0;
+  if (poller->poller.callbacks != NULL) {
+    tcpSyncLegacyFromHeader(poller);
+  } else {
+    tcpSyncHeaderFromLegacy(poller);
+  }
+  return ok;
 }
 
 bool ioTunServiceWriteEvent(ioTunPoller_t *poller) {
+  bool ok;
   if (poller == NULL || poller->epollFd < 0) {
     return false;
   }
-  return tunQueueFlush(poller) == 0;
+  ok = tunQueueFlush(poller) == 0;
+  tunSyncHeaderFromLegacy(poller);
+  return ok;
 }
 
 bool ioTcpSetReadEnabled(ioTcpPoller_t *poller, bool enabled) {
+  bool ok;
   if (poller == NULL) {
     return false;
   }
-  return pollerSetReadEnabled(tcpQueueState(poller), enabled);
+  ok = pollerSetReadEnabled(tcpQueueState(poller), enabled);
+  if (poller->poller.callbacks != NULL) {
+    tcpSyncLegacyFromHeader(poller);
+  } else {
+    tcpSyncHeaderFromLegacy(poller);
+  }
+  return ok;
 }
 
 bool ioTunSetReadEnabled(ioTunPoller_t *poller, bool enabled) {
+  bool ok;
   if (poller == NULL) {
     return false;
   }
-  return tunSetReadEnabled(poller, enabled);
+  ok = tunSetReadEnabled(poller, enabled);
+  tunSyncHeaderFromLegacy(poller);
+  return ok;
 }
 
 long ioTcpQueuedBytes(const ioTcpPoller_t *poller) {

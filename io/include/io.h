@@ -31,6 +31,8 @@ typedef enum {
 typedef struct ioReactor_t ioReactor_t;
 typedef struct ioPoller_t ioPoller_t;
 typedef struct ioListenPoller_t ioListenPoller_t;
+typedef struct ioTcpPoller_t ioTcpPoller_t;
+typedef struct ioTunPoller_t ioTunPoller_t;
 
 typedef enum {
   ioPollerContinue = 0,
@@ -54,6 +56,7 @@ typedef enum {
 typedef ioPollerAction_t (*ioClosedFn_t)(void *ctx, ioPoller_t *poller);
 typedef ioPollerAction_t (*ioLowWatermarkFn_t)(void *ctx, ioPoller_t *poller, long queuedBytes);
 typedef ioPollerAction_t (*ioReadableFn_t)(void *ctx, ioReactor_t *reactor, ioPoller_t *poller);
+typedef ioPollerAction_t (*ioListenReadableFn_t)(void *ctx, ioReactor_t *reactor, ioListenPoller_t *listenPoller);
 
 typedef struct {
   ioClosedFn_t onClosed;
@@ -80,16 +83,18 @@ struct ioListenPoller_t {
   int listenFd;
 };
 
-typedef struct {
+struct ioTcpPoller_t {
+  ioPoller_t poller;
   int epollFd;
   int tcpFd;
   unsigned int events;
   long outOffset;
   long outNbytes;
   unsigned char outBuf[IoPollerQueueCapacity];
-} ioTcpPoller_t;
+};
 
-typedef struct {
+struct ioTunPoller_t {
+  ioPoller_t poller;
   int epollFd;
   int tunFd;
   unsigned int events;
@@ -104,7 +109,7 @@ typedef struct {
     long nbytes;
   } frames[IoTunQueueFrameCapacity];
   unsigned char outBuf[IoPollerQueueCapacity];
-} ioTunPoller_t;
+};
 
 typedef enum {
   ioSourceTun = 0,
@@ -131,6 +136,15 @@ int ioTcpListen(const char *listenIP, int port);
 int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort);
 ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort);
 int ioTcpConnect(const char *remoteIP, int port);
+bool ioListenPollerListen(ioListenPoller_t *poller, const char *listenIP, int port);
+ioStatus_t ioListenPollerAcceptNonBlocking(
+    ioListenPoller_t *listenPoller,
+    ioTcpPoller_t *outTcpPoller,
+    char *peerIp,
+    long peerIpSize,
+    int *peerPort);
+bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port);
+bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode);
 
 int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd);
 int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd);

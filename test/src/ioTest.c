@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/epoll.h>
@@ -416,6 +417,8 @@ typedef struct {
   int closedCalls;
   int readableCalls;
   int lowWatermarkCalls;
+  char order[16];
+  int orderLen;
 } reactorCallbackCounts_t;
 
 static ioPollerAction_t reactorReadableStop(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
@@ -438,6 +441,22 @@ static ioPollerAction_t reactorReadableCount(void *ctx, ioReactor_t *reactor, io
   (void)reactor;
   (void)poller;
   counts->readableCalls++;
+  if (counts->orderLen < (int)sizeof(counts->order) - 1) {
+    counts->order[counts->orderLen++] = 'R';
+    counts->order[counts->orderLen] = '\0';
+  }
+  return ioPollerContinue;
+}
+
+static ioPollerAction_t reactorLowWatermarkCount(void *ctx, ioPoller_t *poller, long queuedBytes) {
+  reactorCallbackCounts_t *counts = ctx;
+  (void)poller;
+  (void)queuedBytes;
+  counts->lowWatermarkCalls++;
+  if (counts->orderLen < (int)sizeof(counts->order) - 1) {
+    counts->order[counts->orderLen++] = 'L';
+    counts->order[counts->orderLen] = '\0';
+  }
   return ioPollerContinue;
 }
 
@@ -494,6 +513,79 @@ static void testIoReactorStepRemoveStopsCallbackChain(void) {
   close(socketFds[0]);
 }
 
+static void testIoPollerHeadersAndLowWatermarkEdge(void) {
+  ioReactor_t reactor;
+  ioTcpPoller_t tcpPoller;
+  ioPollerCallbacks_t callbacks = {0};
+  reactorCallbackCounts_t counts = {0};
+  int socketFds[2];
+  static char payload[IoPollerLowWatermark + 1];
+  char peerBuf[sizeof(payload)];
+  int attempts;
+
+  testAssertTrue(offsetof(ioListenPoller_t, poller) == 0, "listen poller should embed shared poller header first");
+  testAssertTrue(offsetof(ioTcpPoller_t, poller) == 0, "tcp poller should embed shared poller header first");
+  testAssertTrue(offsetof(ioTunPoller_t, poller) == 0, "tun poller should embed shared poller header first");
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&tcpPoller, 0, sizeof(tcpPoller));
+  tcpPoller.epollFd = -1;
+  tcpPoller.tcpFd = socketFds[0];
+  tcpPoller.events = EPOLLRDHUP;
+  tcpPoller.poller.kind = ioPollerTcp;
+  tcpPoller.poller.fd = socketFds[0];
+  tcpPoller.poller.events = tcpPoller.events;
+
+  callbacks.onLowWatermark = reactorLowWatermarkCount;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &tcpPoller.poller, &callbacks, &counts, true),
+      "tcp poller add should succeed");
+
+  memset(payload, 'p', sizeof(payload));
+  testAssertTrue(ioTcpWrite(&tcpPoller, payload, sizeof(payload)), "tcp queue write should succeed");
+  for (attempts = 0; attempts < 5 && counts.lowWatermarkCalls == 0; attempts++) {
+    testAssertTrue(ioReactorStep(&reactor, 50) == ioReactorStepReady, "reactor step should process writable events");
+  }
+  testAssertTrue(counts.lowWatermarkCalls == 1, "low-watermark callback should fire once on crossing edge");
+  testAssertTrue(strcmp(counts.order, "L") == 0, "low-watermark callback should run first in writable flow");
+  testAssertTrue(read(socketFds[1], peerBuf, sizeof(peerBuf)) == (long)sizeof(payload), "peer should receive queued payload");
+  testAssertTrue(ioReactorStep(&reactor, 20) == ioReactorStepTimeout, "no repeated low-watermark callback when already below threshold");
+  testAssertTrue(counts.lowWatermarkCalls == 1, "low-watermark callback should be edge-triggered");
+
+  ioReactorDeinit(&reactor);
+  close(socketFds[0]);
+  close(socketFds[1]);
+}
+
+static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
+  ioListenPoller_t listenPoller;
+  ioTcpPoller_t acceptedPoller;
+  int clientFd = -1;
+  ioStatus_t status;
+
+  testAssertTrue(ioListenPollerListen(&listenPoller, "127.0.0.1", 46111), "listen poller listen should succeed");
+  clientFd = ioTcpConnect("127.0.0.1", 46111);
+  testAssertTrue(clientFd >= 0, "client connect should succeed");
+
+  status = ioListenPollerAcceptNonBlocking(&listenPoller, &acceptedPoller, NULL, 0, NULL);
+  if (status == ioStatusWouldBlock) {
+    usleep(1000);
+    status = ioListenPollerAcceptNonBlocking(&listenPoller, &acceptedPoller, NULL, 0, NULL);
+  }
+
+  testAssertTrue(status == ioStatusOk, "listen accept non-blocking should accept pending connection");
+  testAssertTrue(acceptedPoller.tcpFd >= 0, "accepted tcp poller should contain accepted fd");
+  testAssertTrue(acceptedPoller.epollFd == -1, "accepted tcp poller should start detached from epoll");
+  testAssertTrue(acceptedPoller.poller.kind == ioPollerTcp, "accepted poller kind should be tcp");
+  testAssertTrue(acceptedPoller.poller.fd == acceptedPoller.tcpFd, "accepted poller fd should match tcp fd");
+
+  close(clientFd);
+  close(acceptedPoller.tcpFd);
+  close(listenPoller.listenFd);
+}
+
 void runIoTests(void) {
   testIoReadSomeOk();
   testIoReadSomeClosed();
@@ -516,4 +608,6 @@ void runIoTests(void) {
   testIoReactorInitAndAddPoller();
   testIoReactorStepTimeoutAndStop();
   testIoReactorStepRemoveStopsCallbackChain();
+  testIoPollerHeadersAndLowWatermarkEdge();
+  testIoListenPollerAcceptNonBlockingInitializesTcpPoller();
 }
