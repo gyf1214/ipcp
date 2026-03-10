@@ -15,8 +15,13 @@ typedef struct client_t {
   ioReactor_t reactor;
   ioTunPoller_t *tunPoller;
   ioTcpPoller_t *tcpPoller;
+  session_t *session;
+  const unsigned char *claim;
+  long claimNbytes;
+  const unsigned char *key;
   protocolDecoder_t rawDecoder;
   clientPreAuthState_t preAuthState;
+  bool runStop;
   bool runFailed;
   bool tunReadPaused;
   long runtimeOverflowNbytes;

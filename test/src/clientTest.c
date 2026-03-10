@@ -848,10 +848,10 @@ static void testClientHeartbeatBlockedReqEventuallyTracksPendingForAck(void) {
       clientServiceBackpressure(
           &client,
           session,
-          ioEventTcpWrite,
+          ioEventTimeout,
           key),
-      "client backpressure service should retry heartbeat request on tcp write");
-  testAssertTrue(client.heartbeatAckPending, "client should track pending heartbeat after tcp write retry queues request");
+      "client backpressure service should retry heartbeat request on timeout when queue is available");
+  testAssertTrue(client.heartbeatAckPending, "client should track pending heartbeat after timeout retry queues request");
 
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatAck, NULL, 0, wire);
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
