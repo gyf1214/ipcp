@@ -25,6 +25,10 @@ void clientResetHeartbeatState(
   client->lastHeartbeatReqMs = nowMs;
   client->lastDataSentMs = nowMs;
   client->lastDataRecvMs = nowMs;
+  client->reactor.epollFd = -1;
+  protocolDecoderInit(&client->rawDecoder);
+  client->preAuthState = clientPreAuthSendClaim;
+  client->runFailed = false;
   client->tunReadPaused = false;
   client->runtimeOverflowNbytes = 0;
   memset(client->runtimeOverflowBuf, 0, sizeof(client->runtimeOverflowBuf));

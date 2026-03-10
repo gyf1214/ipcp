@@ -3,9 +3,21 @@
 #include "protocol.h"
 #include "sessionInternal.h"
 
+typedef enum {
+  clientPreAuthSendClaim = 0,
+  clientPreAuthAwaitChallenge,
+  clientPreAuthSendHello,
+  clientPreAuthReady,
+  clientPreAuthFailed,
+} clientPreAuthState_t;
+
 typedef struct client_t {
+  ioReactor_t reactor;
   ioTunPoller_t *tunPoller;
   ioTcpPoller_t *tcpPoller;
+  protocolDecoder_t rawDecoder;
+  clientPreAuthState_t preAuthState;
+  bool runFailed;
   bool tunReadPaused;
   long runtimeOverflowNbytes;
   char runtimeOverflowBuf[ProtocolFrameSize];

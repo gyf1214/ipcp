@@ -418,6 +418,32 @@ static void testClientSessionRuntimeWiringAcceptsClientContext(void) {
   sessionDestroy(session);
 }
 
+static void testClientResetHeartbeatStateInitializesRuntimeScaffold(void) {
+  splitPollersFixture_t poller;
+  int tunPair[2];
+  int tcpPair[2];
+  client_t client;
+
+  setupPairs(tunPair, tcpPair);
+  testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
+  memset(&client, 0, sizeof(client));
+  client.tunPoller = &poller.tunPoller;
+  client.tcpPoller = &poller.tcpPoller;
+  client.preAuthState = clientPreAuthFailed;
+  client.runFailed = true;
+
+  clientResetHeartbeatState(&client, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs, 11);
+  testAssertTrue(client.preAuthState == clientPreAuthSendClaim, "client runtime state should reset to send-claim");
+  testAssertTrue(!client.runFailed, "client runtime reset should clear run-failed flag");
+  testAssertTrue(client.reactor.epollFd == -1, "client runtime reset should clear embedded reactor fd");
+
+  teardownSplitPollers(&poller);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
 static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
   splitPollersFixture_t poller;
   int tunPair[2];
@@ -881,6 +907,7 @@ void runClientTests(void) {
   testClientServeConnFailsOnInvalidChallengeLength();
   testClientServeConnHandshakeAndStopOnPeerClose();
   testClientSessionRuntimeWiringAcceptsClientContext();
+  testClientResetHeartbeatStateInitializesRuntimeScaffold();
   testClientQueueBackpressureBlocksAndStoresPendingPayload();
   testClientInboundHandlerAcceptsHeartbeatAckAndRefreshesTimestamp();
   testClientHeartbeatTickSetsPendingAndTimestamps();
