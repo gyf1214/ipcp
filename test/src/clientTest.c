@@ -756,6 +756,99 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   close(tcpPair[1]);
 }
 
+static void testClientTunReadQueuesEncryptedTcpFrame(void) {
+  unsigned char key[ProtocolPskSize];
+  splitPollersFixture_t poller;
+  client_t client;
+  int tunPair[2];
+  int tcpPair[2];
+  char out[ProtocolFrameSize];
+  long nbytes;
+  protocolDecoder_t decoder;
+  protocolMessage_t msg;
+  long consumed = 0;
+  const char payload[] = "tun-payload";
+  ioEvent_t event;
+
+  memset(key, 0x44, sizeof(key));
+  setupPairs(tunPair, tcpPair);
+  testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
+  fakeNowMs = 0;
+  session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+  wireClientSession(session, &poller, &client);
+
+  testAssertTrue(
+      write(tunPair[1], payload, strlen(payload)) == (ssize_t)strlen(payload),
+      "tun write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTunRead), "reactor callback should capture tun readable event");
+  event = ioEventTunRead;
+  testAssertTrue(
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
+      "tun read event should continue");
+  testAssertTrue(ioTcpServiceWriteEvent(&poller.tcpPoller), "tcp write service should flush payload");
+
+  nbytes = read(tcpPair[1], out, sizeof(out));
+  testAssertTrue(nbytes > 0, "tcp peer should receive encrypted wire frame");
+
+  protocolDecoderInit(&decoder);
+  testAssertTrue(
+      protocolDecodeSecureMsg(&decoder, key, out, nbytes, &consumed, &msg) == protocolStatusOk,
+      "received wire frame should decode");
+  testAssertTrue(msg.type == protocolMsgData, "decoded message type should be data");
+  testAssertTrue(msg.nbytes == (long)strlen(payload), "decoded payload length should match");
+  testAssertTrue(memcmp(msg.buf, payload, strlen(payload)) == 0, "decoded payload should match");
+
+  sessionDestroy(session);
+  teardownSplitPollers(&poller);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
+static void testClientTcpReadQueuesTunWrite(void) {
+  unsigned char key[ProtocolPskSize];
+  splitPollersFixture_t poller;
+  client_t client;
+  int tunPair[2];
+  int tcpPair[2];
+  char wire[ProtocolFrameSize];
+  long wireNbytes;
+  char out[128];
+  const char payload[] = "tcp-payload";
+  ioEvent_t event;
+
+  memset(key, 0x45, sizeof(key));
+  setupPairs(tunPair, tcpPair);
+  testAssertTrue(setupSplitPollers(&poller, tunPair[0], tcpPair[0]) == 0, "setup split pollers should succeed");
+  fakeNowMs = 0;
+  session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
+  testAssertTrue(session != NULL, "session create should succeed");
+  wireClientSession(session, &poller, &client);
+
+  wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)strlen(payload), wire);
+  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(waitCapturedEventOfKind(&poller, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
+  event = ioEventTcpRead;
+  testAssertTrue(
+      runSessionStep(session, &poller, event, key) == sessionStepContinue,
+      "tcp read event should continue");
+  testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "tun write service should flush payload");
+
+  testAssertTrue(
+      recv(tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (ssize_t)strlen(payload),
+      "tun peer should receive payload");
+  testAssertTrue(memcmp(out, payload, strlen(payload)) == 0, "tun payload should match");
+
+  sessionDestroy(session);
+  teardownSplitPollers(&poller);
+  close(tunPair[0]);
+  close(tunPair[1]);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+}
+
 static void testClientHeartbeatStillSendsWhenInboundRecentlyActive(void) {
   unsigned char key[ProtocolPskSize];
   splitPollersFixture_t poller;
@@ -936,6 +1029,8 @@ void runClientTests(void) {
   testClientHeartbeatUsesConfiguredInterval();
   testClientHeartbeatTimeoutUsesConfiguredTimeout();
   testClientHeartbeatRequestAndAckFlow();
+  testClientTunReadQueuesEncryptedTcpFrame();
+  testClientTcpReadQueuesTunWrite();
   testClientHeartbeatStillSendsWhenInboundRecentlyActive();
   testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds();
   testClientHeartbeatBlockedReqEventuallyTracksPendingForAck();
