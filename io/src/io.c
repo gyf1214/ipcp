@@ -330,6 +330,71 @@ bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled) {
   return true;
 }
 
+static ioReactorStepResult_t ioReactorApplyAction(ioPoller_t *poller, ioPollerAction_t action, bool *removed) {
+  if (action == ioPollerContinue) {
+    return ioReactorStepReady;
+  }
+  if (action == ioPollerStop) {
+    return ioReactorStepStop;
+  }
+  if (action == ioPollerRemove) {
+    if (epoll_ctl(poller->epollFd, EPOLL_CTL_DEL, poller->fd, NULL) < 0) {
+      return ioReactorStepError;
+    }
+    poller->epollFd = -1;
+    *removed = true;
+    return ioReactorStepReady;
+  }
+  return ioReactorStepError;
+}
+
+ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs) {
+  struct epoll_event events[8];
+  int n;
+  int i;
+
+  if (reactor == NULL || reactor->epollFd < 0) {
+    return ioReactorStepError;
+  }
+
+  n = epoll_wait(reactor->epollFd, events, (int)(sizeof(events) / sizeof(events[0])), timeoutMs);
+  if (n < 0) {
+    return ioReactorStepError;
+  }
+  if (n == 0) {
+    return ioReactorStepTimeout;
+  }
+
+  for (i = 0; i < n; i++) {
+    ioPoller_t *poller = (ioPoller_t *)events[i].data.ptr;
+    ioReactorStepResult_t result;
+    bool removed = false;
+
+    if (poller == NULL || poller->callbacks == NULL) {
+      return ioReactorStepError;
+    }
+
+    if ((events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0 && poller->callbacks->onClosed != NULL) {
+      result = ioReactorApplyAction(poller, poller->callbacks->onClosed(poller->ctx, poller), &removed);
+      if (result == ioReactorStepStop || result == ioReactorStepError) {
+        return result;
+      }
+      if (removed) {
+        continue;
+      }
+    }
+
+    if ((events[i].events & EPOLLIN) != 0 && poller->callbacks->onReadable != NULL) {
+      result = ioReactorApplyAction(poller, poller->callbacks->onReadable(poller->ctx, reactor, poller), &removed);
+      if (result == ioReactorStepStop || result == ioReactorStepError) {
+        return result;
+      }
+    }
+  }
+
+  return ioReactorStepReady;
+}
+
 ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes) {
   long nbytes;
 

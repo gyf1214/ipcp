@@ -412,6 +412,88 @@ static void testIoReactorInitAndAddPoller(void) {
   close(pipeFds[1]);
 }
 
+typedef struct {
+  int closedCalls;
+  int readableCalls;
+  int lowWatermarkCalls;
+} reactorCallbackCounts_t;
+
+static ioPollerAction_t reactorReadableStop(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
+  reactorCallbackCounts_t *counts = ctx;
+  (void)reactor;
+  (void)poller;
+  counts->readableCalls++;
+  return ioPollerStop;
+}
+
+static ioPollerAction_t reactorClosedRemove(void *ctx, ioPoller_t *poller) {
+  reactorCallbackCounts_t *counts = ctx;
+  (void)poller;
+  counts->closedCalls++;
+  return ioPollerRemove;
+}
+
+static ioPollerAction_t reactorReadableCount(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
+  reactorCallbackCounts_t *counts = ctx;
+  (void)reactor;
+  (void)poller;
+  counts->readableCalls++;
+  return ioPollerContinue;
+}
+
+static void testIoReactorStepTimeoutAndStop(void) {
+  ioReactor_t reactor;
+  ioPoller_t poller;
+  ioPollerCallbacks_t callbacks = {0};
+  reactorCallbackCounts_t counts = {0};
+  int pipeFds[2];
+
+  testAssertTrue(pipe(pipeFds) == 0, "pipe should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  callbacks.onReadable = reactorReadableStop;
+  memset(&poller, 0, sizeof(poller));
+  poller.fd = pipeFds[0];
+  poller.kind = ioPollerListen;
+  testAssertTrue(ioReactorAddPoller(&reactor, &poller, &callbacks, &counts, true), "poller add should succeed");
+  testAssertTrue(ioReactorStep(&reactor, 5) == ioReactorStepTimeout, "idle step should timeout");
+
+  testAssertTrue(write(pipeFds[1], "x", 1) == 1, "test producer write should succeed");
+  testAssertTrue(ioReactorStep(&reactor, 50) == ioReactorStepStop, "readable stop action should stop reactor step");
+  testAssertTrue(counts.readableCalls == 1, "readable callback should run once");
+
+  ioReactorDeinit(&reactor);
+  close(pipeFds[0]);
+  close(pipeFds[1]);
+}
+
+static void testIoReactorStepRemoveStopsCallbackChain(void) {
+  ioReactor_t reactor;
+  ioPoller_t poller;
+  ioPollerCallbacks_t callbacks = {0};
+  reactorCallbackCounts_t counts = {0};
+  int socketFds[2];
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  callbacks.onClosed = reactorClosedRemove;
+  callbacks.onReadable = reactorReadableCount;
+  memset(&poller, 0, sizeof(poller));
+  poller.fd = socketFds[0];
+  poller.kind = ioPollerListen;
+  testAssertTrue(ioReactorAddPoller(&reactor, &poller, &callbacks, &counts, true), "poller add should succeed");
+
+  close(socketFds[1]);
+  testAssertTrue(ioReactorStep(&reactor, 100) == ioReactorStepReady, "closed-remove path should return ready");
+  testAssertTrue(counts.closedCalls == 1, "closed callback should run once");
+  testAssertTrue(counts.readableCalls == 0, "remove action should stop callback chain");
+  testAssertTrue(!ioReactorSetPollerReadEnabled(&poller, false), "removed poller should no longer support epoll mod");
+
+  ioReactorDeinit(&reactor);
+  close(socketFds[0]);
+}
+
 void runIoTests(void) {
   testIoReadSomeOk();
   testIoReadSomeClosed();
@@ -432,4 +514,6 @@ void runIoTests(void) {
   testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty();
   testIoReactorPublicContracts();
   testIoReactorInitAndAddPoller();
+  testIoReactorStepTimeoutAndStop();
+  testIoReactorStepRemoveStopsCallbackChain();
 }

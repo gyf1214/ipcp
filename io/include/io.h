@@ -124,6 +124,7 @@ bool ioReactorAddPoller(
     void *ctx,
     bool readEnabled);
 bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled);
+ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs);
 
 int ioTunOpen(const char *ifName, ioIfMode_t mode);
 int ioTcpListen(const char *listenIP, int port);
