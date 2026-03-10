@@ -210,103 +210,6 @@ static void testSessionRunClientRejectsInvalidConfig(void) {
   testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject heartbeat timeout <= interval");
 }
 
-static void testClientWriteRawMsgWritesValidWireFrame(void) {
-  int tcpPair[2];
-  protocolRawMsg_t rawMsg;
-  protocolFrame_t frame;
-  protocolRawMsg_t decoded;
-  protocolDecoder_t decoder;
-  long consumed = 0;
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
-  rawMsg.buf = "claim-data";
-  rawMsg.nbytes = (long)strlen(rawMsg.buf);
-  testAssertTrue(clientWriteRawMsg(tcpPair[0], &rawMsg) == 0, "clientWriteRawMsg should succeed");
-
-  testAssertTrue(readWireFrame(tcpPair[1], &frame) == 0, "read wire frame should succeed");
-  protocolDecoderInit(&decoder);
-  consumed = 0;
-  testAssertTrue(
-      protocolDecodeRaw(&decoder, frame.buf, frame.nbytes, &consumed, &decoded) == protocolStatusOk,
-      "raw wire should decode");
-  testAssertTrue(decoded.nbytes == rawMsg.nbytes, "decoded nbytes should match");
-  testAssertTrue(memcmp(decoded.buf, rawMsg.buf, (size_t)rawMsg.nbytes) == 0, "decoded payload should match");
-
-  close(tcpPair[0]);
-  close(tcpPair[1]);
-}
-
-static void testClientReadRawMsgSyncReadsValidWireFrame(void) {
-  int tcpPair[2];
-  protocolRawMsg_t rawMsg;
-  protocolRawMsg_t decoded;
-  protocolFrame_t frame;
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
-  rawMsg.buf = "challenge";
-  rawMsg.nbytes = (long)strlen(rawMsg.buf);
-  testAssertTrue(protocolEncodeRaw(&rawMsg, &frame) == protocolStatusOk, "raw encode should succeed");
-  testAssertTrue(writeWireFrame(tcpPair[1], &frame) == 0, "write raw wire frame should succeed");
-  testAssertTrue(clientReadRawMsg(tcpPair[0], &decoded) == 0, "clientReadRawMsg should succeed");
-  testAssertTrue(decoded.nbytes == rawMsg.nbytes, "decoded nbytes should match");
-  testAssertTrue(memcmp(decoded.buf, rawMsg.buf, (size_t)rawMsg.nbytes) == 0, "decoded payload should match");
-
-  close(tcpPair[0]);
-  close(tcpPair[1]);
-}
-
-static void testClientWriteSecureMsgWritesDecodablePayload(void) {
-  int tcpPair[2];
-  protocolMessage_t msg;
-  protocolFrame_t frame;
-  protocolMessage_t decoded;
-  protocolDecoder_t decoder;
-  long consumed = 0;
-  const char payload[] = "hello";
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
-  msg.type = protocolMsgData;
-  msg.buf = payload;
-  msg.nbytes = (long)sizeof(payload);
-  testAssertTrue(clientWriteSecureMsg(tcpPair[0], &msg, testClientKey) == 0, "clientWriteSecureMsg should succeed");
-
-  testAssertTrue(readWireFrame(tcpPair[1], &frame) == 0, "read wire frame should succeed");
-  protocolDecoderInit(&decoder);
-  consumed = 0;
-  testAssertTrue(
-      protocolDecodeSecureMsg(&decoder, testClientKey, frame.buf, frame.nbytes, &consumed, &decoded)
-          == protocolStatusOk,
-      "secure wire should decode");
-  testAssertTrue(decoded.type == msg.type, "decoded type should match");
-  testAssertTrue(decoded.nbytes == msg.nbytes, "decoded nbytes should match");
-  testAssertTrue(memcmp(decoded.buf, msg.buf, (size_t)msg.nbytes) == 0, "decoded payload should match");
-
-  close(tcpPair[0]);
-  close(tcpPair[1]);
-}
-
-static void testClientReadSecureMsgSyncReadsValidWireFrame(void) {
-  int tcpPair[2];
-  protocolMessage_t msg;
-  protocolMessage_t decoded;
-  protocolFrame_t frame;
-  const char payload[] = "hello-secure";
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
-  msg.type = protocolMsgData;
-  msg.buf = payload;
-  msg.nbytes = (long)strlen(payload);
-  testAssertTrue(protocolEncodeSecureMsg(&msg, testClientKey, &frame) == protocolStatusOk, "secure encode should succeed");
-  testAssertTrue(writeWireFrame(tcpPair[1], &frame) == 0, "write secure wire frame should succeed");
-  testAssertTrue(clientReadSecureMsg(tcpPair[0], testClientKey, &decoded) == 0, "clientReadSecureMsg should succeed");
-  testAssertTrue(decoded.type == msg.type, "decoded type should match");
-  testAssertTrue(decoded.nbytes == msg.nbytes, "decoded nbytes should match");
-  testAssertTrue(memcmp(decoded.buf, msg.buf, (size_t)msg.nbytes) == 0, "decoded payload should match");
-
-  close(tcpPair[0]);
-  close(tcpPair[1]);
-}
-
 static void testClientServeConnFailsOnInvalidChallengeLength(void) {
   int tunPair[2];
   int tcpPair[2];
@@ -898,10 +801,6 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
 }
 
 void runClientTests(void) {
-  testClientWriteRawMsgWritesValidWireFrame();
-  testClientReadRawMsgSyncReadsValidWireFrame();
-  testClientWriteSecureMsgWritesDecodablePayload();
-  testClientReadSecureMsgSyncReadsValidWireFrame();
   testClientServeConnRejectsInvalidArgs();
   testSessionRunClientRejectsInvalidConfig();
   testClientServeConnFailsOnInvalidChallengeLength();

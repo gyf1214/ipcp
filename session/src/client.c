@@ -304,104 +304,6 @@ bool clientServiceBackpressure(
   return true;
 }
 
-static int writeAll(int fd, const void *buf, long nbytes) {
-  long offset = 0;
-  while (offset < nbytes) {
-    ssize_t n = write(fd, (const char *)buf + offset, (size_t)(nbytes - offset));
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    if (n == 0) {
-      return -1;
-    }
-    offset += (long)n;
-  }
-  return 0;
-}
-
-int clientReadRawMsg(int fd, protocolRawMsg_t *msg) {
-  char readBuf[ProtocolFrameSize];
-  protocolDecoder_t decoder;
-  long consumed = 0;
-
-  if (fd < 0 || msg == NULL) {
-    return -1;
-  }
-
-  protocolDecoderInit(&decoder);
-  while (1) {
-    ssize_t nread = read(fd, readBuf, sizeof(readBuf));
-    if (nread < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    if (nread == 0) {
-      return -1;
-    }
-
-    consumed = 0;
-    protocolStatus_t status = protocolDecodeRaw(&decoder, readBuf, (long)nread, &consumed, msg);
-    if (status == protocolStatusBadFrame) {
-      return -1;
-    }
-    if (status == protocolStatusNeedMore) {
-      if (consumed != (long)nread) {
-        return -1;
-      }
-      continue;
-    }
-    if (consumed != (long)nread) {
-      return -1;
-    }
-    return 0;
-  }
-}
-
-int clientReadSecureMsg(int fd, const unsigned char key[ProtocolPskSize], protocolMessage_t *msg) {
-  char readBuf[ProtocolFrameSize];
-  protocolDecoder_t decoder;
-  long consumed = 0;
-
-  if (fd < 0 || key == NULL || msg == NULL) {
-    return -1;
-  }
-
-  protocolDecoderInit(&decoder);
-  while (1) {
-    ssize_t nread = read(fd, readBuf, sizeof(readBuf));
-    if (nread < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
-    }
-    if (nread == 0) {
-      return -1;
-    }
-
-    consumed = 0;
-    protocolStatus_t status = protocolDecodeSecureMsg(&decoder, key, readBuf, (long)nread, &consumed, msg);
-    if (status == protocolStatusBadFrame) {
-      return -1;
-    }
-    if (status == protocolStatusNeedMore) {
-      if (consumed != (long)nread) {
-        return -1;
-      }
-      continue;
-    }
-    if (consumed != (long)nread) {
-      return -1;
-    }
-    return 0;
-  }
-}
-
 static ioPollerAction_t clientMarkRunStop(client_t *client, bool failed) {
   if (client == NULL) {
     return ioPollerStop;
@@ -591,31 +493,6 @@ static ioPollerAction_t clientOnTunLowWatermark(void *ctx, ioPoller_t *poller, l
     return clientMarkRunStop(client, true);
   }
   return ioPollerContinue;
-}
-
-int clientWriteRawMsg(int fd, const protocolRawMsg_t *msg) {
-  protocolFrame_t frame;
-
-  if (fd < 0 || msg == NULL || msg->buf == NULL || msg->nbytes <= 0) {
-    return -1;
-  }
-  if (protocolEncodeRaw(msg, &frame) != protocolStatusOk) {
-    return -1;
-  }
-  return writeAll(fd, frame.buf, frame.nbytes);
-}
-
-int clientWriteSecureMsg(
-    int fd, const protocolMessage_t *msg, const unsigned char key[ProtocolPskSize]) {
-  protocolFrame_t frame;
-
-  if (fd < 0 || msg == NULL || msg->buf == NULL || msg->nbytes <= 0 || key == NULL) {
-    return -1;
-  }
-  if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
-    return -1;
-  }
-  return writeAll(fd, frame.buf, frame.nbytes);
 }
 
 int clientServeConn(
