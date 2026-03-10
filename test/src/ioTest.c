@@ -533,12 +533,10 @@ static void testIoPollerHeadersAndLowWatermarkEdge(void) {
   testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
 
   memset(&tcpPoller, 0, sizeof(tcpPoller));
-  tcpPoller.epollFd = -1;
-  tcpPoller.tcpFd = socketFds[0];
-  tcpPoller.events = EPOLLRDHUP;
-  tcpPoller.poller.kind = ioPollerTcp;
+  tcpPoller.poller.epollFd = -1;
   tcpPoller.poller.fd = socketFds[0];
-  tcpPoller.poller.events = tcpPoller.events;
+  tcpPoller.poller.events = EPOLLRDHUP;
+  tcpPoller.poller.kind = ioPollerTcp;
 
   callbacks.onLowWatermark = reactorLowWatermarkCount;
   testAssertTrue(
@@ -561,7 +559,7 @@ static void testIoPollerHeadersAndLowWatermarkEdge(void) {
   close(socketFds[1]);
 }
 
-static void testIoReactorTcpWritableRearmGapAfterFlush(void) {
+static void testIoReactorTcpWritableRearmsAfterFlush(void) {
   ioReactor_t reactor;
   ioTcpPoller_t tcpPoller;
   ioPollerCallbacks_t callbacks = {0};
@@ -576,12 +574,10 @@ static void testIoReactorTcpWritableRearmGapAfterFlush(void) {
   testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
 
   memset(&tcpPoller, 0, sizeof(tcpPoller));
-  tcpPoller.epollFd = -1;
-  tcpPoller.tcpFd = socketFds[0];
-  tcpPoller.events = EPOLLRDHUP;
-  tcpPoller.poller.kind = ioPollerTcp;
+  tcpPoller.poller.epollFd = -1;
   tcpPoller.poller.fd = socketFds[0];
-  tcpPoller.poller.events = tcpPoller.events;
+  tcpPoller.poller.events = EPOLLRDHUP;
+  tcpPoller.poller.kind = ioPollerTcp;
 
   testAssertTrue(
       ioReactorAddPoller(&reactor, &tcpPoller.poller, &callbacks, NULL, true),
@@ -593,20 +589,21 @@ static void testIoReactorTcpWritableRearmGapAfterFlush(void) {
   }
   testAssertTrue(ioTcpQueuedBytes(&tcpPoller) == 0, "first write should fully flush");
   testAssertTrue(
-      (tcpPoller.poller.events & EPOLLOUT) != 0,
-      "reactor callback header should incorrectly retain writable interest after flush");
+      (tcpPoller.poller.events & EPOLLOUT) == 0,
+      "reactor callback header should clear writable interest after flush");
   testAssertTrue(read(socketFds[1], peerBuf, sizeof(payload)) == (long)sizeof(payload), "peer should read first payload");
 
   testAssertTrue(ioTcpWrite(&tcpPoller, payload, (long)sizeof(payload)), "second queue write should succeed");
-  testAssertTrue(
-      ioReactorStep(&reactor, 20) == ioReactorStepTimeout,
-      "second write stalls without manual write-service workaround");
+  for (attempts = 0; attempts < 5 && ioTcpQueuedBytes(&tcpPoller) > 0; attempts++) {
+    testAssertTrue(ioReactorStep(&reactor, 50) == ioReactorStepReady, "second writable drain should progress");
+  }
+  testAssertTrue(ioTcpQueuedBytes(&tcpPoller) == 0, "second write should fully flush via reactor");
 
   flags = fcntl(socketFds[1], F_GETFL, 0);
   testAssertTrue(flags >= 0, "peer flags fetch should succeed");
   testAssertTrue(fcntl(socketFds[1], F_SETFL, flags | O_NONBLOCK) == 0, "peer should become nonblocking");
-  nread = read(socketFds[1], peerBuf, sizeof(peerBuf));
-  testAssertTrue(nread < 0 && (errno == EAGAIN || errno == EWOULDBLOCK), "second payload should remain queued");
+  nread = read(socketFds[1], peerBuf, sizeof(payload));
+  testAssertTrue(nread == (long)sizeof(payload), "second payload should reach peer");
 
   ioReactorDeinit(&reactor);
   close(socketFds[0]);
@@ -630,14 +627,13 @@ static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
   }
 
   testAssertTrue(status == ioStatusOk, "listen accept non-blocking should accept pending connection");
-  testAssertTrue(acceptedPoller.tcpFd >= 0, "accepted tcp poller should contain accepted fd");
-  testAssertTrue(acceptedPoller.epollFd == -1, "accepted tcp poller should start detached from epoll");
+  testAssertTrue(acceptedPoller.poller.fd >= 0, "accepted tcp poller should contain accepted fd");
+  testAssertTrue(acceptedPoller.poller.epollFd == -1, "accepted tcp poller should start detached from epoll");
   testAssertTrue(acceptedPoller.poller.kind == ioPollerTcp, "accepted poller kind should be tcp");
-  testAssertTrue(acceptedPoller.poller.fd == acceptedPoller.tcpFd, "accepted poller fd should match tcp fd");
 
   close(clientFd);
-  close(acceptedPoller.tcpFd);
-  close(listenPoller.listenFd);
+  close(acceptedPoller.poller.fd);
+  close(listenPoller.poller.fd);
 }
 
 void runIoTests(void) {
@@ -663,6 +659,6 @@ void runIoTests(void) {
   testIoReactorStepTimeoutAndStop();
   testIoReactorStepRemoveStopsCallbackChain();
   testIoPollerHeadersAndLowWatermarkEdge();
-  testIoReactorTcpWritableRearmGapAfterFlush();
+  testIoReactorTcpWritableRearmsAfterFlush();
   testIoListenPollerAcceptNonBlockingInitializesTcpPoller();
 }

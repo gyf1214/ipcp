@@ -105,10 +105,18 @@ static sessionStepResult_t runSessionStepWithSuppressedStderr(
 static void wireServerSession(session_t *session, server_t *server, splitPollersFixture_t *poller) {
   memset(server, 0, sizeof(*server));
   testAssertTrue(
-      serverInit(server, poller->tunPoller.tunFd, poller->tcpPoller.tcpFd, 1, 1, &testHeartbeatCfg, NULL, NULL),
+      serverInit(
+          server,
+          poller->tunPoller.poller.fd,
+          poller->tcpPoller.poller.fd,
+          1,
+          1,
+          &testHeartbeatCfg,
+          NULL,
+          NULL),
       "server server init should succeed");
-  server->tunPoller.epollFd = poller->tunPoller.epollFd;
-  server->tunPoller.events = poller->tunPoller.events;
+  server->tunPoller.poller.epollFd = poller->tunPoller.poller.epollFd;
+  server->tunPoller.poller.events = poller->tunPoller.poller.events;
   sessionAttachServer(session, server);
 }
 
@@ -250,12 +258,12 @@ static void testServerRemoveClientClearsBorrowedPollerState(void) {
   testAssertTrue(
       serverAddClient(&server, 0, 160, testKey, claim2, sizeof(claim2)) == 0,
       "server should add active client");
-  testAssertTrue(server.activeConns[0].tcpPoller.tcpFd == 160, "active poller should borrow active connection fd");
+  testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == 160, "active poller should borrow active connection fd");
 
   testAssertTrue(serverRemoveClient(&server, 0), "remove should succeed");
-  testAssertTrue(server.activeConns[0].tcpPoller.tcpFd == -1, "remove should clear borrowed poller fd");
-  testAssertTrue(server.activeConns[0].tcpPoller.epollFd == -1, "remove should clear borrowed poller epoll fd");
-  testAssertTrue(server.activeConns[0].tcpPoller.events == 0, "remove should clear borrowed poller events");
+  testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == -1, "remove should clear borrowed poller fd");
+  testAssertTrue(server.activeConns[0].tcpPoller.poller.epollFd == -1, "remove should clear borrowed poller epoll fd");
+  testAssertTrue(server.activeConns[0].tcpPoller.poller.events == 0, "remove should clear borrowed poller events");
   testAssertTrue(server.activeConns[0].session == NULL, "remove should clear borrowed session reference");
 
   serverDeinit(&server);
@@ -383,7 +391,7 @@ static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
       "storing pending tun-to-tcp payload should succeed");
   testAssertTrue(serverHasPendingTunToTcp(&server), "server should report pending tun-to-tcp payload");
   testAssertTrue(serverPendingTunToTcpOwner(&server) == 0, "server should record pending owner slot");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "server should disable tun epollin while pending is active");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending is active");
 
   retry = serverRetryPendingTunToTcp(&server, 1, &server.activeConns[0].tcpPoller);
   testAssertTrue(retry == serverPendingRetryBlocked, "non-owner retry should be blocked");
@@ -398,7 +406,7 @@ static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
   testAssertTrue(
       serverSetTunReadEnabled(&server, true),
       "read interest should be re-enabled after pending payload clears");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) != 0, "server should enable tun epollin when requested");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "server should enable tun epollin when requested");
 
   serverDeinit(&server);
   close(tcpPair[0]);
@@ -841,8 +849,11 @@ static void setupServerForSessionTest(
       epoll_ctl(
           *epollFd,
           EPOLL_CTL_ADD,
-          server->tunPoller.tunFd,
-          &(struct epoll_event){.events = server->tunPoller.events, .data.fd = server->tunPoller.tunFd})
+          server->tunPoller.poller.fd,
+          &(struct epoll_event){
+              .events = server->tunPoller.poller.events,
+              .data.fd = server->tunPoller.poller.fd,
+          })
           == 0,
       "add tun fd should succeed");
 
@@ -853,7 +864,7 @@ static void setupServerForSessionTest(
           *epollFd,
           EPOLL_CTL_ADD,
           tcpPairA[0],
-          &(struct epoll_event){.events = server->activeConns[*slotA].tcpPoller.events, .data.fd = tcpPairA[0]})
+          &(struct epoll_event){.events = server->activeConns[*slotA].tcpPoller.poller.events, .data.fd = tcpPairA[0]})
           == 0,
       "add tcp A fd should succeed");
 
@@ -867,7 +878,7 @@ static void setupServerForSessionTest(
             *epollFd,
             EPOLL_CTL_ADD,
             tcpPairB[0],
-            &(struct epoll_event){.events = server->activeConns[*slotB].tcpPoller.events, .data.fd = tcpPairB[0]})
+            &(struct epoll_event){.events = server->activeConns[*slotB].tcpPoller.poller.events, .data.fd = tcpPairB[0]})
             == 0,
         "add tcp B fd should succeed");
   }
@@ -1110,7 +1121,7 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
       "session should continue on overflow");
   testAssertTrue(serverHasPendingTunToTcp(&server), "server overflow should retain pending data in server");
   testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending exists");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
 
   teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
@@ -1152,7 +1163,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       "overflow on owner should continue");
   testAssertTrue(serverHasPendingTunToTcp(&server), "owner overflow should store server pending bytes");
   testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending exists");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while server pending exists");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while server pending exists");
 
   testAssertTrue(
       runSessionStepSplit(otherSession, otherPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
@@ -1160,7 +1171,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(
       serverServiceBackpressure(&server, slotB, ioEventTcpWrite),
       "non-owner backpressure service should continue");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "non-owner should not consume server pending");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "non-owner should not consume server pending");
 
   ownerPoller->outOffset = 0;
   ownerPoller->outNbytes = IoPollerLowWatermark + 100;
@@ -1173,7 +1184,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   queued = ioTcpQueuedBytes(ownerPoller);
   testAssertTrue(queued > IoPollerLowWatermark, "owner queue should remain above low watermark");
   testAssertTrue(serverHasPendingTunToTcp(&server), "owner pending payload should remain while queue is above low watermark");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
 
   ownerPoller->outOffset = 0;
   ownerPoller->outNbytes = IoPollerLowWatermark;
@@ -1187,7 +1198,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       "owner backpressure service should continue at low watermark");
   testAssertTrue(!serverHasPendingTunToTcp(&server), "owner pending payload should clear once queue drains to low watermark");
   testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused at low watermark");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
 
   teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
@@ -1222,12 +1233,12 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
       runSessionStepSplit(session, poller, &server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
   testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending is active");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
 
   testAssertTrue(serverRemoveClient(&server, slotA), "owner removal should succeed");
   slotA = -1;
   testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused after owner drop");
-  testAssertTrue((server.tunPoller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
+  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
 
   teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }

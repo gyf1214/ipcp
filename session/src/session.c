@@ -257,7 +257,7 @@ static bool pipeTun(
     return false;
   }
 
-  status = ioTunRead(tunPoller->tunFd, payload, maxPayload, &nbytes);
+  status = ioTunRead(tunPoller->poller.fd, payload, maxPayload, &nbytes);
   if (status == ioStatusWouldBlock) {
     return true;
   }
@@ -323,7 +323,7 @@ static bool pipeTcpBytes(
 
     if (msg.type == protocolMsgData && session->isServer) {
       server_t *server = sessionServer(session);
-      if (!serverRouteTcpIngressPacket(server, tcpPoller->tcpFd, msg.buf, msg.nbytes)) {
+      if (!serverRouteTcpIngressPacket(server, tcpPoller->poller.fd, msg.buf, msg.nbytes)) {
         return false;
       }
       result = sessionQueueResultQueued;
@@ -381,7 +381,7 @@ static bool pipeTcp(
     session->tcpReadCarryNbytes = 0;
   }
 
-  readStatus = ioTcpRead(tcpPoller->tcpFd, session->tcpReadBuf, sizeof(session->tcpReadBuf), &nbytes);
+  readStatus = ioTcpRead(tcpPoller->poller.fd, session->tcpReadBuf, sizeof(session->tcpReadBuf), &nbytes);
   if (readStatus == ioStatusWouldBlock) {
     return true;
   }

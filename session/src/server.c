@@ -60,21 +60,21 @@ static const unsigned char *serverAuthoritativeKeySlotConst(const server_t *serv
 static bool runtimeTunEpollCtl(server_t *server, unsigned int events) {
   struct epoll_event event;
 
-  if (server == NULL || server->tunPoller.tunFd < 0) {
+  if (server == NULL || server->tunPoller.poller.fd < 0) {
     return false;
   }
   if (server->epollFd < 0) {
-    server->tunPoller.events = events;
+    server->tunPoller.poller.events = events;
     return true;
   }
 
   memset(&event, 0, sizeof(event));
   event.events = events;
-  event.data.fd = server->tunPoller.tunFd;
-  if (epoll_ctl(server->epollFd, EPOLL_CTL_MOD, server->tunPoller.tunFd, &event) < 0) {
+  event.data.fd = server->tunPoller.poller.fd;
+  if (epoll_ctl(server->epollFd, EPOLL_CTL_MOD, server->tunPoller.poller.fd, &event) < 0) {
     return false;
   }
-  server->tunPoller.events = events;
+  server->tunPoller.poller.events = events;
   return true;
 }
 
@@ -110,11 +110,13 @@ bool serverInit(
     return false;
   }
 
-  server->tunPoller.epollFd = -1;
-  server->tunPoller.tunFd = tunFd;
+  server->tunPoller.poller.epollFd = -1;
+  server->tunPoller.poller.fd = tunFd;
+  server->tunPoller.poller.kind = ioPollerTun;
   server->listenFd = listenFd;
   server->epollFd = -1;
-  server->tunPoller.events = EPOLLIN | EPOLLRDHUP;
+  server->tunPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  server->tunPoller.poller.readEnabled = true;
   server->tunPoller.readPos = 0;
   server->tunPoller.writePos = 0;
   server->tunPoller.queuedBytes = 0;
@@ -213,9 +215,11 @@ int serverAddClient(
   server->activeConns[activeSlot].connFd = connFd;
   server->activeConns[activeSlot].session = session;
   sessionAttachServer(session, server);
-  server->activeConns[activeSlot].tcpPoller.epollFd = server->epollFd;
-  server->activeConns[activeSlot].tcpPoller.tcpFd = connFd;
-  server->activeConns[activeSlot].tcpPoller.events = EPOLLIN | EPOLLRDHUP;
+  server->activeConns[activeSlot].tcpPoller.poller.epollFd = server->epollFd;
+  server->activeConns[activeSlot].tcpPoller.poller.fd = connFd;
+  server->activeConns[activeSlot].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  server->activeConns[activeSlot].tcpPoller.poller.kind = ioPollerTcp;
+  server->activeConns[activeSlot].tcpPoller.poller.readEnabled = true;
   server->activeConns[activeSlot].tcpPoller.outOffset = 0;
   server->activeConns[activeSlot].tcpPoller.outNbytes = 0;
   memset(server->activeConns[activeSlot].tcpPoller.outBuf, 0, sizeof(server->activeConns[activeSlot].tcpPoller.outBuf));
@@ -254,9 +258,10 @@ bool serverRemoveClient(server_t *server, int slot) {
     }
   }
   sessionDestroy(server->activeConns[slot].session);
-  server->activeConns[slot].tcpPoller.epollFd = -1;
-  server->activeConns[slot].tcpPoller.tcpFd = -1;
-  server->activeConns[slot].tcpPoller.events = 0;
+  server->activeConns[slot].tcpPoller.poller.epollFd = -1;
+  server->activeConns[slot].tcpPoller.poller.fd = -1;
+  server->activeConns[slot].tcpPoller.poller.events = 0;
+  server->activeConns[slot].tcpPoller.poller.readEnabled = false;
   server->activeConns[slot].tcpPoller.outOffset = 0;
   server->activeConns[slot].tcpPoller.outNbytes = 0;
   memset(server->activeConns[slot].tcpPoller.outBuf, 0, sizeof(server->activeConns[slot].tcpPoller.outBuf));
@@ -418,13 +423,13 @@ bool serverSetTunReadEnabled(server_t *server, bool enabled) {
     return false;
   }
 
-  nextEvents = server->tunPoller.events;
+  nextEvents = server->tunPoller.poller.events;
   if (enabled) {
     nextEvents |= EPOLLIN;
   } else {
     nextEvents &= ~EPOLLIN;
   }
-  if (nextEvents == server->tunPoller.events) {
+  if (nextEvents == server->tunPoller.poller.events) {
     server->tunReadPaused = !enabled;
     return true;
   }
@@ -529,7 +534,7 @@ sessionQueueResult_t serverQueueTcpWithBackpressure(
     return sessionQueueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
-    ownerSlot = serverFindSlotByFd(server, tcpPoller->tcpFd);
+    ownerSlot = serverFindSlotByFd(server, tcpPoller->poller.fd);
     if (ownerSlot < 0) {
       return sessionQueueResultError;
     }
@@ -615,7 +620,7 @@ sessionQueueResult_t serverHandleInboundMessage(
     return sessionQueueResultError;
   }
   if (msg->type == protocolMsgHeartbeatReq) {
-    int slot = serverFindSlotByFd(server, tcpPoller->tcpFd);
+    int slot = serverFindSlotByFd(server, tcpPoller->poller.fd);
     sessionQueueResult_t result;
     if (slot < 0) {
       return sessionQueueResultError;
@@ -1157,8 +1162,12 @@ static bool serverDispatchPreAuth(
       return false;
     }
     activeConnFd = serverConnFdAt(server, activeSlot);
-    server->activeConns[activeSlot].tcpPoller.epollFd = server->epollFd;
-    if (!serverEpollCtl(server->epollFd, EPOLL_CTL_MOD, activeConnFd, server->activeConns[activeSlot].tcpPoller.events)) {
+    server->activeConns[activeSlot].tcpPoller.poller.epollFd = server->epollFd;
+    if (!serverEpollCtl(
+            server->epollFd,
+            EPOLL_CTL_MOD,
+            activeConnFd,
+            server->activeConns[activeSlot].tcpPoller.poller.events)) {
       close(activeConnFd);
       (void)serverRemoveClient(server, activeSlot);
       return false;
@@ -1577,7 +1586,7 @@ static bool serverHandleTunRead(server_t *server) {
     return false;
   }
 
-  status = ioTunRead(server->tunPoller.tunFd, packet, maxPayload, &packetNbytes);
+  status = ioTunRead(server->tunPoller.poller.fd, packet, maxPayload, &packetNbytes);
   if (status == ioStatusWouldBlock) {
     return true;
   }
@@ -1668,10 +1677,10 @@ int serverServeMultiClient(
     return -1;
   }
   server.epollFd = epollFd;
-  server.tunPoller.epollFd = epollFd;
+  server.tunPoller.poller.epollFd = epollFd;
 
   if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, listenFd, EPOLLIN | EPOLLRDHUP)
-      || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, server.tunPoller.events)) {
+      || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, server.tunPoller.poller.events)) {
     goto cleanup;
   }
 

@@ -80,14 +80,10 @@ struct ioPoller_t {
 
 struct ioListenPoller_t {
   ioPoller_t poller;
-  int listenFd;
 };
 
 struct ioTcpPoller_t {
   ioPoller_t poller;
-  int epollFd;
-  int tcpFd;
-  unsigned int events;
   long outOffset;
   long outNbytes;
   unsigned char outBuf[IoPollerQueueCapacity];
@@ -95,9 +91,6 @@ struct ioTcpPoller_t {
 
 struct ioTunPoller_t {
   ioPoller_t poller;
-  int epollFd;
-  int tunFd;
-  unsigned int events;
   long readPos;
   long writePos;
   long queuedBytes;

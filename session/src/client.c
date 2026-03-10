@@ -578,21 +578,6 @@ int clientServeConn(
         break;
       }
     }
-    if (!ioTcpServiceWriteEvent(&tcpPoller)) {
-      client.runFailed = true;
-      break;
-    }
-    if (client.preAuthState == clientPreAuthReady) {
-      if (!ioTunServiceWriteEvent(&tunPoller)) {
-        client.runFailed = true;
-        break;
-      }
-      if (!clientServiceBackpressure(&client, session, ioEventTcpWrite, key)
-          || !clientServiceBackpressure(&client, session, ioEventTunWrite, key)) {
-        client.runFailed = true;
-        break;
-      }
-    }
     if (client.runStop) {
       break;
     }

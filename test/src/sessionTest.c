@@ -140,10 +140,18 @@ static void wireClientSession(session_t *session, splitPollersFixture_t *poller,
 static void wireServerSession(session_t *session, server_t *server, splitPollersFixture_t *poller) {
   memset(server, 0, sizeof(*server));
   testAssertTrue(
-      serverInit(server, poller->tunPoller.tunFd, poller->tcpPoller.tcpFd, 1, 1, &defaultHeartbeatCfg, NULL, NULL),
+      serverInit(
+          server,
+          poller->tunPoller.poller.fd,
+          poller->tcpPoller.poller.fd,
+          1,
+          1,
+          &defaultHeartbeatCfg,
+          NULL,
+          NULL),
       "server runtime init should succeed");
-  server->tunPoller.epollFd = poller->tunPoller.epollFd;
-  server->tunPoller.events = poller->tunPoller.events;
+  server->tunPoller.poller.epollFd = poller->tunPoller.poller.epollFd;
+  server->tunPoller.poller.events = poller->tunPoller.poller.events;
   sessionAttachServer(session, server);
 }
 
