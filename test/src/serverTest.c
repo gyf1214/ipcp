@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -792,7 +793,6 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
 
 static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   server_t server;
-  int epollFd = -1;
   int tunPair[2];
   int tcpPair[2];
   unsigned char toServer[] = {
@@ -806,12 +806,17 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   char peerBuf[64];
   ssize_t nread;
   int flags;
-  struct epoll_event event = {0};
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp pair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 91, 1, 1, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
   testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "slot should be active");
+  testAssertTrue(ioReactorInit(&server.reactor), "reactor init should succeed");
+  server.epollFd = server.reactor.epollFd;
+  server.tunPoller.poller.reactor = &server.reactor;
+  testAssertTrue(
+      ioReactorAddPoller(&server.reactor, &server.tunPoller.poller, &runtimeEventFixtureCallbacks, NULL, true),
+      "tun poller should be attached to reactor");
 
   server.mode = sessionIfModeTun;
   server.serverIdentity.claim[0] = 10;
@@ -819,15 +824,6 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   server.serverIdentity.claim[2] = 0;
   server.serverIdentity.claim[3] = 1;
   server.serverIdentity.claimNbytes = 4;
-
-  epollFd = epoll_create1(0);
-  testAssertTrue(epollFd >= 0, "epoll create should succeed");
-  server.epollFd = epollFd;
-  server.reactor.epollFd = epollFd;
-  server.tunPoller.poller.reactor = &server.reactor;
-  event.events = server.tunPoller.poller.events;
-  event.data.ptr = &server.tunPoller.poller;
-  testAssertTrue(epoll_ctl(epollFd, EPOLL_CTL_ADD, tunPair[0], &event) == 0, "tun fd should be registered");
 
   testAssertTrue(
       serverRouteTcpIngressPacket(&server, tcpPair[0], toServer, sizeof(toServer)),
@@ -844,7 +840,7 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   nread = read(tunPair[1], peerBuf, sizeof(peerBuf));
   testAssertTrue(nread == (ssize_t)sizeof(toServer), "explicit write service should flush queued payload");
 
-  close(epollFd);
+  ioReactorDispose(&server.reactor);
   serverDeinit(&server);
   close(tcpPair[0]);
   close(tcpPair[1]);
@@ -855,7 +851,6 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
 static void setupServerForSessionTest(
     server_t *server,
     int maxSessions,
-    int *epollFd,
     int tunPair[2],
     int tcpPairA[2],
     int tcpPairB[2],
@@ -867,57 +862,19 @@ static void setupServerForSessionTest(
       serverInit(server, tunPair[0], 72, maxSessions, maxSessions, &testHeartbeatCfg, NULL, NULL),
       "server init should succeed");
 
-  *epollFd = epoll_create1(0);
-  testAssertTrue(*epollFd >= 0, "epoll_create1 should succeed");
-  server->epollFd = *epollFd;
-  testAssertTrue(
-      epoll_ctl(
-          *epollFd,
-          EPOLL_CTL_ADD,
-          server->tunPoller.poller.fd,
-          &(struct epoll_event){
-              .events = server->tunPoller.poller.events,
-              .data.ptr = &server->tunPoller.poller,
-          })
-          == 0,
-      "add tun fd should succeed");
-
   *slotA = serverAddClient(server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2));
   testAssertTrue(*slotA == 0, "first client should be added");
-  testAssertTrue(
-      epoll_ctl(
-          *epollFd,
-          EPOLL_CTL_ADD,
-          tcpPairA[0],
-          &(struct epoll_event){
-              .events = server->activeConns[*slotA].tcpPoller.poller.events,
-              .data.ptr = &server->activeConns[*slotA].tcpPoller.poller,
-          })
-          == 0,
-      "add tcp A fd should succeed");
 
   *slotB = -1;
   if (maxSessions > 1) {
     testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
     *slotB = serverAddClient(server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
     testAssertTrue(*slotB == 1, "second client should be added");
-    testAssertTrue(
-        epoll_ctl(
-            *epollFd,
-            EPOLL_CTL_ADD,
-            tcpPairB[0],
-            &(struct epoll_event){
-                .events = server->activeConns[*slotB].tcpPoller.poller.events,
-                .data.ptr = &server->activeConns[*slotB].tcpPoller.poller,
-            })
-            == 0,
-        "add tcp B fd should succeed");
   }
 }
 
 static void teardownServerForSessionTest(
     server_t *server,
-    int epollFd,
     int tunPair[2],
     int tcpPairA[2],
     int tcpPairB[2],
@@ -929,7 +886,6 @@ static void teardownServerForSessionTest(
   if (slotB >= 0) {
     (void)serverRemoveClient(server, slotB);
   }
-  close(epollFd);
   serverDeinit(server);
   close(tunPair[0]);
   close(tunPair[1]);
@@ -1063,14 +1019,31 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   memset(conn->tcpReadCarryBuf, 0, sizeof(conn->tcpReadCarryBuf));
   memcpy(conn->tcpReadCarryBuf, "hello", (size_t)helloCarryNbytes);
   conn->tcpReadCarryNbytes = helloCarryNbytes;
+  testAssertTrue(ioReactorInit(&server.reactor), "reactor init should succeed");
+  server.epollFd = server.reactor.epollFd;
+  conn->tcpPoller.poller.reactor = &server.reactor;
+  testAssertTrue(
+      ioReactorAddPoller(&server.reactor, &conn->tcpPoller.poller, &runtimeEventFixtureCallbacks, NULL, true),
+      "pre-auth poller should be attached");
 
   helloDecoder = conn->decoder;
   memcpy(helloCarryBuf, conn->tcpReadCarryBuf, (size_t)helloCarryNbytes);
   testAssertTrue(conn->tcpPoller.poller.fd == tcpPair[0], "pre-auth poller should own connection fd before promote");
   testAssertTrue(serverPromoteToActiveSlot(&server, slot), "promote should create active session");
-  testAssertTrue(server.preAuthCount == 0, "promote should remove pre-auth slot");
+  testAssertTrue(server.preAuthCount == 1, "promote should keep pre-auth slot until handoff");
   testAssertTrue(server.activeCount == 1, "promote should increment active count");
   testAssertTrue(serverConnFdAt(&server, 0) == tcpPair[0], "promote should preserve connection fd");
+  testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == -1, "active poller should be detached before handoff");
+  testAssertTrue(
+      ioTcpPollerHandoff(
+          &server.activeConns[0].tcpPoller,
+          &conn->tcpPoller,
+          &runtimeEventFixtureCallbacks,
+          NULL,
+          true),
+      "promote handoff should retarget to active poller");
+  testAssertTrue(serverRemovePreAuthConn(&server, slot), "promote handoff should clear pre-auth slot");
+  testAssertTrue(server.preAuthCount == 0, "promote handoff should remove pre-auth slot");
   testAssertTrue(
       server.activeConns[0].tcpPoller.poller.fd == tcpPair[0],
       "promote should bind active poller to pre-auth-owned connection fd");
@@ -1090,6 +1063,7 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
       memcmp(activeSession->tcpReadCarryBuf, helloCarryBuf, (size_t)helloCarryNbytes) == 0,
       "session carry bytes should match");
 
+  ioReactorDispose(&server.reactor);
   serverDeinit(&server);
   close(tunPair[0]);
   close(tunPair[1]);
@@ -1142,7 +1116,6 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
 static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   unsigned char key[ProtocolPskSize];
   server_t server;
-  int epollFd;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2] = {-1, -1};
@@ -1156,7 +1129,7 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   memset(key, 0x51, sizeof(key));
   memset(fill, 'p', sizeof(fill));
   memset(tunPayload, 'q', sizeof(tunPayload));
-  setupServerForSessionTest(&server, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  setupServerForSessionTest(&server, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
   session = serverSessionAt(&server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
   poller = &server.activeConns[slotA].tcpPoller;
@@ -1172,13 +1145,12 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending exists");
   testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
 
-  teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  teardownServerForSessionTest(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(void) {
   unsigned char key[ProtocolPskSize];
   server_t server;
-  int epollFd;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2];
@@ -1195,7 +1167,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   memset(key, 0x52, sizeof(key));
   memset(fill, 'r', sizeof(fill));
   memset(tunPayload, 's', sizeof(tunPayload));
-  setupServerForSessionTest(&server, 2, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  setupServerForSessionTest(&server, 2, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
   ownerSession = serverSessionAt(&server, slotA);
   otherSession = serverSessionAt(&server, slotB);
   ownerPoller = &server.activeConns[slotA].tcpPoller;
@@ -1249,13 +1221,12 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused at low watermark");
   testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
 
-  teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  teardownServerForSessionTest(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(void) {
   unsigned char key[ProtocolPskSize];
   server_t server;
-  int epollFd;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2] = {-1, -1};
@@ -1269,7 +1240,7 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   memset(key, 0x53, sizeof(key));
   memset(fill, 'u', sizeof(fill));
   memset(tunPayload, 'v', sizeof(tunPayload));
-  setupServerForSessionTest(&server, 1, &epollFd, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  setupServerForSessionTest(&server, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
   session = serverSessionAt(&server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
   poller = &server.activeConns[slotA].tcpPoller;
@@ -1289,7 +1260,7 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused after owner drop");
   testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
 
-  teardownServerForSessionTest(&server, epollFd, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  teardownServerForSessionTest(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload(void) {
@@ -1410,6 +1381,34 @@ static void testServerHeartbeatTickTimeoutBoundary(void) {
   testAssertTrue(!serverHeartbeatTick(9000, 0, 9000), "server heartbeat should stop at timeout boundary");
 }
 
+static void testServerRuntimeHasNoRawIoCalls(void) {
+  static const char *forbidden[] = {"epoll_", "read(", "write(", "close("};
+  const char *candidatePaths[] = {"session/src/server.c", "../session/src/server.c"};
+  FILE *fp = NULL;
+  char line[4096];
+  int lineNo = 0;
+  size_t pathIdx;
+  size_t i;
+
+  for (pathIdx = 0; pathIdx < sizeof(candidatePaths) / sizeof(candidatePaths[0]); pathIdx++) {
+    fp = fopen(candidatePaths[pathIdx], "r");
+    if (fp != NULL) {
+      break;
+    }
+  }
+  testAssertTrue(fp != NULL, "guardrail should open server runtime source");
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    lineNo++;
+    for (i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++) {
+      testAssertTrue(
+          strstr(line, forbidden[i]) == NULL,
+          "server runtime should avoid raw io calls in source");
+    }
+  }
+  (void)lineNo;
+  fclose(fp);
+}
+
 void runServerTests(void) {
   testServerServeMultiClientRejectsInvalidArgs();
   testSessionRunEntrypointsRejectInvalidConfigs();
@@ -1433,6 +1432,7 @@ void runServerTests(void) {
   testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp();
   testServerBackpressurePrioritizesHeartbeatAckBeforeRuntimePendingRetry();
   testServerHeartbeatTickTimeoutBoundary();
+  testServerRuntimeHasNoRawIoCalls();
   testServerHeartbeatTimeoutStopsSession();
   testServerHeartbeatTimeoutUsesConfiguredTimeout();
   testServerCreateAndRemovePreAuthConnResetsState();
