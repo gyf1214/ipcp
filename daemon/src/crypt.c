@@ -76,7 +76,7 @@ int cryptServerKeyStoreLoadFromConfig(cryptServerKeyStore_t *store, const daemon
 
 int cryptServerKeyStoreLookup(
     const cryptServerKeyStore_t *store,
-    configIfMode_t ifMode,
+    ioIfMode_t ifMode,
     const unsigned char *claim,
     long claimNbytes,
     unsigned char key[ProtocolPskSize],

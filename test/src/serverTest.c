@@ -172,7 +172,7 @@ static void testServerServeMultiClientRejectsInvalidArgs(void) {
       serverInit(&server, -1, -1, 2, 2, &testHeartbeatCfg, NULL, NULL),
       "fixture init should succeed");
   server.resolveClaimFn = fakeLookup;
-  server.mode = sessionIfModeTun;
+  server.mode = ioIfModeTun;
   server.authTimeoutMs = 5000;
   testAssertTrue(
       serverServeMultiClient(&server) < 0,
@@ -512,7 +512,7 @@ static void testServerFanoutTapBroadcastToAllClients(void) {
   };
 
   serverFixtureSetup(&fixture, 62, 3, 3, &testHeartbeatCfg, NULL, NULL);
-  fixture.server.mode = sessionIfModeTap;
+  fixture.server.mode = ioIfModeTap;
   slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
   testAssertTrue(slotA == 0, "slot A should be added");
   testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp pair B should be created");
@@ -740,7 +740,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   };
 
   serverFixtureSetup(&fixture, 83, 3, 3, &testHeartbeatCfg, NULL, NULL);
-  fixture.server.mode = sessionIfModeTun;
+  fixture.server.mode = ioIfModeTun;
   slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
   testAssertTrue(slotA == 0, "slot A should be active");
   testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp B pair should be created");
@@ -811,7 +811,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) == 0, "drop cases should not queue peer tcp");
   testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) == 0, "drop cases should not queue tun payload");
 
-  fixture.server.mode = sessionIfModeTap;
+  fixture.server.mode = ioIfModeTap;
   fixture.server.tunPoller.queuedBytes = 0;
   fixture.server.tunPoller.frameCount = 0;
   fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
@@ -852,7 +852,7 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
       ioReactorAddPoller(&fixture.server.reactor, &fixture.server.tunPoller.poller, &sessionEventFixtureCallbacks, NULL, true),
       "tun poller should be attached to reactor");
 
-  fixture.server.mode = sessionIfModeTun;
+  fixture.server.mode = ioIfModeTun;
   fixture.server.serverIdentity.claim[0] = 10;
   fixture.server.serverIdentity.claim[1] = 0;
   fixture.server.serverIdentity.claim[2] = 0;

@@ -12,16 +12,9 @@
 #include "protocol.h"
 #include "session.h"
 
-static ioIfMode_t toIoIfMode(configIfMode_t mode) {
-  if (mode == configIfModeTap) {
-    return ioIfModeTap;
-  }
-  return ioIfModeTun;
-}
-
 typedef struct {
   const cryptServerKeyStore_t *store;
-  configIfMode_t ifMode;
+  ioIfMode_t ifMode;
 } serverKeyLookupCtx_t;
 
 static int serverLookupByClaim(
@@ -39,7 +32,7 @@ static int serverLookupByClaim(
 
 static int listenTcp(
     const char *ifName,
-    configIfMode_t ifMode,
+    ioIfMode_t ifMode,
     const char *listenIP,
     int port,
     const daemonServerIdentity_t *serverIdentity,
@@ -55,7 +48,7 @@ static int listenTcp(
   memcpy(&sessionIdentity, serverIdentity, sizeof(sessionIdentity));
   sessionServerConfig_t sessionCfg = {
       .ifName = ifName,
-      .ifMode = toIoIfMode(ifMode),
+      .ifMode = ifMode,
       .listenIP = listenIP,
       .port = port,
       .resolveClaimFn = serverLookupByClaim,
@@ -76,7 +69,7 @@ static int listenTcp(
 
 static int connTcp(
     const char *ifName,
-    configIfMode_t ifMode,
+    ioIfMode_t ifMode,
     const char *remoteIP,
     int port,
     const unsigned char *claim,
@@ -85,7 +78,7 @@ static int connTcp(
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   sessionClientConfig_t sessionCfg = {
       .ifName = ifName,
-      .ifMode = toIoIfMode(ifMode),
+      .ifMode = ifMode,
       .remoteIP = remoteIP,
       .port = port,
       .claim = claim,

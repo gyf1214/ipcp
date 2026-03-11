@@ -36,11 +36,11 @@ static int parseIfMode(const cJSON *root, daemonConfig_t *cfg) {
     return -1;
   }
   if (strcmp(ifMode->valuestring, "tun") == 0) {
-    cfg->ifMode = configIfModeTun;
+    cfg->ifMode = ioIfModeTun;
     return 0;
   }
   if (strcmp(ifMode->valuestring, "tap") == 0) {
-    cfg->ifMode = configIfModeTap;
+    cfg->ifMode = ioIfModeTap;
     return 0;
   }
   return -1;
@@ -261,7 +261,7 @@ static int parseServerCredentials(const cJSON *root, daemonConfig_t *cfg) {
     if (copyRequiredString(entry, "key_file", cred->keyFile) != 0) {
       return -1;
     }
-    if (cfg->ifMode == configIfModeTun) {
+    if (cfg->ifMode == ioIfModeTun) {
       if (copyRequiredString(entry, "tun_ip", cred->tunIP) != 0 || !parseIPv4String(cred->tunIP)) {
         return -1;
       }
@@ -271,7 +271,7 @@ static int parseServerCredentials(const cJSON *root, daemonConfig_t *cfg) {
       if (cJSON_GetObjectItemCaseSensitive(entry, "tap_mac") != NULL) {
         return -1;
       }
-    } else if (cfg->ifMode == configIfModeTap) {
+    } else if (cfg->ifMode == ioIfModeTap) {
       if (copyRequiredString(entry, "tap_mac", cred->tapMac) != 0 || !parseMacString(cred->tapMac)) {
         return -1;
       }
@@ -312,11 +312,11 @@ static int parseServerConfig(const cJSON *root, daemonConfig_t *cfg) {
   if (parseServerCredentials(root, cfg) != 0) {
     return -1;
   }
-  if (cfg->ifMode == configIfModeTun) {
+  if (cfg->ifMode == ioIfModeTun) {
     if (parseServerTunIdentity(root, cfg) != 0) {
       return -1;
     }
-  } else if (cfg->ifMode == configIfModeTap) {
+  } else if (cfg->ifMode == ioIfModeTap) {
     if (parseServerTapIdentity(root, cfg) != 0) {
       return -1;
     }
@@ -339,14 +339,14 @@ static int parseClientConfig(const cJSON *root, daemonConfig_t *cfg) {
   if (copyRequiredPort(root, "server_port", &cfg->serverPort) != 0) {
     return -1;
   }
-  if (cfg->ifMode == configIfModeTun) {
+  if (cfg->ifMode == ioIfModeTun) {
     if (copyRequiredString(root, "tun_ip", cfg->tunIP) != 0 || !parseIPv4String(cfg->tunIP)) {
       return -1;
     }
     if (parseIPv4Claim(cfg->tunIP, cfg->claim, &cfg->claimNbytes) != 0) {
       return -1;
     }
-  } else if (cfg->ifMode == configIfModeTap) {
+  } else if (cfg->ifMode == ioIfModeTap) {
     if (copyRequiredString(root, "tap_mac", cfg->tapMac) != 0 || !parseMacString(cfg->tapMac)) {
       return -1;
     }
@@ -364,7 +364,7 @@ void configZero(daemonConfig_t *cfg) {
     return;
   }
   sodium_memzero(cfg, sizeof(*cfg));
-  cfg->ifMode = configIfModeTun;
+  cfg->ifMode = ioIfModeTun;
   cfg->heartbeatIntervalMs = ConfigDefaultHeartbeatIntervalMs;
   cfg->heartbeatTimeoutMs = ConfigDefaultHeartbeatTimeoutMs;
 }

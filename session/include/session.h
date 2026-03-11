@@ -26,11 +26,6 @@ typedef struct {
   unsigned char directedBroadcast[4];
 } sessionServerIdentity_t;
 
-typedef enum {
-  sessionIfModeTun = 0,
-  sessionIfModeTap,
-} sessionIfMode_t;
-
 typedef struct {
   const char *ifName;
   ioIfMode_t ifMode;

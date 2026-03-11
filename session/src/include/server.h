@@ -60,7 +60,7 @@ struct server_t {
   int preAuthCount;
   preAuthConn_t *preAuthConns;
   sessionServerIdentity_t serverIdentity;
-  sessionIfMode_t mode;
+  ioIfMode_t mode;
   sessionHeartbeatConfig_t heartbeatCfg;
   sessionServerResolveClaimFn_t resolveClaimFn;
   void *resolveClaimCtx;

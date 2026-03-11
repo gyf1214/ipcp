@@ -28,11 +28,11 @@ static bool serverPacketParseMode(const server_t *server, packetParseMode_t *out
   if (server == NULL || outMode == NULL) {
     return false;
   }
-  if (server->mode == sessionIfModeTun) {
+  if (server->mode == ioIfModeTun) {
     *outMode = packetParseModeTunIpv4;
     return true;
   }
-  if (server->mode == sessionIfModeTap) {
+  if (server->mode == ioIfModeTap) {
     *outMode = packetParseModeTapEthernet;
     return true;
   }
@@ -158,7 +158,7 @@ bool serverInit(
   server->activeCount = 0;
   server->maxPreAuthSessions = maxPreAuthSessions;
   server->preAuthCount = 0;
-  server->mode = sessionIfModeTun;
+  server->mode = ioIfModeTun;
   server->heartbeatCfg = *heartbeatCfg;
   server->nowMsFn = nowMsFn == NULL ? defaultNowMs : nowMsFn;
   server->nowCtx = nowCtx;
@@ -1057,8 +1057,8 @@ static bool serverDispatchPreAuth(
       return true;
     }
 
-    if ((server->mode == sessionIfModeTun && !isValidTunClaim(conn->claim, conn->claimNbytes))
-        || (server->mode == sessionIfModeTap && !isValidTapClaim(conn->claim, conn->claimNbytes))) {
+    if ((server->mode == ioIfModeTun && !isValidTunClaim(conn->claim, conn->claimNbytes))
+        || (server->mode == ioIfModeTap && !isValidTapClaim(conn->claim, conn->claimNbytes))) {
       return serverClosePreAuthConn(server, preAuthSlot);
     }
     if (resolveClaimFn(resolveClaimCtx, conn->claim, conn->claimNbytes, conn->resolvedKey, &conn->resolvedActiveSlot)
@@ -1855,7 +1855,7 @@ int serverServeMultiClient(server_t *server) {
   serverRuntimeCtx_t runtimeCtx;
   if (server == NULL
       || server->resolveClaimFn == NULL
-      || (server->mode != sessionIfModeTun && server->mode != sessionIfModeTap)
+      || (server->mode != ioIfModeTun && server->mode != ioIfModeTap)
       || server->authTimeoutMs <= 0
       || server->maxActiveSessions <= 0
       || server->maxPreAuthSessions <= 0
@@ -1924,7 +1924,7 @@ int serverServeLocal(const sessionServerConfig_t *cfg) {
   server.resolveClaimFn = cfg->resolveClaimFn;
   server.resolveClaimCtx = cfg->resolveClaimCtx;
   server.authTimeoutMs = cfg->authTimeoutMs;
-  server.mode = cfg->ifMode == ioIfModeTap ? sessionIfModeTap : sessionIfModeTun;
+  server.mode = cfg->ifMode;
   if (cfg->serverIdentity != NULL) {
     server.serverIdentity = *cfg->serverIdentity;
   }

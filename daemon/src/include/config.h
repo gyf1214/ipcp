@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 
+#include "io.h"
 #include "protocol.h"
 
 #define ConfigTextSize 512
@@ -14,11 +15,6 @@ typedef enum {
   configModeServer = 0,
   configModeClient,
 } configMode_t;
-
-typedef enum {
-  configIfModeTun = 0,
-  configIfModeTap,
-} configIfMode_t;
 
 typedef struct {
   unsigned char claim[DaemonClaimSize];
@@ -37,7 +33,7 @@ typedef struct {
 
 typedef struct {
   configMode_t mode;
-  configIfMode_t ifMode;
+  ioIfMode_t ifMode;
   char ifName[ConfigTextSize];
   char keyFile[ConfigTextSize];
   char listenIP[ConfigTextSize];
