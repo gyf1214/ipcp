@@ -378,7 +378,11 @@ bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled) {
   return true;
 }
 
-static ioReactorStepResult_t ioReactorApplyAction(ioPoller_t *poller, ioPollerAction_t action, bool *removed) {
+static ioReactorStepResult_t ioReactorApplyAction(
+    ioPoller_t *poller,
+    ioPollerAction_t action,
+    bool *removed,
+    bool *stopChain) {
   if (action == ioPollerContinue) {
     return ioReactorStepReady;
   }
@@ -394,6 +398,11 @@ static ioReactorStepResult_t ioReactorApplyAction(ioPoller_t *poller, ioPollerAc
     poller->reactor = NULL;
     poller->events = 0;
     *removed = true;
+    *stopChain = true;
+    return ioReactorStepReady;
+  }
+  if (action == ioPollerRetargeted) {
+    *stopChain = true;
     return ioReactorStepReady;
   }
   return ioReactorStepError;
@@ -453,17 +462,18 @@ ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs) {
     long queuedBefore = -1;
     long queuedAfter = -1;
     bool removed = false;
+    bool stopChain = false;
 
     if (poller == NULL || poller->callbacks == NULL) {
       return ioReactorStepError;
     }
 
     if ((events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0 && poller->callbacks->onClosed != NULL) {
-      result = ioReactorApplyAction(poller, poller->callbacks->onClosed(poller->ctx, poller), &removed);
+      result = ioReactorApplyAction(poller, poller->callbacks->onClosed(poller->ctx, poller), &removed, &stopChain);
       if (result == ioReactorStepStop || result == ioReactorStepError) {
         return result;
       }
-      if (removed) {
+      if (stopChain || removed) {
         continue;
       }
     }
@@ -478,20 +488,28 @@ ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs) {
         result = ioReactorApplyAction(
             poller,
             poller->callbacks->onLowWatermark(poller->ctx, poller, queuedAfter),
-            &removed);
+            &removed,
+            &stopChain);
         if (result == ioReactorStepStop || result == ioReactorStepError) {
           return result;
         }
-        if (removed) {
+        if (stopChain || removed) {
           continue;
         }
       }
     }
 
     if ((events[i].events & EPOLLIN) != 0 && poller->callbacks->onReadable != NULL) {
-      result = ioReactorApplyAction(poller, poller->callbacks->onReadable(poller->ctx, reactor, poller), &removed);
+      result = ioReactorApplyAction(
+          poller,
+          poller->callbacks->onReadable(poller->ctx, reactor, poller),
+          &removed,
+          &stopChain);
       if (result == ioReactorStepStop || result == ioReactorStepError) {
         return result;
+      }
+      if (stopChain || removed) {
+        continue;
       }
     }
   }

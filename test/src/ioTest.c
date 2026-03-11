@@ -247,6 +247,13 @@ static ioPollerAction_t reactorClosedRemove(void *ctx, ioPoller_t *poller) {
   return ioPollerRemove;
 }
 
+static ioPollerAction_t reactorClosedRetarget(void *ctx, ioPoller_t *poller) {
+  reactorCallbackCounts_t *counts = ctx;
+  (void)poller;
+  counts->closedCalls++;
+  return ioPollerRetargeted;
+}
+
 static ioPollerAction_t reactorReadableCount(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
   reactorCallbackCounts_t *counts = ctx;
   (void)reactor;
@@ -319,6 +326,35 @@ static void testIoReactorStepRemoveStopsCallbackChain(void) {
   testAssertTrue(counts.closedCalls == 1, "closed callback should run once");
   testAssertTrue(counts.readableCalls == 0, "remove action should stop callback chain");
   testAssertTrue(!ioReactorSetPollerReadEnabled(&poller, false), "removed poller should no longer support epoll mod");
+
+  ioReactorDispose(&reactor);
+  close(socketFds[0]);
+}
+
+static void testIoReactorStepRetargetStopsCallbackChainWithoutRemoval(void) {
+  ioReactor_t reactor;
+  ioPoller_t poller;
+  ioPollerCallbacks_t callbacks = {0};
+  reactorCallbackCounts_t counts = {0};
+  int socketFds[2];
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  callbacks.onClosed = reactorClosedRetarget;
+  callbacks.onReadable = reactorReadableCount;
+  memset(&poller, 0, sizeof(poller));
+  poller.fd = socketFds[0];
+  poller.kind = ioPollerListen;
+  testAssertTrue(ioReactorAddPoller(&reactor, &poller, &callbacks, &counts, true), "poller add should succeed");
+
+  close(socketFds[1]);
+  testAssertTrue(ioReactorStep(&reactor, 100) == ioReactorStepReady, "closed-retarget path should return ready");
+  testAssertTrue(counts.closedCalls == 1, "closed callback should run once");
+  testAssertTrue(counts.readableCalls == 0, "retarget action should stop callback chain");
+  testAssertTrue(
+      ioReactorSetPollerReadEnabled(&poller, false),
+      "retarget action should keep poller attached for future read toggles");
 
   ioReactorDispose(&reactor);
   close(socketFds[0]);
@@ -618,6 +654,7 @@ void runIoTests(void) {
   testIoReactorInitAndAddPoller();
   testIoReactorStepTimeoutAndStop();
   testIoReactorStepRemoveStopsCallbackChain();
+  testIoReactorStepRetargetStopsCallbackChainWithoutRemoval();
   testIoPollerHeadersAndLowWatermarkEdge();
   testIoReactorTcpWritableRearmsAfterFlush();
   testIoListenPollerAcceptNonBlockingInitializesTcpPoller();

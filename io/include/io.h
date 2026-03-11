@@ -37,6 +37,7 @@ typedef struct ioTunPoller_t ioTunPoller_t;
 typedef enum {
   ioPollerContinue = 0,
   ioPollerRemove,
+  ioPollerRetargeted,
   ioPollerStop,
 } ioPollerAction_t;
 
