@@ -30,7 +30,7 @@ typedef struct {
   int capturedHead;
   int capturedTail;
   int capturedCount;
-} splitPollersFixture_t;
+} sessionPollerFixture_t;
 
 static long long fakeNowMs = 0;
 static const sessionHeartbeatConfig_t defaultHeartbeatCfg = {
@@ -38,7 +38,41 @@ static const sessionHeartbeatConfig_t defaultHeartbeatCfg = {
     .timeoutMs = 15000,
 };
 
-static void splitPollersCaptureEvent(splitPollersFixture_t *poller, ioEvent_t event) {
+static ioPollerAction_t runtimeEventFixtureOnReadable(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
+  runtimeEventFixture_t *fixture = (runtimeEventFixture_t *)ctx;
+  (void)reactor;
+  if (fixture == NULL || poller == NULL) {
+    return ioPollerContinue;
+  }
+  if (poller->kind == ioPollerTun) {
+    runtimeEventFixtureCaptureEvent(fixture, ioEventTunRead);
+  } else if (poller->kind == ioPollerTcp) {
+    runtimeEventFixtureCaptureEvent(fixture, ioEventTcpRead);
+  }
+  return ioPollerContinue;
+}
+
+static ioPollerAction_t runtimeEventFixtureOnLowWatermark(void *ctx, ioPoller_t *poller, long queuedBytes) {
+  runtimeEventFixture_t *fixture = (runtimeEventFixture_t *)ctx;
+  (void)queuedBytes;
+  if (fixture == NULL || poller == NULL) {
+    return ioPollerContinue;
+  }
+  if (poller->kind == ioPollerTun) {
+    runtimeEventFixtureCaptureEvent(fixture, ioEventTunWrite);
+  } else if (poller->kind == ioPollerTcp) {
+    runtimeEventFixtureCaptureEvent(fixture, ioEventTcpWrite);
+  }
+  return ioPollerContinue;
+}
+
+const ioPollerCallbacks_t runtimeEventFixtureCallbacks = {
+    .onClosed = NULL,
+    .onLowWatermark = runtimeEventFixtureOnLowWatermark,
+    .onReadable = runtimeEventFixtureOnReadable,
+};
+
+static void sessionPollerFixtureCaptureEvent(sessionPollerFixture_t *poller, ioEvent_t event) {
   if (poller == NULL || poller->capturedCount >= (int)(sizeof(poller->capturedEvents) / sizeof(poller->capturedEvents[0]))) {
     return;
   }
@@ -47,41 +81,41 @@ static void splitPollersCaptureEvent(splitPollersFixture_t *poller, ioEvent_t ev
   poller->capturedCount++;
 }
 
-static ioPollerAction_t splitPollerCaptureReadable(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
-  splitPollersFixture_t *fixture = (splitPollersFixture_t *)ctx;
+static ioPollerAction_t sessionPollerFixtureOnReadable(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
+  sessionPollerFixture_t *fixture = (sessionPollerFixture_t *)ctx;
   (void)reactor;
   if (fixture == NULL || poller == NULL) {
     return ioPollerContinue;
   }
   if (poller->kind == ioPollerTun) {
-    splitPollersCaptureEvent(fixture, ioEventTunRead);
+    sessionPollerFixtureCaptureEvent(fixture, ioEventTunRead);
   } else if (poller->kind == ioPollerTcp) {
-    splitPollersCaptureEvent(fixture, ioEventTcpRead);
+    sessionPollerFixtureCaptureEvent(fixture, ioEventTcpRead);
   }
   return ioPollerContinue;
 }
 
-static ioPollerAction_t splitPollerCaptureLowWatermark(void *ctx, ioPoller_t *poller, long queuedBytes) {
-  splitPollersFixture_t *fixture = (splitPollersFixture_t *)ctx;
+static ioPollerAction_t sessionPollerFixtureOnLowWatermark(void *ctx, ioPoller_t *poller, long queuedBytes) {
+  sessionPollerFixture_t *fixture = (sessionPollerFixture_t *)ctx;
   (void)queuedBytes;
   if (fixture == NULL || poller == NULL) {
     return ioPollerContinue;
   }
   if (poller->kind == ioPollerTun) {
-    splitPollersCaptureEvent(fixture, ioEventTunWrite);
+    sessionPollerFixtureCaptureEvent(fixture, ioEventTunWrite);
   } else if (poller->kind == ioPollerTcp) {
-    splitPollersCaptureEvent(fixture, ioEventTcpWrite);
+    sessionPollerFixtureCaptureEvent(fixture, ioEventTcpWrite);
   }
   return ioPollerContinue;
 }
 
-static const ioPollerCallbacks_t splitPollerCallbacks = {
+static const ioPollerCallbacks_t sessionPollerFixtureCallbacks = {
     .onClosed = NULL,
-    .onLowWatermark = splitPollerCaptureLowWatermark,
-    .onReadable = splitPollerCaptureReadable,
+    .onLowWatermark = sessionPollerFixtureOnLowWatermark,
+    .onReadable = sessionPollerFixtureOnReadable,
 };
 
-static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd) {
+static int setupSessionPollerFixture(sessionPollerFixture_t *poller, int tunFd, int tcpFd) {
   if (poller == NULL) {
     return -1;
   }
@@ -97,7 +131,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   poller->tunPoller.poller.fd = tunFd;
   poller->tunPoller.poller.events = EPOLLRDHUP;
   poller->tunPoller.poller.kind = ioPollerTun;
-  if (!ioReactorAddPoller(&poller->reactor, &poller->tunPoller.poller, &splitPollerCallbacks, poller, true)) {
+  if (!ioReactorAddPoller(&poller->reactor, &poller->tunPoller.poller, &sessionPollerFixtureCallbacks, poller, true)) {
     ioReactorDispose(&poller->reactor);
     return -1;
   }
@@ -107,14 +141,14 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   poller->tcpPoller.poller.fd = tcpFd;
   poller->tcpPoller.poller.events = EPOLLRDHUP;
   poller->tcpPoller.poller.kind = ioPollerTcp;
-  if (!ioReactorAddPoller(&poller->reactor, &poller->tcpPoller.poller, &splitPollerCallbacks, poller, true)) {
+  if (!ioReactorAddPoller(&poller->reactor, &poller->tcpPoller.poller, &sessionPollerFixtureCallbacks, poller, true)) {
     ioReactorDispose(&poller->reactor);
     return -1;
   }
   return 0;
 }
 
-static void teardownSplitPollers(splitPollersFixture_t *poller) {
+static void teardownSessionPollerFixture(sessionPollerFixture_t *poller) {
   if (poller != NULL) {
     ioReactorDispose(&poller->reactor);
   }
@@ -125,27 +159,27 @@ static long long fakeNow(void *ctx) {
   return fakeNowMs;
 }
 
-static void setupSplitPollersFixture(splitPollersFixture_t *poller, int tunPair[2], int tcpPair[2]) {
+static void setupSessionPollerFixtureWithPairs(sessionPollerFixture_t *poller, int tunPair[2], int tcpPair[2]) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(setupSplitPollers(poller, tunPair[0], tcpPair[0]) == 0, "setupSplitPollers should succeed");
+  testAssertTrue(setupSessionPollerFixture(poller, tunPair[0], tcpPair[0]) == 0, "setupSplitPollers should succeed");
 }
 
-static void teardownSplitPollersFixture(splitPollersFixture_t *poller, int tunPair[2], int tcpPair[2]) {
-  teardownSplitPollers(poller);
+static void teardownSessionPollerFixtureWithPairs(sessionPollerFixture_t *poller, int tunPair[2], int tcpPair[2]) {
+  teardownSessionPollerFixture(poller);
   close(tunPair[0]);
   close(tunPair[1]);
   close(tcpPair[0]);
   close(tcpPair[1]);
 }
 
-static sessionStepResult_t runSessionStep(session_t *session, splitPollersFixture_t *poller, ioEvent_t event, const unsigned char key[ProtocolPskSize]) {
+static sessionStepResult_t runSessionStep(session_t *session, sessionPollerFixture_t *poller, ioEvent_t event, const unsigned char key[ProtocolPskSize]) {
   return sessionStep(session, &poller->tcpPoller, &poller->tunPoller, event, key);
 }
 
 static sessionStepResult_t runSessionStepWithSuppressedStderr(
     session_t *session,
-    splitPollersFixture_t *poller,
+    sessionPollerFixture_t *poller,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]) {
   int savedStderr = dup(STDERR_FILENO);
@@ -168,7 +202,7 @@ static sessionStepResult_t runSessionStepWithSuppressedStderr(
 }
 
 static void assertSessionStepBehaviorWhenRuntimeMissing(bool isServer, bool expectAbort) {
-  splitPollersFixture_t poller;
+  sessionPollerFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   unsigned char key[ProtocolPskSize];
@@ -177,7 +211,7 @@ static void assertSessionStepBehaviorWhenRuntimeMissing(bool isServer, bool expe
 
   memset(key, 0x7a, sizeof(key));
   fakeNowMs = 0;
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  setupSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
   pid = fork();
   testAssertTrue(pid >= 0, "fork should succeed");
   if (pid == 0) {
@@ -196,7 +230,7 @@ static void assertSessionStepBehaviorWhenRuntimeMissing(bool isServer, bool expe
     testAssertTrue(WIFEXITED(status), "child should exit cleanly");
     testAssertTrue(WEXITSTATUS(status) == 0, "child should return success without runtime assertion");
   }
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+  teardownSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
 }
 
 static void testSessionApiSmoke(void) {
@@ -226,7 +260,7 @@ static void testSessionInitSeedsModeAndTimestamps(void) {
 }
 
 static void testSessionResetClearsPendingAndPauseFlags(void) {
-  splitPollersFixture_t poller;
+  sessionPollerFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   const char payload[] = "session-reset-overflow";
@@ -234,7 +268,7 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
 
   fakeNowMs = 5000;
 
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  setupSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
@@ -251,18 +285,18 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   testAssertTrue(session->overflowNbytes == 0, "reset should clear pending tun bytes");
   testAssertTrue(!session->tcpReadPaused, "reset should clear tcp pause");
   sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+  teardownSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
 }
 
 static void testSessionBackpressurePauseAndResumeFlow(void) {
-  splitPollersFixture_t poller;
+  sessionPollerFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   const char payload[] = "session-overflow-retry";
   char out[128];
   sessionQueueResult_t result;
 
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  setupSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
@@ -288,17 +322,17 @@ static void testSessionBackpressurePauseAndResumeFlow(void) {
   testAssertTrue(memcmp(out, payload, sizeof(payload) - 1) == 0, "retried payload should match");
 
   sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+  teardownSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
 }
 
 static void testSessionRetryOverflowFlushesAndResumesRead(void) {
-  splitPollersFixture_t poller;
+  sessionPollerFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   session_t *session;
   const char payload[] = "retry-overflow";
 
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  setupSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
   session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
@@ -316,17 +350,17 @@ static void testSessionRetryOverflowFlushesAndResumesRead(void) {
   testAssertTrue(!session->tcpReadPaused, "tcp read pause should clear after retry");
 
   sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+  teardownSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
 }
 
 static void testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated(void) {
-  splitPollersFixture_t poller;
+  sessionPollerFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   session_t *session;
   const char payload[] = "retry-blocked";
 
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  setupSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
   session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
 
@@ -346,11 +380,11 @@ static void testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated(void)
   testAssertTrue(session->tcpReadPaused, "tcp read should remain paused while overflow is pending");
 
   sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+  teardownSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
 }
 
 static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
-  splitPollersFixture_t poller;
+  sessionPollerFixture_t poller;
   int tunPair[2];
   int sourcePair[2];
   int destPairA[2];
@@ -364,7 +398,7 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
 
   memset(fill, 'q', sizeof(fill));
   memset(payload, 'r', sizeof(payload));
-  setupSplitPollersFixture(&poller, tunPair, sourcePair);
+  setupSessionPollerFixtureWithPairs(&poller, tunPair, sourcePair);
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairA) == 0, "dest A pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairB) == 0, "dest B pair should be created");
   testAssertTrue(ioTcpPollerInit(&destPollerA, &poller.reactor, destPairA[0]) == 0, "dest A poller init should succeed");
@@ -399,7 +433,7 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
   testAssertTrue(!session->tcpReadPaused, "matching drop should resume source tcp read");
 
   sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, sourcePair);
+  teardownSessionPollerFixtureWithPairs(&poller, tunPair, sourcePair);
   close(destPairA[0]);
   close(destPairA[1]);
   close(destPairB[0]);
@@ -407,14 +441,14 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
 }
 
 static void testSessionQueueTunWithDropForSession(void) {
-  splitPollersFixture_t poller;
+  sessionPollerFixture_t poller;
   int tunPair[2];
   int tcpPair[2];
   session_t *session;
   const char payload[] = "tun-drop";
   sessionQueueResult_t result;
 
-  setupSplitPollersFixture(&poller, tunPair, tcpPair);
+  setupSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
   session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   poller.tunPoller.frameCount = IoTunQueueFrameCapacity;
@@ -431,7 +465,7 @@ static void testSessionQueueTunWithDropForSession(void) {
   testAssertTrue(result == sessionQueueResultBlocked, "tun drop queue should block when source overflow is pending");
 
   sessionDestroy(session);
-  teardownSplitPollersFixture(&poller, tunPair, tcpPair);
+  teardownSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
 }
 
 static void testSessionCreateRejectsNullHeartbeatConfig(void) {
