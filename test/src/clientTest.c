@@ -156,6 +156,30 @@ static bool clientFixtureWaitEventOfKind(clientFixture_t *fixture, int timeoutMs
   return runtimeEventFixtureWaitEventOfKind(&fixture->events, &fixture->client.reactor, timeoutMs, expected);
 }
 
+static bool clientFixtureDrainWriteQueue(clientFixture_t *fixture, ioSource_t source, int timeoutMs) {
+  int attempts;
+  long queued;
+
+  if (fixture == NULL) {
+    return false;
+  }
+  for (attempts = 0; attempts < 8; attempts++) {
+    queued = source == ioSourceTcp
+        ? ioTcpQueuedBytes(&fixture->client.tcpPoller)
+        : ioTunQueuedBytes(&fixture->client.tunPoller);
+    if (queued == 0) {
+      return true;
+    }
+    if (queued < 0) {
+      return false;
+    }
+    if (ioReactorStep(&fixture->client.reactor, timeoutMs) == ioReactorStepError) {
+      return false;
+    }
+  }
+  return false;
+}
+
 static long writeSecureWire(
     const unsigned char key[ProtocolPskSize],
     protocolMessageType_t type,
@@ -777,7 +801,7 @@ static void testClientTunReadQueuesEncryptedTcpFrame(void) {
   testAssertTrue(
       runSessionStep(session, &fixture, event, key) == sessionStepContinue,
       "tun read event should continue");
-  testAssertTrue(ioTcpServiceWriteEvent(&fixture.client.tcpPoller), "tcp write service should flush payload");
+  testAssertTrue(clientFixtureDrainWriteQueue(&fixture, ioSourceTcp, 50), "reactor should flush queued tcp payload");
 
   nbytes = read(tcpPair[1], out, sizeof(out));
   testAssertTrue(nbytes > 0, "tcp peer should receive encrypted wire frame");
@@ -825,7 +849,7 @@ static void testClientTcpReadQueuesTunWrite(void) {
   testAssertTrue(
       runSessionStep(session, &fixture, event, key) == sessionStepContinue,
       "tcp read event should continue");
-  testAssertTrue(ioTunServiceWriteEvent(&fixture.client.tunPoller), "tun write service should flush payload");
+  testAssertTrue(clientFixtureDrainWriteQueue(&fixture, ioSourceTun, 50), "reactor should flush queued tun payload");
 
   testAssertTrue(
       recv(tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (ssize_t)strlen(payload),

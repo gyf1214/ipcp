@@ -1001,24 +1001,6 @@ bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes) {
   return true;
 }
 
-bool ioTcpServiceWriteEvent(ioTcpPoller_t *poller) {
-  bool ok;
-  if (poller == NULL || poller->poller.reactor == NULL || poller->poller.reactor->epollFd < 0) {
-    return false;
-  }
-  ok = pollerFlushQueue(poller) == 0;
-  return ok;
-}
-
-bool ioTunServiceWriteEvent(ioTunPoller_t *poller) {
-  bool ok;
-  if (poller == NULL || poller->poller.reactor == NULL || poller->poller.reactor->epollFd < 0) {
-    return false;
-  }
-  ok = tunQueueFlush(poller) == 0;
-  return ok;
-}
-
 bool ioTcpSetReadEnabled(ioTcpPoller_t *poller, bool enabled) {
   bool ok;
   if (poller == NULL) {

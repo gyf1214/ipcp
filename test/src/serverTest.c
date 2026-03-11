@@ -806,6 +806,7 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   char peerBuf[64];
   ssize_t nread;
   int flags;
+  int attempts;
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp pair should be created");
@@ -836,9 +837,13 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   nread = read(tunPair[1], peerBuf, sizeof(peerBuf));
   testAssertTrue(nread < 0, "without explicit write service, queued tun bytes should not flush");
 
-  testAssertTrue(ioTunServiceWriteEvent(&server.tunPoller), "tun write service should flush queued payload");
+  for (attempts = 0; attempts < 8 && ioTunQueuedBytes(&server.tunPoller) > 0; attempts++) {
+    ioReactorStepResult_t step = ioReactorStep(&server.reactor, 50);
+    testAssertTrue(step == ioReactorStepReady || step == ioReactorStepTimeout, "reactor write drive should remain healthy");
+  }
+  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) == 0, "reactor should flush queued tun payload");
   nread = read(tunPair[1], peerBuf, sizeof(peerBuf));
-  testAssertTrue(nread == (ssize_t)sizeof(toServer), "explicit write service should flush queued payload");
+  testAssertTrue(nread == (ssize_t)sizeof(toServer), "reactor write drive should flush queued payload");
 
   ioReactorDispose(&server.reactor);
   serverDeinit(&server);

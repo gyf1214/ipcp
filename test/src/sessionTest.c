@@ -295,6 +295,7 @@ static void testSessionBackpressurePauseAndResumeFlow(void) {
   const char payload[] = "session-overflow-retry";
   char out[128];
   sessionQueueResult_t result;
+  int attempts;
 
   setupSessionPollerFixtureWithPairs(&poller, tunPair, tcpPair);
   session_t *session = sessionCreate(false, &defaultHeartbeatCfg, fakeNow, NULL);
@@ -315,7 +316,11 @@ static void testSessionBackpressurePauseAndResumeFlow(void) {
       "session retry overflow should succeed on tun write event");
   testAssertTrue(!sessionHasOverflow(session), "session overflow should flush after retry");
   testAssertTrue(!session->tcpReadPaused, "session should resume tcp read after retry");
-  testAssertTrue(ioTunServiceWriteEvent(&poller.tunPoller), "tun write service should flush retried payload");
+  for (attempts = 0; attempts < 8 && ioTunQueuedBytes(&poller.tunPoller) > 0; attempts++) {
+    ioReactorStepResult_t step = ioReactorStep(&poller.reactor, 50);
+    testAssertTrue(step == ioReactorStepReady || step == ioReactorStepTimeout, "reactor write drive should remain healthy");
+  }
+  testAssertTrue(ioTunQueuedBytes(&poller.tunPoller) == 0, "reactor should flush retried payload");
   testAssertTrue(
       recv(tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (ssize_t)(sizeof(payload) - 1),
       "tun peer should receive retried payload");

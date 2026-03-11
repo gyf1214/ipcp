@@ -150,8 +150,6 @@ int ioTcpPollerInit(ioTcpPoller_t *poller, ioReactor_t *reactor, int tcpFd);
 int ioTunPollerInit(ioTunPoller_t *poller, ioReactor_t *reactor, int tunFd);
 bool ioTcpWrite(ioTcpPoller_t *poller, const void *data, long nbytes);
 bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes);
-bool ioTcpServiceWriteEvent(ioTcpPoller_t *poller);
-bool ioTunServiceWriteEvent(ioTunPoller_t *poller);
 bool ioTcpSetReadEnabled(ioTcpPoller_t *poller, bool enabled);
 bool ioTunSetReadEnabled(ioTunPoller_t *poller, bool enabled);
 long ioTcpQueuedBytes(const ioTcpPoller_t *poller);
