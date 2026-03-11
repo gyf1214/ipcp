@@ -2,13 +2,10 @@
 
 #include <stdbool.h>
 #include <string.h>
-#include <sys/epoll.h>
 
-#include "client.h"
 #include "io.h"
 
 typedef struct {
-  client_t client;
   ioEvent_t capturedEvents[32];
   int capturedHead;
   int capturedTail;
@@ -38,67 +35,22 @@ static inline bool runtimeEventFixturePopEvent(runtimeEventFixture_t *fixture, i
 
 extern const ioPollerCallbacks_t runtimeEventFixtureCallbacks;
 
-static inline int runtimeEventFixtureSetup(
-    runtimeEventFixture_t *fixture,
-    int tunFd,
-    int tcpFd,
-    long heartbeatIntervalMs,
-    long heartbeatTimeoutMs) {
+static inline void runtimeEventFixtureReset(runtimeEventFixture_t *fixture) {
   if (fixture == NULL) {
-    return -1;
-  }
-
-  memset(&fixture->client, 0, sizeof(fixture->client));
-  clientResetHeartbeatState(&fixture->client, heartbeatIntervalMs, heartbeatTimeoutMs, 0);
-  if (!ioReactorInit(&fixture->client.reactor)) {
-    return -1;
+    return;
   }
   fixture->capturedHead = 0;
   fixture->capturedTail = 0;
   fixture->capturedCount = 0;
-
-  memset(&fixture->client.tunPoller, 0, sizeof(fixture->client.tunPoller));
-  fixture->client.tunPoller.poller.reactor = NULL;
-  fixture->client.tunPoller.poller.fd = tunFd;
-  fixture->client.tunPoller.poller.events = EPOLLRDHUP;
-  fixture->client.tunPoller.poller.kind = ioPollerTun;
-  if (!ioReactorAddPoller(
-          &fixture->client.reactor,
-          &fixture->client.tunPoller.poller,
-          &runtimeEventFixtureCallbacks,
-          fixture,
-          true)) {
-    ioReactorDispose(&fixture->client.reactor);
-    return -1;
-  }
-
-  memset(&fixture->client.tcpPoller, 0, sizeof(fixture->client.tcpPoller));
-  fixture->client.tcpPoller.poller.reactor = NULL;
-  fixture->client.tcpPoller.poller.fd = tcpFd;
-  fixture->client.tcpPoller.poller.events = EPOLLRDHUP;
-  fixture->client.tcpPoller.poller.kind = ioPollerTcp;
-  if (!ioReactorAddPoller(
-          &fixture->client.reactor,
-          &fixture->client.tcpPoller.poller,
-          &runtimeEventFixtureCallbacks,
-          fixture,
-          true)) {
-    ioReactorDispose(&fixture->client.reactor);
-    return -1;
-  }
-
-  return 0;
 }
 
-static inline void runtimeEventFixtureTeardown(runtimeEventFixture_t *fixture) {
-  if (fixture != NULL) {
-    ioReactorDispose(&fixture->client.reactor);
-  }
-}
-
-static inline bool runtimeEventFixtureWaitEvent(runtimeEventFixture_t *fixture, int timeoutMs, ioEvent_t *outEvent) {
+static inline bool runtimeEventFixtureWaitEvent(
+    runtimeEventFixture_t *fixture,
+    ioReactor_t *reactor,
+    int timeoutMs,
+    ioEvent_t *outEvent) {
   int attempts;
-  if (fixture == NULL || outEvent == NULL) {
+  if (fixture == NULL || reactor == NULL || outEvent == NULL) {
     return false;
   }
   for (attempts = 0; attempts < 6; attempts++) {
@@ -106,7 +58,7 @@ static inline bool runtimeEventFixtureWaitEvent(runtimeEventFixture_t *fixture, 
     if (runtimeEventFixturePopEvent(fixture, outEvent)) {
       return true;
     }
-    step = ioReactorStep(&fixture->client.reactor, timeoutMs);
+    step = ioReactorStep(reactor, timeoutMs);
     if (step == ioReactorStepError || step == ioReactorStepStop) {
       return false;
     }
@@ -117,11 +69,15 @@ static inline bool runtimeEventFixtureWaitEvent(runtimeEventFixture_t *fixture, 
   return false;
 }
 
-static inline bool runtimeEventFixtureWaitEventOfKind(runtimeEventFixture_t *fixture, int timeoutMs, ioEvent_t expected) {
+static inline bool runtimeEventFixtureWaitEventOfKind(
+    runtimeEventFixture_t *fixture,
+    ioReactor_t *reactor,
+    int timeoutMs,
+    ioEvent_t expected) {
   int attempts;
   ioEvent_t event;
   for (attempts = 0; attempts < 8; attempts++) {
-    if (!runtimeEventFixtureWaitEvent(fixture, timeoutMs, &event)) {
+    if (!runtimeEventFixtureWaitEvent(fixture, reactor, timeoutMs, &event)) {
       return false;
     }
     if (event == expected) {
