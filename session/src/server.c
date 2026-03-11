@@ -70,7 +70,7 @@ static bool runtimeTunEpollCtl(server_t *server, unsigned int events) {
 
   memset(&event, 0, sizeof(event));
   event.events = events;
-  event.data.fd = server->tunPoller.poller.fd;
+  event.data.ptr = &server->tunPoller.poller;
   if (epoll_ctl(server->epollFd, EPOLL_CTL_MOD, server->tunPoller.poller.fd, &event) < 0) {
     return false;
   }
@@ -865,11 +865,14 @@ bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot) {
   return serverRemovePreAuthConn(server, preAuthSlot);
 }
 
-static bool serverEpollCtl(int epollFd, int op, int fd, unsigned int events) {
+static bool serverEpollCtl(int epollFd, int op, int fd, unsigned int events, void *token) {
   struct epoll_event event;
+  if (op == EPOLL_CTL_DEL) {
+    return epoll_ctl(epollFd, op, fd, NULL) == 0;
+  }
   memset(&event, 0, sizeof(event));
   event.events = events;
-  event.data.fd = fd;
+  event.data.ptr = token;
   return epoll_ctl(epollFd, op, fd, &event) == 0;
 }
 
@@ -894,17 +897,27 @@ static bool serverClosePreAuthConn(server_t *server, int preAuthSlot) {
     return false;
   }
   connFd = conn->connFd;
-  (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+  (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
   close(connFd);
   return serverRemovePreAuthConn(server, preAuthSlot);
 }
 
 static bool serverSetPreAuthWriteEnabled(server_t *server, int connFd, bool writeEnabled) {
   unsigned int events = EPOLLIN | EPOLLRDHUP;
+  int preAuthSlot;
+  preAuthConn_t *conn;
   if (writeEnabled) {
     events |= EPOLLOUT;
   }
-  return serverEpollCtl(server->epollFd, EPOLL_CTL_MOD, connFd, events);
+  if (server == NULL) {
+    return false;
+  }
+  preAuthSlot = serverFindPreAuthSlotByFd(server, connFd);
+  conn = serverPreAuthAt(server, preAuthSlot);
+  if (conn == NULL) {
+    return false;
+  }
+  return serverEpollCtl(server->epollFd, EPOLL_CTL_MOD, connFd, events, conn);
 }
 
 static bool preAuthReadIntoCarry(preAuthConn_t *conn) {
@@ -1167,7 +1180,8 @@ static bool serverDispatchPreAuth(
             server->epollFd,
             EPOLL_CTL_MOD,
             activeConnFd,
-            server->activeConns[activeSlot].tcpPoller.poller.events)) {
+            server->activeConns[activeSlot].tcpPoller.poller.events,
+            &server->activeConns[activeSlot].tcpPoller.poller)) {
       close(activeConnFd);
       (void)serverRemoveClient(server, activeSlot);
       return false;
@@ -1196,7 +1210,7 @@ static bool serverDispatchClient(server_t *server, int slot, ioEvent_t event) {
   stepResult =
       sessionHandleConnEvent(session, &server->activeConns[slot].tcpPoller, &server->tunPoller, event, key);
   if (stepResult == sessionStepStop) {
-    (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+    (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
     close(connFd);
     return serverRemoveClient(server, slot);
   }
@@ -1220,12 +1234,12 @@ static bool serverDispatchTunIngressToSlot(
   msg.buf = (const char *)payload;
   result = serverSendMessage(server, &server->activeConns[slot].tcpPoller, key, &msg);
   if (result == sessionQueueResultError) {
-    (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+    (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
     close(connFd);
     return serverRemoveClient(server, slot);
   }
   if (sessionFinalizeStep(session, key) == sessionStepStop) {
-    (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+    (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
     close(connFd);
     return serverRemoveClient(server, slot);
   }
@@ -1503,14 +1517,14 @@ static bool serverFanoutTunIngressToAll(
     msg.nbytes = payloadNbytes;
     msg.buf = (const char *)payload;
     if (protocolEncodeSecureMsg(&msg, key, &frame) != protocolStatusOk) {
-      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
       close(connFd);
       return serverRemoveClient(server, slot);
     }
 
     result = serverQueueTcpWithDrop(&server->activeConns[slot].tcpPoller, frame.buf, frame.nbytes);
     if (result == sessionQueueResultError) {
-      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
       close(connFd);
       return serverRemoveClient(server, slot);
     }
@@ -1519,7 +1533,7 @@ static bool serverFanoutTunIngressToAll(
     }
 
     if (sessionFinalizeStep(session, key) == sessionStepStop) {
-      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0);
+      (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
       close(connFd);
       return serverRemoveClient(server, slot);
     }
@@ -1628,6 +1642,32 @@ static bool serverTickPreAuth(
   return true;
 }
 
+static int serverFindPreAuthSlotByPtr(const server_t *server, const preAuthConn_t *conn) {
+  int i;
+  if (server == NULL || server->preAuthConns == NULL || conn == NULL) {
+    return -1;
+  }
+  for (i = 0; i < server->maxPreAuthSessions; i++) {
+    if (&server->preAuthConns[i] == conn) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int serverFindSlotByPollerPtr(const server_t *server, const ioPoller_t *poller) {
+  int i;
+  if (server == NULL || server->activeConns == NULL || poller == NULL) {
+    return -1;
+  }
+  for (i = 0; i < server->maxActiveSessions; i++) {
+    if (&server->activeConns[i].tcpPoller.poller == poller) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 int serverServeMultiClient(
     int tunFd,
     int listenFd,
@@ -1679,8 +1719,8 @@ int serverServeMultiClient(
   server.epollFd = epollFd;
   server.tunPoller.poller.epollFd = epollFd;
 
-  if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, listenFd, EPOLLIN | EPOLLRDHUP)
-      || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, server.tunPoller.poller.events)) {
+  if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, listenFd, EPOLLIN | EPOLLRDHUP, &server.listenFd)
+      || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, server.tunPoller.poller.events, &server.tunPoller.poller)) {
     goto cleanup;
   }
 
@@ -1694,10 +1734,10 @@ int serverServeMultiClient(
     }
 
     for (i = 0; i < n; i++) {
-      int fd = events[i].data.fd;
+      void *token = events[i].data.ptr;
       unsigned int ev = events[i].events;
 
-      if (fd == listenFd) {
+      if (token == &server.listenFd) {
         while (1) {
           int connFd = -1;
           char clientIp[256];
@@ -1722,7 +1762,12 @@ int serverServeMultiClient(
             close(connFd);
             continue;
           }
-          if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, connFd, EPOLLIN | EPOLLRDHUP)) {
+          if (!serverEpollCtl(
+                  epollFd,
+                  EPOLL_CTL_ADD,
+                  connFd,
+                  EPOLLIN | EPOLLRDHUP,
+                  &server.preAuthConns[preAuthSlot])) {
             close(connFd);
             (void)serverRemovePreAuthConn(&server, preAuthSlot);
             goto cleanup;
@@ -1732,7 +1777,7 @@ int serverServeMultiClient(
       }
 
       {
-        int preAuthSlot = serverFindPreAuthSlotByFd(&server, fd);
+        int preAuthSlot = serverFindPreAuthSlotByPtr(&server, (preAuthConn_t *)token);
         if (preAuthSlot >= 0) {
           if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
             if (!serverClosePreAuthConn(&server, preAuthSlot)) {
@@ -1754,7 +1799,7 @@ int serverServeMultiClient(
         }
       }
 
-      if (fd == tunFd) {
+      if (token == &server.tunPoller.poller) {
         if ((ev & EPOLLIN) != 0) {
           if (!serverHandleTunRead(&server)) {
             goto cleanup;
@@ -1777,14 +1822,16 @@ int serverServeMultiClient(
       }
 
       {
-        int slot = serverFindSlotByFd(&server, fd);
+        int slot = serverFindSlotByPollerPtr(&server, (ioPoller_t *)token);
+        int fd = -1;
+        if (slot >= 0) {
+          fd = serverConnFdAt(&server, slot);
+        }
         if (slot < 0) {
-          (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, fd, 0);
-          close(fd);
           continue;
         }
         if ((ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
-          (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, fd, 0);
+          (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, fd, 0, NULL);
           close(fd);
           (void)serverRemoveClient(&server, slot);
           continue;
@@ -1818,14 +1865,14 @@ cleanup:
   for (i = 0; i < server.maxActiveSessions; i++) {
     int connFd = serverConnFdAt(&server, i);
     if (connFd >= 0) {
-      (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, connFd, 0);
+      (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
       close(connFd);
     }
   }
   for (i = 0; i < server.maxPreAuthSessions; i++) {
     preAuthConn_t *conn = serverPreAuthAt(&server, i);
     if (conn != NULL && conn->connFd >= 0) {
-      (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, conn->connFd, 0);
+      (void)serverEpollCtl(epollFd, EPOLL_CTL_DEL, conn->connFd, 0, NULL);
       close(conn->connFd);
       (void)serverRemovePreAuthConn(&server, i);
     }

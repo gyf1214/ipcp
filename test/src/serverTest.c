@@ -780,6 +780,67 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   close(tunPair[1]);
 }
 
+static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
+  server_t server;
+  int epollFd = -1;
+  int tunPair[2];
+  int tcpPair[2];
+  unsigned char toServer[] = {
+      0x00, 0x00, 0x08, 0x00,
+      0x45, 0x00, 0x00, 0x14,
+      0x00, 0x00, 0x00, 0x00,
+      0x40, 0x11, 0x00, 0x00,
+      10, 0, 0, 2,
+      10, 0, 0, 1,
+  };
+  char peerBuf[64];
+  ssize_t nread;
+  int flags;
+  struct epoll_event event = {0};
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun pair should be created");
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp pair should be created");
+  testAssertTrue(serverInit(&server, tunPair[0], 91, 1, 1, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "slot should be active");
+
+  server.mode = sessionIfModeTun;
+  server.serverIdentity.claim[0] = 10;
+  server.serverIdentity.claim[1] = 0;
+  server.serverIdentity.claim[2] = 0;
+  server.serverIdentity.claim[3] = 1;
+  server.serverIdentity.claimNbytes = 4;
+
+  epollFd = epoll_create1(0);
+  testAssertTrue(epollFd >= 0, "epoll create should succeed");
+  server.epollFd = epollFd;
+  server.tunPoller.poller.epollFd = epollFd;
+  event.events = server.tunPoller.poller.events;
+  event.data.ptr = &server.tunPoller.poller;
+  testAssertTrue(epoll_ctl(epollFd, EPOLL_CTL_ADD, tunPair[0], &event) == 0, "tun fd should be registered");
+
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, tcpPair[0], toServer, sizeof(toServer)),
+      "tcp ingress to server identity should queue tun payload");
+  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "tun payload should be queued");
+
+  flags = fcntl(tunPair[1], F_GETFL, 0);
+  testAssertTrue(flags >= 0, "peer flags fetch should succeed");
+  testAssertTrue(fcntl(tunPair[1], F_SETFL, flags | O_NONBLOCK) == 0, "peer should become nonblocking");
+  nread = read(tunPair[1], peerBuf, sizeof(peerBuf));
+  testAssertTrue(nread < 0, "without explicit write service, queued tun bytes should not flush");
+
+  testAssertTrue(ioTunServiceWriteEvent(&server.tunPoller), "tun write service should flush queued payload");
+  nread = read(tunPair[1], peerBuf, sizeof(peerBuf));
+  testAssertTrue(nread == (ssize_t)sizeof(toServer), "explicit write service should flush queued payload");
+
+  close(epollFd);
+  serverDeinit(&server);
+  close(tcpPair[0]);
+  close(tcpPair[1]);
+  close(tunPair[0]);
+  close(tunPair[1]);
+}
+
 static void setupServerForSessionTest(
     server_t *server,
     int maxSessions,
@@ -805,7 +866,7 @@ static void setupServerForSessionTest(
           server->tunPoller.poller.fd,
           &(struct epoll_event){
               .events = server->tunPoller.poller.events,
-              .data.fd = server->tunPoller.poller.fd,
+              .data.ptr = &server->tunPoller.poller,
           })
           == 0,
       "add tun fd should succeed");
@@ -817,7 +878,10 @@ static void setupServerForSessionTest(
           *epollFd,
           EPOLL_CTL_ADD,
           tcpPairA[0],
-          &(struct epoll_event){.events = server->activeConns[*slotA].tcpPoller.poller.events, .data.fd = tcpPairA[0]})
+          &(struct epoll_event){
+              .events = server->activeConns[*slotA].tcpPoller.poller.events,
+              .data.ptr = &server->activeConns[*slotA].tcpPoller.poller,
+          })
           == 0,
       "add tcp A fd should succeed");
 
@@ -831,7 +895,10 @@ static void setupServerForSessionTest(
             *epollFd,
             EPOLL_CTL_ADD,
             tcpPairB[0],
-            &(struct epoll_event){.events = server->activeConns[*slotB].tcpPoller.poller.events, .data.fd = tcpPairB[0]})
+            &(struct epoll_event){
+                .events = server->activeConns[*slotB].tcpPoller.poller.events,
+                .data.ptr = &server->activeConns[*slotB].tcpPoller.poller,
+            })
             == 0,
         "add tcp B fd should succeed");
   }
@@ -1340,6 +1407,7 @@ void runServerTests(void) {
   testServerBroadcastFanoutSkipsSaturatedClient();
   testServerQueueWithDropSkipsOverflowWithoutPendingState();
   testServerRoutesTcpIngressAcrossClientsAndTun();
+  testServerTcpIngressToTunRequiresWriteServiceProgress();
   testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload();
   testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp();
   testServerBackpressurePrioritizesHeartbeatAckBeforeRuntimePendingRetry();
