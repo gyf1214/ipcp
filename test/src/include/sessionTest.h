@@ -101,6 +101,7 @@ bool sessionEventFixtureHasNoEventOfKind(
     int attempts,
     int timeoutMs,
     ioEvent_t unexpected);
+void sessionTestAssertSourceHasNoRawIoCalls(const char *sourceLabel, const char *sourcePath);
 
 void runClientTests(void);
 void runServerTests(void);

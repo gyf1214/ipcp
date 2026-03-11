@@ -94,6 +94,32 @@ bool sessionEventFixtureHasNoEventOfKind(
   return true;
 }
 
+void sessionTestAssertSourceHasNoRawIoCalls(const char *sourceLabel, const char *sourcePath) {
+  static const char *forbidden[] = {"epoll_", "read(", "write(", "close("};
+  char fallbackPath[512];
+  FILE *fp = NULL;
+  char line[4096];
+  size_t i;
+
+  if (sourceLabel == NULL || sourcePath == NULL) {
+    testAssertTrue(false, "raw-io guardrail helper requires non-null source metadata");
+    return;
+  }
+
+  snprintf(fallbackPath, sizeof(fallbackPath), "../%s", sourcePath);
+  fp = fopen(sourcePath, "r");
+  if (fp == NULL) {
+    fp = fopen(fallbackPath, "r");
+  }
+  testAssertTrue(fp != NULL, "guardrail should open runtime source");
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    for (i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++) {
+      testAssertTrue(strstr(line, forbidden[i]) == NULL, sourceLabel);
+    }
+  }
+  fclose(fp);
+}
+
 static const ioPollerCallbacks_t sessionTestNoopCallbacks = {
     .onClosed = NULL,
     .onLowWatermark = NULL,
@@ -552,6 +578,12 @@ static void testSessionStepRequiresBorrowedPollers(void) {
   sessionDestroy(session);
 }
 
+static void testSessionRuntimeHasNoRawIoCalls(void) {
+  sessionTestAssertSourceHasNoRawIoCalls(
+      "session runtime should avoid raw io calls in source",
+      "session/src/session.c");
+}
+
 void runSessionTests(void) {
   testSessionServerRoleSkipsRuntimeAssertOnTimeout();
   testSessionClientRoleAssertsOnMissingRuntime();
@@ -559,6 +591,7 @@ void runSessionTests(void) {
   testSessionCreateRejectsInvalidHeartbeatConfig();
   testSessionTopLevelRunEntrypointsRejectNullConfig();
   testSessionStepRequiresBorrowedPollers();
+  testSessionRuntimeHasNoRawIoCalls();
   testSessionApiSmoke();
   testSessionInitSeedsModeAndTimestamps();
   testSessionResetClearsPendingAndPauseFlags();

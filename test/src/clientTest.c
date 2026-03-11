@@ -960,6 +960,12 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
   clientFixtureTeardown(&fixture);
 }
 
+static void testClientRuntimeHasNoRawIoCalls(void) {
+  sessionTestAssertSourceHasNoRawIoCalls(
+      "client runtime should avoid raw io calls in source",
+      "session/src/client.c");
+}
+
 void runClientTests(void) {
   testClientRunLoopRejectsInvalidArgs();
   testSessionRunClientRejectsInvalidConfig();
@@ -981,4 +987,5 @@ void runClientTests(void) {
   testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds();
   testClientHeartbeatBlockedReqEventuallyTracksPendingForAck();
   testClientRejectsInboundHeartbeatRequest();
+  testClientRuntimeHasNoRawIoCalls();
 }

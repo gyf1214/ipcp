@@ -1409,31 +1409,9 @@ static void testServerHeartbeatTickTimeoutBoundary(void) {
 }
 
 static void testServerRuntimeHasNoRawIoCalls(void) {
-  static const char *forbidden[] = {"epoll_", "read(", "write(", "close("};
-  const char *candidatePaths[] = {"session/src/server.c", "../session/src/server.c"};
-  FILE *fp = NULL;
-  char line[4096];
-  int lineNo = 0;
-  size_t pathIdx;
-  size_t i;
-
-  for (pathIdx = 0; pathIdx < sizeof(candidatePaths) / sizeof(candidatePaths[0]); pathIdx++) {
-    fp = fopen(candidatePaths[pathIdx], "r");
-    if (fp != NULL) {
-      break;
-    }
-  }
-  testAssertTrue(fp != NULL, "guardrail should open server runtime source");
-  while (fgets(line, sizeof(line), fp) != NULL) {
-    lineNo++;
-    for (i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++) {
-      testAssertTrue(
-          strstr(line, forbidden[i]) == NULL,
-          "server runtime should avoid raw io calls in source");
-    }
-  }
-  (void)lineNo;
-  fclose(fp);
+  sessionTestAssertSourceHasNoRawIoCalls(
+      "server runtime should avoid raw io calls in source",
+      "session/src/server.c");
 }
 
 void runServerTests(void) {
