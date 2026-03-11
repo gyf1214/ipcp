@@ -271,7 +271,8 @@ static bool pipeTun(
   msg.nbytes = nbytes;
   msg.buf = payload;
   if (session->isServer) {
-    result = serverSendMessage(sessionServer(session), tcpPoller, key, &msg);
+    activeConn_t *conn = (activeConn_t *)tcpPoller->poller.ctx;
+    result = serverSendMessage(sessionServer(session), conn, key, &msg);
   } else {
     client_t *client = sessionClient(session);
     result = clientSendMessage(
@@ -324,7 +325,8 @@ static bool pipeTcpBytes(
 
     if (msg.type == protocolMsgData && session->isServer) {
       server_t *server = sessionServer(session);
-      if (!serverRouteTcpIngressPacket(server, tcpPoller->poller.fd, msg.buf, msg.nbytes)) {
+      activeConn_t *conn = (activeConn_t *)tcpPoller->poller.ctx;
+      if (!serverRouteTcpIngressPacket(server, conn, msg.buf, msg.nbytes)) {
         return false;
       }
       result = sessionQueueResultQueued;
@@ -336,8 +338,9 @@ static bool pipeTcpBytes(
       }
       session->lastValidInboundMs = now;
     } else if (session->isServer) {
+      activeConn_t *conn = (activeConn_t *)tcpPoller->poller.ctx;
       result = serverHandleInboundMessage(
-          sessionServer(session), tcpPoller, key, &session->lastValidInboundMs, &msg);
+          sessionServer(session), conn, key, &session->lastValidInboundMs, &msg);
     } else {
       client_t *client = sessionClient(session);
       result = clientHandleInboundMessage(

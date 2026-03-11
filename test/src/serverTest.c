@@ -732,7 +732,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.activeConns[0].session->lastValidInboundMs = 0;
 
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, tcpPairA[0], toPeer, sizeof(toPeer)),
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], toPeer, sizeof(toPeer)),
       "unicast to other client should route");
   testAssertTrue(
       server.activeConns[0].session->lastValidInboundMs > 0,
@@ -743,7 +743,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, tcpPairA[0], toServer, sizeof(toServer)),
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], toServer, sizeof(toServer)),
       "unicast to server identity should route to tun");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "server-local route should not enqueue source tcp");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "server-local route should not enqueue peer tcp");
@@ -754,7 +754,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, tcpPairA[0], broadcast, sizeof(broadcast)),
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], broadcast, sizeof(broadcast)),
       "broadcast should fanout to peers and tun");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "broadcast should exclude source tcp");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "broadcast should fanout to peer tcp");
@@ -764,12 +764,18 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.tunPoller.frameCount = 0;
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
-  testAssertTrue(serverRouteTcpIngressPacket(&server, tcpPairA[0], selfDest, sizeof(selfDest)), "self destination should drop");
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, tcpPairA[0], unknownDest, sizeof(unknownDest)),
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], selfDest, sizeof(selfDest)),
+      "self destination should drop");
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], unknownDest, sizeof(unknownDest)),
       "unknown destination should drop");
-  testAssertTrue(serverRouteTcpIngressPacket(&server, tcpPairA[0], multicast, sizeof(multicast)), "multicast should drop");
-  testAssertTrue(serverRouteTcpIngressPacket(&server, tcpPairA[0], malformed, sizeof(malformed)), "malformed should drop");
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], multicast, sizeof(multicast)),
+      "multicast should drop");
+  testAssertTrue(
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], malformed, sizeof(malformed)),
+      "malformed should drop");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue source tcp");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "drop cases should not queue peer tcp");
   testAssertTrue(ioTunQueuedBytes(&server.tunPoller) == 0, "drop cases should not queue tun payload");
@@ -780,7 +786,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   server.activeConns[0].tcpPoller.outNbytes = 0;
   server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, tcpPairA[0], tapBroadcast, sizeof(tapBroadcast)),
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], tapBroadcast, sizeof(tapBroadcast)),
       "tap broadcast should fanout to peers and tun");
   testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "tap broadcast should exclude source tcp");
   testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "tap broadcast should fanout to peer tcp");
@@ -831,7 +837,7 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   server.serverIdentity.claimNbytes = 4;
 
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, tcpPair[0], toServer, sizeof(toServer)),
+      serverRouteTcpIngressPacket(&server, &server.activeConns[0], toServer, sizeof(toServer)),
       "tcp ingress to server identity should queue tun payload");
   testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "tun payload should be queued");
 
@@ -1293,7 +1299,7 @@ static void testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload(void
       ioTcpWrite(&server.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity - 16),
       "prefill server tcp queue should succeed");
   result = serverQueueTcpWithBackpressure(
-      &server, &server.activeConns[0].tcpPoller, payload, sizeof(payload));
+      &server, &server.activeConns[0], payload, sizeof(payload));
   testAssertTrue(result == sessionQueueResultBlocked, "server queue api should block on overflow");
   testAssertTrue(serverHasPendingTunToTcp(&server), "server queue api should store server pending payload");
   testAssertTrue(serverPendingTunToTcpOwner(&server) == 0, "server pending payload owner should match slot");
@@ -1322,7 +1328,7 @@ static void testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp(void
 
   result = serverHandleInboundMessage(
       &server,
-      &server.activeConns[0].tcpPoller,
+      &server.activeConns[0],
       testKey,
       &lastValidInboundMs,
       &req);
@@ -1363,7 +1369,7 @@ static void testServerBackpressurePrioritizesHeartbeatAckBeforeRuntimePendingRet
 
   result = serverHandleInboundMessage(
       &server,
-      &server.activeConns[0].tcpPoller,
+      &server.activeConns[0],
       testKey,
       &lastValidInboundMs,
       &req);

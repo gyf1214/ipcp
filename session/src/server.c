@@ -514,13 +514,19 @@ bool serverDropPendingTunToTcpByOwner(server_t *server, int ownerSlot) {
 }
 
 sessionQueueResult_t serverQueueTcpWithBackpressure(
-    server_t *server, ioTcpPoller_t *tcpPoller, const void *data, long nbytes) {
+    server_t *server, activeConn_t *conn, const void *data, long nbytes) {
   long queued;
   int ownerSlot;
+  ioTcpPoller_t *tcpPoller;
 
-  if (server == NULL || tcpPoller == NULL || data == NULL || nbytes <= 0) {
+  if (server == NULL || conn == NULL || conn->owner != server || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
   }
+  ownerSlot = serverActiveSlotFromConn(server, conn);
+  if (ownerSlot < 0 || !conn->active) {
+    return sessionQueueResultError;
+  }
+  tcpPoller = &conn->tcpPoller;
   if (serverHasPendingTunToTcp(server)) {
     return sessionQueueResultBlocked;
   }
@@ -533,10 +539,6 @@ sessionQueueResult_t serverQueueTcpWithBackpressure(
     return sessionQueueResultError;
   }
   if (queued + nbytes > IoPollerQueueCapacity) {
-    ownerSlot = serverFindSlotByFd(server, tcpPoller->poller.fd);
-    if (ownerSlot < 0) {
-      return sessionQueueResultError;
-    }
     if (!serverStorePendingTunToTcp(server, ownerSlot, data, nbytes)) {
       return sessionQueueResultError;
     }
@@ -568,7 +570,7 @@ sessionQueueResult_t serverQueueTcpWithDrop(
 
 sessionQueueResult_t serverSendMessage(
     server_t *server,
-    ioTcpPoller_t *tcpPoller,
+    activeConn_t *conn,
     const unsigned char key[ProtocolPskSize],
     const protocolMessage_t *msg) {
   protocolFrame_t frame;
@@ -579,7 +581,7 @@ sessionQueueResult_t serverSendMessage(
   if (protocolEncodeSecureMsg(msg, key, &frame) != protocolStatusOk) {
     return sessionQueueResultError;
   }
-  return serverQueueTcpWithBackpressure(server, tcpPoller, frame.buf, frame.nbytes);
+  return serverQueueTcpWithBackpressure(server, conn, frame.buf, frame.nbytes);
 }
 
 static sessionQueueResult_t serverRetryHeartbeatAck(server_t *server, int slot) {
@@ -600,13 +602,18 @@ static sessionQueueResult_t serverRetryHeartbeatAck(server_t *server, int slot) 
 
 sessionQueueResult_t serverHandleInboundMessage(
     server_t *server,
-    ioTcpPoller_t *tcpPoller,
+    activeConn_t *conn,
     const unsigned char key[ProtocolPskSize],
     long long *lastValidInboundMs,
     const protocolMessage_t *msg) {
   long long nowMs;
+  int slot;
 
-  if (server == NULL || tcpPoller == NULL || key == NULL || lastValidInboundMs == NULL || msg == NULL) {
+  if (server == NULL || conn == NULL || conn->owner != server || key == NULL || lastValidInboundMs == NULL || msg == NULL) {
+    return sessionQueueResultError;
+  }
+  slot = serverActiveSlotFromConn(server, conn);
+  if (slot < 0 || !conn->active) {
     return sessionQueueResultError;
   }
   (void)key;
@@ -619,11 +626,7 @@ sessionQueueResult_t serverHandleInboundMessage(
     return sessionQueueResultError;
   }
   if (msg->type == protocolMsgHeartbeatReq) {
-    int slot = serverFindSlotByFd(server, tcpPoller->poller.fd);
     sessionQueueResult_t result;
-    if (slot < 0) {
-      return sessionQueueResultError;
-    }
     server->activeConns[slot].heartbeatAckPending = true;
     result = serverRetryHeartbeatAck(server, slot);
     if (result == sessionQueueResultError) {
@@ -1216,7 +1219,7 @@ static bool serverDispatchTunIngressToSlot(
   msg.type = protocolMsgData;
   msg.nbytes = payloadNbytes;
   msg.buf = (const char *)payload;
-  result = serverSendMessage(server, &server->activeConns[slot].tcpPoller, key, &msg);
+  result = serverSendMessage(server, &server->activeConns[slot], key, &msg);
   if (result == sessionQueueResultError) {
     return serverDropActiveConn(server, slot);
   }
@@ -1361,7 +1364,7 @@ static bool serverTunDestinationMatchesDirectedBroadcast(
     const server_t *server, const packetDestination_t *destination);
 
 bool serverRouteTcpIngressPacket(
-    server_t *server, int sourceConnFd, const void *packet, long packetNbytes) {
+    server_t *server, activeConn_t *sourceConn, const void *packet, long packetNbytes) {
   packetParseMode_t mode;
   packetDestination_t destination;
   packetParseStatus_t parseStatus;
@@ -1373,12 +1376,13 @@ bool serverRouteTcpIngressPacket(
   bool handled;
 
   if (server == NULL
-      || sourceConnFd < 0
+      || sourceConn == NULL
+      || sourceConn->owner != server
       || packet == NULL
       || packetNbytes <= 0) {
     return false;
   }
-  sourceSlot = serverFindSlotByFd(server, sourceConnFd);
+  sourceSlot = serverActiveSlotFromConn(server, sourceConn);
   if (!activeSlotIndexValid(server, sourceSlot) || !server->activeConns[sourceSlot].active) {
     return false;
   }

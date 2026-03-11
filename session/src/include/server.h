@@ -108,17 +108,17 @@ serverPendingRetry_t serverRetryPendingTunToTcp(
     server_t *server, int ownerSlot, ioTcpPoller_t *ownerPoller);
 bool serverDropPendingTunToTcpByOwner(server_t *server, int ownerSlot);
 sessionQueueResult_t serverQueueTcpWithBackpressure(
-    server_t *server, ioTcpPoller_t *tcpPoller, const void *data, long nbytes);
+    server_t *server, activeConn_t *conn, const void *data, long nbytes);
 sessionQueueResult_t serverQueueTcpWithDrop(
     ioTcpPoller_t *tcpPoller, const void *data, long nbytes);
 sessionQueueResult_t serverSendMessage(
     server_t *server,
-    ioTcpPoller_t *tcpPoller,
+    activeConn_t *conn,
     const unsigned char key[ProtocolPskSize],
     const protocolMessage_t *msg);
 sessionQueueResult_t serverHandleInboundMessage(
     server_t *server,
-    ioTcpPoller_t *tcpPoller,
+    activeConn_t *conn,
     const unsigned char key[ProtocolPskSize],
     long long *lastValidInboundMs,
     const protocolMessage_t *msg);
@@ -131,7 +131,7 @@ const unsigned char *serverKeyAt(const server_t *server, int slot);
 const unsigned char *serverAuthoritativeKeyAt(const server_t *server, int slot);
 bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, long claimNbytes);
 bool serverRouteTunIngressPacket(server_t *server, const void *packet, long packetNbytes);
-bool serverRouteTcpIngressPacket(server_t *server, int sourceConnFd, const void *packet, long packetNbytes);
+bool serverRouteTcpIngressPacket(server_t *server, activeConn_t *sourceConn, const void *packet, long packetNbytes);
 
 int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadlineMs);
 bool serverRemovePreAuthConn(server_t *server, int preAuthSlot);
