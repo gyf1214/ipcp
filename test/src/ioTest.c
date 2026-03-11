@@ -13,8 +13,9 @@
 #include "testAssert.h"
 
 
-static void testIoReadSomeOk(void) {
+static void testIoPollerReadOk(void) {
   int fds[2];
+  ioPoller_t poller;
   char buf[64];
   long outNbytes = -1;
   const char *payload = "io-write-all";
@@ -23,37 +24,48 @@ static void testIoReadSomeOk(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair should succeed");
   testAssertTrue(write(fds[0], payload, strlen(payload)) == (long)strlen(payload), "test setup write should succeed");
 
-  status = ioReadSome(fds[1], buf, sizeof(buf), &outNbytes);
-  testAssertTrue(status == ioStatusOk, "ioReadSome should report ioStatusOk");
-  testAssertTrue(outNbytes == (long)strlen(payload), "ioReadSome should report bytes read");
-  testAssertTrue(memcmp(buf, payload, (size_t)outNbytes) == 0, "ioReadSome bytes should match written payload");
+  memset(&poller, 0, sizeof(poller));
+  poller.fd = fds[1];
+  status = ioPollerRead(&poller, buf, sizeof(buf), &outNbytes);
+  testAssertTrue(status == ioStatusOk, "ioPollerRead should report ioStatusOk");
+  testAssertTrue(outNbytes == (long)strlen(payload), "ioPollerRead should report bytes read");
+  testAssertTrue(memcmp(buf, payload, (size_t)outNbytes) == 0, "ioPollerRead bytes should match written payload");
 
   close(fds[0]);
   close(fds[1]);
 }
 
-static void testIoReadSomeClosed(void) {
+static void testIoPollerReadClosed(void) {
   int fds[2];
+  ioPoller_t poller;
   char buf[16];
   long outNbytes = -1;
   ioStatus_t status;
 
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair should succeed");
   close(fds[0]);
-  status = ioReadSome(fds[1], buf, sizeof(buf), &outNbytes);
+  memset(&poller, 0, sizeof(poller));
+  poller.fd = fds[1];
+  status = ioPollerRead(&poller, buf, sizeof(buf), &outNbytes);
 
-  testAssertTrue(status == ioStatusClosed, "ioReadSome should report ioStatusClosed on EOF");
-  testAssertTrue(outNbytes == 0, "ioReadSome closed should return outNbytes=0");
+  testAssertTrue(status == ioStatusClosed, "ioPollerRead should report ioStatusClosed on EOF");
+  testAssertTrue(outNbytes == 0, "ioPollerRead closed should return outNbytes=0");
   close(fds[1]);
 }
 
-static void testIoReadSomeError(void) {
+static void testIoPollerReadError(void) {
+  ioPoller_t poller;
   char buf[16];
   long outNbytes = -1;
-  ioStatus_t status = ioReadSome(-1, buf, sizeof(buf), &outNbytes);
+  ioStatus_t status;
 
-  testAssertTrue(status == ioStatusError, "ioReadSome should report ioStatusError on invalid fd");
-  testAssertTrue(outNbytes == 0, "ioReadSome error should return outNbytes=0");
+  memset(&poller, 0, sizeof(poller));
+  poller.fd = -1;
+  status = ioPollerRead(&poller, buf, sizeof(buf), &outNbytes);
+  testAssertTrue(status == ioStatusError, "ioPollerRead should report ioStatusError on invalid fd");
+  testAssertTrue(outNbytes == 0, "ioPollerRead error should return outNbytes=0");
+  status = ioPollerRead(NULL, buf, sizeof(buf), &outNbytes);
+  testAssertTrue(status == ioStatusError, "ioPollerRead should reject null poller");
 }
 
 static void testIoTunOpenRejectNullName(void) {
@@ -588,9 +600,9 @@ static void testIoTunPollerDisposeDetachesClosesAndResetsState(void) {
 }
 
 void runIoTests(void) {
-  testIoReadSomeOk();
-  testIoReadSomeClosed();
-  testIoReadSomeError();
+  testIoPollerReadOk();
+  testIoPollerReadClosed();
+  testIoPollerReadError();
   testIoTunOpenRejectNullName();
   testIoTunOpenRejectInvalidMode();
   testIoTcpListenRejectInvalidIp();

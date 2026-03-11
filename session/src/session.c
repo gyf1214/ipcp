@@ -257,7 +257,7 @@ static bool pipeTun(
     return false;
   }
 
-  status = ioTunRead(tunPoller->poller.fd, payload, maxPayload, &nbytes);
+  status = ioPollerRead(&tunPoller->poller, payload, maxPayload, &nbytes);
   if (status == ioStatusWouldBlock) {
     return true;
   }
@@ -381,7 +381,7 @@ static bool pipeTcp(
     session->tcpReadCarryNbytes = 0;
   }
 
-  readStatus = ioTcpRead(tcpPoller->poller.fd, session->tcpReadBuf, sizeof(session->tcpReadBuf), &nbytes);
+  readStatus = ioPollerRead(&tcpPoller->poller, session->tcpReadBuf, sizeof(session->tcpReadBuf), &nbytes);
   if (readStatus == ioStatusWouldBlock) {
     return true;
   }

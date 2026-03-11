@@ -109,9 +109,7 @@ typedef enum {
   ioSourceTcp,
 } ioSource_t;
 
-ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes);
-ioStatus_t ioTcpRead(int tcpFd, void *buf, long capacity, long *outNbytes);
-ioStatus_t ioTunRead(int tunFd, void *buf, long capacity, long *outNbytes);
+ioStatus_t ioPollerRead(ioPoller_t *poller, void *buf, long capacity, long *outNbytes);
 
 bool ioReactorInit(ioReactor_t *reactor);
 void ioReactorDispose(ioReactor_t *reactor);

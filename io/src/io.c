@@ -499,7 +499,7 @@ ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs) {
   return ioReactorStepReady;
 }
 
-ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes) {
+static ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes) {
   long nbytes;
 
   if (outNbytes == NULL || buf == NULL || capacity <= 0) {
@@ -522,12 +522,14 @@ ioStatus_t ioReadSome(int fd, void *buf, long capacity, long *outNbytes) {
   return ioStatusError;
 }
 
-ioStatus_t ioTcpRead(int tcpFd, void *buf, long capacity, long *outNbytes) {
-  return ioReadSome(tcpFd, buf, capacity, outNbytes);
-}
-
-ioStatus_t ioTunRead(int tunFd, void *buf, long capacity, long *outNbytes) {
-  return ioReadSome(tunFd, buf, capacity, outNbytes);
+ioStatus_t ioPollerRead(ioPoller_t *poller, void *buf, long capacity, long *outNbytes) {
+  if (poller == NULL || poller->fd < 0) {
+    if (outNbytes != NULL) {
+      *outNbytes = 0;
+    }
+    return ioStatusError;
+  }
+  return ioReadSome(poller->fd, buf, capacity, outNbytes);
 }
 
 int ioTunOpen(const char *ifName, ioIfMode_t mode) {

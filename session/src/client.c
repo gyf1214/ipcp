@@ -380,7 +380,7 @@ static ioPollerAction_t clientHandlePreAuthTcpReadable(client_t *client) {
     long nbytes = 0;
     long offset = 0;
 
-    readStatus = ioTcpRead(client->tcpPoller.poller.fd, readBuf, sizeof(readBuf), &nbytes);
+    readStatus = ioPollerRead(&client->tcpPoller.poller, readBuf, sizeof(readBuf), &nbytes);
     if (readStatus == ioStatusWouldBlock) {
       return ioPollerContinue;
     }

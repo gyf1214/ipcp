@@ -924,12 +924,15 @@ static bool serverSetPreAuthWriteEnabled(server_t *server, int connFd, bool writ
 static bool preAuthReadIntoCarry(preAuthConn_t *conn) {
   long nbytes = 0;
   ioStatus_t status;
+  ioPoller_t poller;
 
   if (conn->tcpReadCarryNbytes >= (long)sizeof(conn->tcpReadCarryBuf)) {
     return false;
   }
-  status = ioTcpRead(
-      conn->connFd,
+  memset(&poller, 0, sizeof(poller));
+  poller.fd = conn->connFd;
+  status = ioPollerRead(
+      &poller,
       conn->tcpReadCarryBuf + conn->tcpReadCarryNbytes,
       (long)sizeof(conn->tcpReadCarryBuf) - conn->tcpReadCarryNbytes,
       &nbytes);
@@ -1601,7 +1604,7 @@ static bool serverHandleTunRead(server_t *server) {
     return false;
   }
 
-  status = ioTunRead(server->tunPoller.poller.fd, packet, maxPayload, &packetNbytes);
+  status = ioPollerRead(&server->tunPoller.poller, packet, maxPayload, &packetNbytes);
   if (status == ioStatusWouldBlock) {
     return true;
   }
