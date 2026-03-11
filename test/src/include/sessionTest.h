@@ -34,6 +34,8 @@ static inline bool runtimeEventFixturePopEvent(runtimeEventFixture_t *fixture, i
 }
 
 extern const ioPollerCallbacks_t runtimeEventFixtureCallbacks;
+bool sessionTestInitTcpPollerFromFd(ioTcpPoller_t *poller, int tcpFd);
+/* TODO(test-harness-cleanup): add a shared tun-poller-from-fd helper to mirror TCP setup. */
 
 static inline void runtimeEventFixtureReset(runtimeEventFixture_t *fixture) {
   if (fixture == NULL) {

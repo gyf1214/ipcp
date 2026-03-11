@@ -639,22 +639,6 @@ int ioTcpListen(const char *listenIP, int port) {
   return listenFd;
 }
 
-int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort) {
-  struct sockaddr_in clientAddr;
-  socklen_t addrLen = sizeof(clientAddr);
-  int connFd = accept(listenFd, (struct sockaddr *)&clientAddr, &addrLen);
-  if (connFd < 0) {
-    return -1;
-  }
-
-  if (fillPeerInfo(&clientAddr, peerIp, peerIpSize, peerPort) != 0) {
-    close(connFd);
-    return -1;
-  }
-
-  return connFd;
-}
-
 ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort) {
   struct sockaddr_in clientAddr;
   socklen_t addrLen = sizeof(clientAddr);
@@ -914,60 +898,6 @@ void ioTunPollerDispose(ioTunPoller_t *poller) {
   poller->frameCount = 0;
   memset(poller->frames, 0, sizeof(poller->frames));
   memset(poller->outBuf, 0, sizeof(poller->outBuf));
-}
-
-int ioTcpPollerInit(ioTcpPoller_t *poller, ioReactor_t *reactor, int tcpFd) {
-  if (poller == NULL || tcpFd < 0 || reactor == NULL || reactor->epollFd < 0) {
-    return -1;
-  }
-  if (pollerSetNonBlocking(tcpFd) < 0) {
-    return -1;
-  }
-
-  memset(poller, 0, sizeof(*poller));
-  poller->poller.reactor = reactor;
-  poller->poller.fd = tcpFd;
-  poller->poller.events = EPOLLIN | EPOLLRDHUP;
-  poller->poller.kind = ioPollerKindTcp;
-  poller->poller.readEnabled = true;
-  poller->outOffset = 0;
-  poller->outNbytes = 0;
-  poller->poller.callbacks = NULL;
-  poller->poller.ctx = NULL;
-
-  if (pollerCtlPoller(reactor->epollFd, EPOLL_CTL_ADD, &poller->poller, poller->poller.events) < 0) {
-    return -1;
-  }
-  return 0;
-}
-
-int ioTunPollerInit(ioTunPoller_t *poller, ioReactor_t *reactor, int tunFd) {
-  if (poller == NULL || tunFd < 0 || reactor == NULL || reactor->epollFd < 0) {
-    return -1;
-  }
-  if (pollerSetNonBlocking(tunFd) < 0) {
-    return -1;
-  }
-
-  memset(poller, 0, sizeof(*poller));
-  poller->poller.reactor = reactor;
-  poller->poller.fd = tunFd;
-  poller->poller.events = EPOLLIN | EPOLLRDHUP;
-  poller->poller.kind = ioPollerKindTun;
-  poller->poller.readEnabled = true;
-  poller->readPos = 0;
-  poller->writePos = 0;
-  poller->queuedBytes = 0;
-  poller->frameHead = 0;
-  poller->frameTail = 0;
-  poller->frameCount = 0;
-  poller->poller.callbacks = NULL;
-  poller->poller.ctx = NULL;
-
-  if (pollerCtlPoller(reactor->epollFd, EPOLL_CTL_ADD, &poller->poller, poller->poller.events) < 0) {
-    return -1;
-  }
-  return 0;
 }
 
 bool ioTcpWrite(ioTcpPoller_t *poller, const void *data, long nbytes) {

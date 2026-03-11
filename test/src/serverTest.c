@@ -956,9 +956,9 @@ static void testServerCreateAndRemovePreAuthConnResetsState(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 84, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
 
-  memset(&server.preAuthConns[0].tcpPoller, 0, sizeof(server.preAuthConns[0].tcpPoller));
-  server.preAuthConns[0].tcpPoller.poller.fd = tcpPair[0];
-  server.preAuthConns[0].tcpPoller.poller.kind = ioPollerKindTcp;
+  testAssertTrue(
+      sessionTestInitTcpPollerFromFd(&server.preAuthConns[0].tcpPoller, tcpPair[0]),
+      "pre-auth tcp poller init should succeed");
   server.preAuthConns[0].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   server.preAuthConns[0].tcpPoller.poller.readEnabled = true;
   slot = serverCreatePreAuthConn(&server, 0, 12345);
@@ -1017,9 +1017,9 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 85, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
 
-  memset(&server.preAuthConns[0].tcpPoller, 0, sizeof(server.preAuthConns[0].tcpPoller));
-  server.preAuthConns[0].tcpPoller.poller.fd = tcpPair[0];
-  server.preAuthConns[0].tcpPoller.poller.kind = ioPollerKindTcp;
+  testAssertTrue(
+      sessionTestInitTcpPollerFromFd(&server.preAuthConns[0].tcpPoller, tcpPair[0]),
+      "pre-auth tcp poller init should succeed");
   server.preAuthConns[0].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   server.preAuthConns[0].tcpPoller.poller.readEnabled = true;
   slot = serverCreatePreAuthConn(&server, 0, 23456);

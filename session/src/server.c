@@ -1614,14 +1614,19 @@ static void serverRuntimeDispose(server_t *server) {
   ioReactorDispose(&server->reactor);
 }
 
-static ioPollerAction_t serverOnListenReadable(void *ctx, ioReactor_t *reactor, ioListenPoller_t *listenPoller) {
+static ioPollerAction_t serverOnListenReadable(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
   serverRuntimeCtx_t *runtime = ctx;
+  ioListenPoller_t *listenPoller;
   server_t *server;
   (void)reactor;
 
-  if (runtime == NULL || listenPoller == NULL || runtime->server == NULL) {
+  if (runtime == NULL || poller == NULL || runtime->server == NULL) {
     return ioPollerStop;
   }
+  if (poller->kind != ioPollerKindListen) {
+    return ioPollerStop;
+  }
+  listenPoller = (ioListenPoller_t *)poller;
   server = runtime->server;
 
   while (1) {
@@ -1683,13 +1688,6 @@ static ioPollerAction_t serverOnListenReadable(void *ctx, ioReactor_t *reactor, 
   }
 
   return ioPollerContinue;
-}
-
-static ioPollerAction_t serverOnListenReadableAdapter(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
-  if (poller == NULL || poller->kind != ioPollerKindListen) {
-    return ioPollerStop;
-  }
-  return serverOnListenReadable(ctx, reactor, (ioListenPoller_t *)poller);
 }
 
 static ioPollerAction_t serverOnTunReadable(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
@@ -1838,7 +1836,7 @@ static const ioPollerCallbacks_t serverTunCallbacks = {
 static const ioPollerCallbacks_t serverListenCallbacks = {
     .onClosed = NULL,
     .onLowWatermark = NULL,
-    .onReadable = serverOnListenReadableAdapter,
+    .onReadable = serverOnListenReadable,
 };
 
 static const ioPollerCallbacks_t serverActiveCallbacks = {

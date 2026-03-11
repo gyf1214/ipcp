@@ -126,10 +126,10 @@ static int clientFixtureSetup(
   }
 
   memset(&fixture->client.tcpPoller, 0, sizeof(fixture->client.tcpPoller));
-  fixture->client.tcpPoller.poller.reactor = NULL;
-  fixture->client.tcpPoller.poller.fd = tcpFd;
-  fixture->client.tcpPoller.poller.events = EPOLLRDHUP;
-  fixture->client.tcpPoller.poller.kind = ioPollerKindTcp;
+  if (!sessionTestInitTcpPollerFromFd(&fixture->client.tcpPoller, tcpFd)) {
+    ioReactorDispose(&fixture->client.reactor);
+    return -1;
+  }
   if (!ioReactorAddPoller(
           &fixture->client.reactor,
           &fixture->client.tcpPoller.poller,
@@ -156,7 +156,7 @@ static bool clientFixtureWaitEventOfKind(clientFixture_t *fixture, int timeoutMs
   return runtimeEventFixtureWaitEventOfKind(&fixture->events, &fixture->client.reactor, timeoutMs, expected);
 }
 
-static bool clientFixtureDrainWriteQueue(clientFixture_t *fixture, ioSource_t source, int timeoutMs) {
+static bool clientFixtureDrainWriteQueue(clientFixture_t *fixture, bool drainTcpQueue, int timeoutMs) {
   int attempts;
   long queued;
 
@@ -164,7 +164,7 @@ static bool clientFixtureDrainWriteQueue(clientFixture_t *fixture, ioSource_t so
     return false;
   }
   for (attempts = 0; attempts < 8; attempts++) {
-    queued = source == ioSourceTcp
+    queued = drainTcpQueue
         ? ioTcpQueuedBytes(&fixture->client.tcpPoller)
         : ioTunQueuedBytes(&fixture->client.tunPoller);
     if (queued == 0) {
@@ -283,8 +283,9 @@ static int clientRunLoopOnFds(
   client.tunPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   client.tunPoller.poller.readEnabled = true;
 
-  client.tcpPoller.poller.fd = tcpFd;
-  client.tcpPoller.poller.kind = ioPollerKindTcp;
+  if (!sessionTestInitTcpPollerFromFd(&client.tcpPoller, tcpFd)) {
+    goto cleanup;
+  }
   client.tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   client.tcpPoller.poller.readEnabled = true;
 
@@ -801,7 +802,7 @@ static void testClientTunReadQueuesEncryptedTcpFrame(void) {
   testAssertTrue(
       runSessionStep(session, &fixture, event, key) == sessionStepContinue,
       "tun read event should continue");
-  testAssertTrue(clientFixtureDrainWriteQueue(&fixture, ioSourceTcp, 50), "reactor should flush queued tcp payload");
+  testAssertTrue(clientFixtureDrainWriteQueue(&fixture, true, 50), "reactor should flush queued tcp payload");
 
   nbytes = read(tcpPair[1], out, sizeof(out));
   testAssertTrue(nbytes > 0, "tcp peer should receive encrypted wire frame");
@@ -849,7 +850,7 @@ static void testClientTcpReadQueuesTunWrite(void) {
   testAssertTrue(
       runSessionStep(session, &fixture, event, key) == sessionStepContinue,
       "tcp read event should continue");
-  testAssertTrue(clientFixtureDrainWriteQueue(&fixture, ioSourceTun, 50), "reactor should flush queued tun payload");
+  testAssertTrue(clientFixtureDrainWriteQueue(&fixture, false, 50), "reactor should flush queued tun payload");
 
   testAssertTrue(
       recv(tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (ssize_t)strlen(payload),

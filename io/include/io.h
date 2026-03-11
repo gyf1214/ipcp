@@ -57,7 +57,6 @@ typedef enum {
 typedef ioPollerAction_t (*ioClosedFn_t)(void *ctx, ioPoller_t *poller);
 typedef ioPollerAction_t (*ioLowWatermarkFn_t)(void *ctx, ioPoller_t *poller, long queuedBytes);
 typedef ioPollerAction_t (*ioReadableFn_t)(void *ctx, ioReactor_t *reactor, ioPoller_t *poller);
-typedef ioPollerAction_t (*ioListenReadableFn_t)(void *ctx, ioReactor_t *reactor, ioListenPoller_t *listenPoller);
 
 typedef struct {
   ioClosedFn_t onClosed;
@@ -105,11 +104,6 @@ struct ioTunPoller_t {
   unsigned char outBuf[IoPollerQueueCapacity];
 };
 
-typedef enum {
-  ioSourceTun = 0,
-  ioSourceTcp,
-} ioSource_t;
-
 ioStatus_t ioPollerRead(ioPoller_t *poller, void *buf, long capacity, long *outNbytes);
 
 bool ioReactorInit(ioReactor_t *reactor);
@@ -125,7 +119,6 @@ ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs);
 
 int ioTunOpen(const char *ifName, ioIfMode_t mode);
 int ioTcpListen(const char *listenIP, int port);
-int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort);
 ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort);
 int ioTcpConnect(const char *remoteIP, int port);
 bool ioPollerListen(ioListenPoller_t *poller, const char *listenIP, int port);
@@ -147,8 +140,6 @@ void ioListenPollerDispose(ioListenPoller_t *poller);
 void ioTcpPollerDispose(ioTcpPoller_t *poller);
 void ioTunPollerDispose(ioTunPoller_t *poller);
 
-int ioTcpPollerInit(ioTcpPoller_t *poller, ioReactor_t *reactor, int tcpFd);
-int ioTunPollerInit(ioTunPoller_t *poller, ioReactor_t *reactor, int tunFd);
 bool ioTcpWrite(ioTcpPoller_t *poller, const void *data, long nbytes);
 bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes);
 bool ioTcpSetReadEnabled(ioTcpPoller_t *poller, bool enabled);

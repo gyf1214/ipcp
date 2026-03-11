@@ -115,6 +115,27 @@ static const ioPollerCallbacks_t sessionPollerFixtureCallbacks = {
     .onReadable = sessionPollerFixtureOnReadable,
 };
 
+static const ioPollerCallbacks_t sessionTestNoopCallbacks = {
+    .onClosed = NULL,
+    .onLowWatermark = NULL,
+    .onReadable = NULL,
+};
+
+bool sessionTestInitTcpPollerFromFd(ioTcpPoller_t *poller, int tcpFd) {
+  if (poller == NULL || tcpFd < 0) {
+    return false;
+  }
+  memset(poller, 0, sizeof(*poller));
+  poller->poller.reactor = NULL;
+  poller->poller.fd = tcpFd;
+  poller->poller.events = EPOLLRDHUP;
+  poller->poller.kind = ioPollerKindTcp;
+  poller->poller.callbacks = NULL;
+  poller->poller.ctx = NULL;
+  poller->poller.readEnabled = false;
+  return true;
+}
+
 static int setupSessionPollerFixture(sessionPollerFixture_t *poller, int tunFd, int tcpFd) {
   if (poller == NULL) {
     return -1;
@@ -137,10 +158,10 @@ static int setupSessionPollerFixture(sessionPollerFixture_t *poller, int tunFd, 
   }
 
   memset(&poller->tcpPoller, 0, sizeof(poller->tcpPoller));
-  poller->tcpPoller.poller.reactor = NULL;
-  poller->tcpPoller.poller.fd = tcpFd;
-  poller->tcpPoller.poller.events = EPOLLRDHUP;
-  poller->tcpPoller.poller.kind = ioPollerKindTcp;
+  if (!sessionTestInitTcpPollerFromFd(&poller->tcpPoller, tcpFd)) {
+    ioReactorDispose(&poller->reactor);
+    return -1;
+  }
   if (!ioReactorAddPoller(&poller->reactor, &poller->tcpPoller.poller, &sessionPollerFixtureCallbacks, poller, true)) {
     ioReactorDispose(&poller->reactor);
     return -1;
@@ -406,8 +427,14 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
   setupSessionPollerFixtureWithPairs(&poller, tunPair, sourcePair);
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairA) == 0, "dest A pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairB) == 0, "dest B pair should be created");
-  testAssertTrue(ioTcpPollerInit(&destPollerA, &poller.reactor, destPairA[0]) == 0, "dest A poller init should succeed");
-  testAssertTrue(ioTcpPollerInit(&destPollerB, &poller.reactor, destPairB[0]) == 0, "dest B poller init should succeed");
+  testAssertTrue(sessionTestInitTcpPollerFromFd(&destPollerA, destPairA[0]), "dest A poller init should succeed");
+  testAssertTrue(sessionTestInitTcpPollerFromFd(&destPollerB, destPairB[0]), "dest B poller init should succeed");
+  testAssertTrue(
+      ioReactorAddPoller(&poller.reactor, &destPollerA.poller, &sessionTestNoopCallbacks, NULL, true),
+      "dest A poller register should succeed");
+  testAssertTrue(
+      ioReactorAddPoller(&poller.reactor, &destPollerB.poller, &sessionTestNoopCallbacks, NULL, true),
+      "dest B poller register should succeed");
 
   session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
