@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "log.h"
 #include "client.h"
@@ -603,9 +604,18 @@ sessionStepResult_t sessionStep(
 }
 
 int sessionRunServer(const sessionServerConfig_t *cfg) {
+  int tunFd;
+  int listenFd;
+  sessionIfMode_t mode;
+  int rc;
+
   if (cfg == NULL
-      || cfg->tunFd < 0
-      || cfg->listenFd < 0
+      || cfg->ifName == NULL
+      || cfg->ifName[0] == '\0'
+      || (cfg->ifMode != ioIfModeTun && cfg->ifMode != ioIfModeTap)
+      || cfg->listenIP == NULL
+      || cfg->port <= 0
+      || cfg->port > 65535
       || cfg->resolveClaimFn == NULL
       || cfg->authTimeoutMs <= 0
       || cfg->heartbeat.intervalMs <= 0
@@ -614,17 +624,32 @@ int sessionRunServer(const sessionServerConfig_t *cfg) {
       || cfg->maxPreAuthSessions <= 0) {
     return -1;
   }
-  return serverServeMultiClient(
-      cfg->tunFd,
-      cfg->listenFd,
+
+  tunFd = ioTunOpen(cfg->ifName, cfg->ifMode);
+  if (tunFd < 0) {
+    return -1;
+  }
+  listenFd = ioTcpListen(cfg->listenIP, cfg->port);
+  if (listenFd < 0) {
+    close(tunFd);
+    return -1;
+  }
+  mode = cfg->ifMode == ioIfModeTap ? sessionIfModeTap : sessionIfModeTun;
+
+  rc = serverServeMultiClient(
+      tunFd,
+      listenFd,
       cfg->resolveClaimFn,
       cfg->resolveClaimCtx,
-      cfg->mode,
+      mode,
       cfg->serverIdentity,
       cfg->authTimeoutMs,
       &cfg->heartbeat,
       cfg->maxActiveSessions,
       cfg->maxPreAuthSessions);
+  close(tunFd);
+  close(listenFd);
+  return rc;
 }
 
 int sessionRunClient(const sessionClientConfig_t *cfg) {

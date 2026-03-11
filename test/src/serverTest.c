@@ -107,11 +107,12 @@ static void testServerServeMultiClientRejectsInvalidArgs(void) {
 
 static void testSessionRunEntrypointsRejectInvalidConfigs(void) {
   sessionServerConfig_t serverCfg = {
-      .tunFd = 3,
-      .listenFd = 4,
+      .ifName = "tun0",
+      .ifMode = ioIfModeTun,
+      .listenIP = "127.0.0.1",
+      .port = 5001,
       .resolveClaimFn = fakeLookup,
       .resolveClaimCtx = NULL,
-      .mode = sessionIfModeTun,
       .serverIdentity = &testServerIdentity,
       .authTimeoutMs = 5000,
       .heartbeat = testHeartbeatCfg,
@@ -121,12 +122,21 @@ static void testSessionRunEntrypointsRejectInvalidConfigs(void) {
 
   testAssertTrue(sessionRunServer(NULL) < 0, "sessionRunServer should reject null config pointer");
 
-  serverCfg.tunFd = -1;
-  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject invalid tun fd");
-  serverCfg.tunFd = 3;
-  serverCfg.listenFd = -1;
-  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject invalid listen fd");
-  serverCfg.listenFd = 4;
+  serverCfg.ifName = NULL;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject null interface name");
+  serverCfg.ifName = "tun0";
+  serverCfg.ifName = "";
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject empty interface name");
+  serverCfg.ifName = "tun0";
+  serverCfg.ifMode = (ioIfMode_t)99;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject invalid interface mode");
+  serverCfg.ifMode = ioIfModeTun;
+  serverCfg.listenIP = NULL;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject null listen ip");
+  serverCfg.listenIP = "127.0.0.1";
+  serverCfg.port = 0;
+  testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject non-positive listen port");
+  serverCfg.port = 5001;
   serverCfg.resolveClaimFn = NULL;
   testAssertTrue(sessionRunServer(&serverCfg) < 0, "sessionRunServer should reject null resolve callback");
   serverCfg.resolveClaimFn = fakeLookup;

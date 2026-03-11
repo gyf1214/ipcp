@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <errno.h>
 #include <sodium.h>
 
@@ -24,13 +23,6 @@ typedef struct {
   const cryptServerKeyStore_t *store;
   configIfMode_t ifMode;
 } serverKeyLookupCtx_t;
-
-static sessionIfMode_t toSessionIfMode(configIfMode_t mode) {
-  if (mode == configIfModeTap) {
-    return sessionIfModeTap;
-  }
-  return sessionIfModeTun;
-}
 
 static int serverLookupByClaim(
     void *ctx,
@@ -57,31 +49,17 @@ static int listenTcp(
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   serverKeyLookupCtx_t lookupCtx;
   sessionServerIdentity_t sessionIdentity;
-  int tunFd = -1;
-  int listenFd = ioTcpListen(listenIP, port);
-  if (listenFd < 0) {
-    errf("listen setup failed: %s", strerror(errno));
-    return -1;
-  }
-  logf("listening on %s:%d", listenIP, port);
-  logf("opening tun device %s", ifName);
-  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
-  if (tunFd < 0) {
-    errf("failed to open tun device %s: %s", ifName, strerror(errno));
-    close(listenFd);
-    return -1;
-  }
-  logf("successfully opened tun device %s", ifName);
 
   lookupCtx.store = keyStore;
   lookupCtx.ifMode = ifMode;
   memcpy(&sessionIdentity, serverIdentity, sizeof(sessionIdentity));
   sessionServerConfig_t sessionCfg = {
-      .tunFd = tunFd,
-      .listenFd = listenFd,
+      .ifName = ifName,
+      .ifMode = toIoIfMode(ifMode),
+      .listenIP = listenIP,
+      .port = port,
       .resolveClaimFn = serverLookupByClaim,
       .resolveClaimCtx = &lookupCtx,
-      .mode = toSessionIfMode(ifMode),
       .serverIdentity = &sessionIdentity,
       .authTimeoutMs = authTimeoutMs,
       .heartbeat = *heartbeatCfg,
@@ -89,13 +67,10 @@ static int listenTcp(
       .maxPreAuthSessions = maxPreAuthSessions,
   };
   if (sessionRunServer(&sessionCfg) != 0) {
-    close(tunFd);
-    close(listenFd);
+    errf("server session failed: %s", strerror(errno));
     return -1;
   }
 
-  close(tunFd);
-  close(listenFd);
   return 0;
 }
 

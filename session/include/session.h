@@ -32,11 +32,12 @@ typedef enum {
 } sessionIfMode_t;
 
 typedef struct {
-  int tunFd;
-  int listenFd;
+  const char *ifName;
+  ioIfMode_t ifMode;
+  const char *listenIP;
+  int port;
   sessionServerResolveClaimFn_t resolveClaimFn;
   void *resolveClaimCtx;
-  sessionIfMode_t mode;
   const sessionServerIdentity_t *serverIdentity;
   int authTimeoutMs;
   sessionHeartbeatConfig_t heartbeat;
