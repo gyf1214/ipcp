@@ -30,7 +30,7 @@ static long long fakeNowMs = 0;
 
 typedef struct {
   client_t client;
-  runtimeEventFixture_t events;
+  sessionEventFixture_t events;
 } clientFixture_t;
 
 static int writeAll(int fd, const void *buf, long nbytes) {
@@ -108,7 +108,7 @@ static int clientFixtureSetup(
   if (!ioReactorInit(&fixture->client.reactor)) {
     return -1;
   }
-  runtimeEventFixtureReset(&fixture->events);
+  sessionEventFixtureReset(&fixture->events);
 
   memset(&fixture->client.tunPoller, 0, sizeof(fixture->client.tunPoller));
   fixture->client.tunPoller.poller.reactor = NULL;
@@ -118,7 +118,7 @@ static int clientFixtureSetup(
   if (!ioReactorAddPoller(
           &fixture->client.reactor,
           &fixture->client.tunPoller.poller,
-          &runtimeEventFixtureCallbacks,
+          &sessionEventFixtureCallbacks,
           &fixture->events,
           true)) {
     ioReactorDispose(&fixture->client.reactor);
@@ -133,7 +133,7 @@ static int clientFixtureSetup(
   if (!ioReactorAddPoller(
           &fixture->client.reactor,
           &fixture->client.tcpPoller.poller,
-          &runtimeEventFixtureCallbacks,
+          &sessionEventFixtureCallbacks,
           &fixture->events,
           true)) {
     ioReactorDispose(&fixture->client.reactor);
@@ -153,7 +153,7 @@ static bool clientFixtureWaitEventOfKind(clientFixture_t *fixture, int timeoutMs
   if (fixture == NULL) {
     return false;
   }
-  return runtimeEventFixtureWaitEventOfKind(&fixture->events, &fixture->client.reactor, timeoutMs, expected);
+  return sessionEventFixtureWaitEventOfKind(&fixture->events, &fixture->client.reactor, timeoutMs, expected);
 }
 
 static bool clientFixtureDrainWriteQueue(clientFixture_t *fixture, bool drainTcpQueue, int timeoutMs) {

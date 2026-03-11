@@ -10,9 +10,9 @@ typedef struct {
   int capturedHead;
   int capturedTail;
   int capturedCount;
-} runtimeEventFixture_t;
+} sessionEventFixture_t;
 
-static inline void runtimeEventFixtureCaptureEvent(runtimeEventFixture_t *fixture, ioEvent_t event) {
+static inline void sessionEventFixtureCaptureEvent(sessionEventFixture_t *fixture, ioEvent_t event) {
   int capacity = (int)(sizeof(fixture->capturedEvents) / sizeof(fixture->capturedEvents[0]));
   if (fixture == NULL || fixture->capturedCount >= capacity) {
     return;
@@ -22,7 +22,7 @@ static inline void runtimeEventFixtureCaptureEvent(runtimeEventFixture_t *fixtur
   fixture->capturedCount++;
 }
 
-static inline bool runtimeEventFixturePopEvent(runtimeEventFixture_t *fixture, ioEvent_t *outEvent) {
+static inline bool sessionEventFixturePopEvent(sessionEventFixture_t *fixture, ioEvent_t *outEvent) {
   int capacity = (int)(sizeof(fixture->capturedEvents) / sizeof(fixture->capturedEvents[0]));
   if (fixture == NULL || outEvent == NULL || fixture->capturedCount <= 0) {
     return false;
@@ -33,11 +33,11 @@ static inline bool runtimeEventFixturePopEvent(runtimeEventFixture_t *fixture, i
   return true;
 }
 
-extern const ioPollerCallbacks_t runtimeEventFixtureCallbacks;
+extern const ioPollerCallbacks_t sessionEventFixtureCallbacks;
 bool sessionTestInitTcpPollerFromFd(ioTcpPoller_t *poller, int tcpFd);
 /* TODO(test-harness-cleanup): add a shared tun-poller-from-fd helper to mirror TCP setup. */
 
-static inline void runtimeEventFixtureReset(runtimeEventFixture_t *fixture) {
+static inline void sessionEventFixtureReset(sessionEventFixture_t *fixture) {
   if (fixture == NULL) {
     return;
   }
@@ -46,8 +46,8 @@ static inline void runtimeEventFixtureReset(runtimeEventFixture_t *fixture) {
   fixture->capturedCount = 0;
 }
 
-static inline bool runtimeEventFixtureWaitEvent(
-    runtimeEventFixture_t *fixture,
+static inline bool sessionEventFixtureWaitEvent(
+    sessionEventFixture_t *fixture,
     ioReactor_t *reactor,
     int timeoutMs,
     ioEvent_t *outEvent) {
@@ -57,29 +57,29 @@ static inline bool runtimeEventFixtureWaitEvent(
   }
   for (attempts = 0; attempts < 6; attempts++) {
     ioReactorStepResult_t step;
-    if (runtimeEventFixturePopEvent(fixture, outEvent)) {
+    if (sessionEventFixturePopEvent(fixture, outEvent)) {
       return true;
     }
     step = ioReactorStep(reactor, timeoutMs);
     if (step == ioReactorStepError || step == ioReactorStepStop) {
       return false;
     }
-    if (runtimeEventFixturePopEvent(fixture, outEvent)) {
+    if (sessionEventFixturePopEvent(fixture, outEvent)) {
       return true;
     }
   }
   return false;
 }
 
-static inline bool runtimeEventFixtureWaitEventOfKind(
-    runtimeEventFixture_t *fixture,
+static inline bool sessionEventFixtureWaitEventOfKind(
+    sessionEventFixture_t *fixture,
     ioReactor_t *reactor,
     int timeoutMs,
     ioEvent_t expected) {
   int attempts;
   ioEvent_t event;
   for (attempts = 0; attempts < 8; attempts++) {
-    if (!runtimeEventFixtureWaitEvent(fixture, reactor, timeoutMs, &event)) {
+    if (!sessionEventFixtureWaitEvent(fixture, reactor, timeoutMs, &event)) {
       return false;
     }
     if (event == expected) {

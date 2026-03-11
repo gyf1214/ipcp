@@ -823,7 +823,7 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   testAssertTrue(ioReactorInit(&server.reactor), "reactor init should succeed");
   server.tunPoller.poller.reactor = &server.reactor;
   testAssertTrue(
-      ioReactorAddPoller(&server.reactor, &server.tunPoller.poller, &runtimeEventFixtureCallbacks, NULL, true),
+      ioReactorAddPoller(&server.reactor, &server.tunPoller.poller, &sessionEventFixtureCallbacks, NULL, true),
       "tun poller should be attached to reactor");
 
   server.mode = sessionIfModeTun;
@@ -860,7 +860,7 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   close(tunPair[1]);
 }
 
-static void setupServerForSessionTest(
+static void serverFixtureSetup(
     server_t *server,
     int maxSessions,
     int tunPair[2],
@@ -885,7 +885,7 @@ static void setupServerForSessionTest(
   }
 }
 
-static void teardownServerForSessionTest(
+static void serverFixtureTeardown(
     server_t *server,
     int tunPair[2],
     int tcpPairA[2],
@@ -1041,7 +1041,7 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   testAssertTrue(ioReactorInit(&server.reactor), "reactor init should succeed");
   conn->tcpPoller.poller.reactor = &server.reactor;
   testAssertTrue(
-      ioReactorAddPoller(&server.reactor, &conn->tcpPoller.poller, &runtimeEventFixtureCallbacks, NULL, true),
+      ioReactorAddPoller(&server.reactor, &conn->tcpPoller.poller, &sessionEventFixtureCallbacks, NULL, true),
       "pre-auth poller should be attached");
 
   helloDecoder = conn->decoder;
@@ -1055,7 +1055,7 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
       ioTcpPollerHandoff(
           &server.activeConns[0].tcpPoller,
           &conn->tcpPoller,
-          &runtimeEventFixtureCallbacks,
+          &sessionEventFixtureCallbacks,
           NULL,
           true),
       "promote handoff should retarget to active poller");
@@ -1146,7 +1146,7 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   memset(key, 0x51, sizeof(key));
   memset(fill, 'p', sizeof(fill));
   memset(tunPayload, 'q', sizeof(tunPayload));
-  setupServerForSessionTest(&server, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  serverFixtureSetup(&server, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
   session = serverSessionAt(&server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
   poller = &server.activeConns[slotA].tcpPoller;
@@ -1162,7 +1162,7 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending exists");
   testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
 
-  teardownServerForSessionTest(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(void) {
@@ -1184,7 +1184,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   memset(key, 0x52, sizeof(key));
   memset(fill, 'r', sizeof(fill));
   memset(tunPayload, 's', sizeof(tunPayload));
-  setupServerForSessionTest(&server, 2, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  serverFixtureSetup(&server, 2, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
   ownerSession = serverSessionAt(&server, slotA);
   otherSession = serverSessionAt(&server, slotB);
   ownerPoller = &server.activeConns[slotA].tcpPoller;
@@ -1238,7 +1238,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused at low watermark");
   testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
 
-  teardownServerForSessionTest(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(void) {
@@ -1257,7 +1257,7 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   memset(key, 0x53, sizeof(key));
   memset(fill, 'u', sizeof(fill));
   memset(tunPayload, 'v', sizeof(tunPayload));
-  setupServerForSessionTest(&server, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  serverFixtureSetup(&server, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
   session = serverSessionAt(&server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
   poller = &server.activeConns[slotA].tcpPoller;
@@ -1277,7 +1277,7 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused after owner drop");
   testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
 
-  teardownServerForSessionTest(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload(void) {
