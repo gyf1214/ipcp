@@ -480,6 +480,13 @@ ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs) {
 
     if ((events[i].events & EPOLLOUT) != 0) {
       if (!pollerServiceWritable(poller, &queuedBefore, &queuedAfter)) {
+        if (poller->callbacks->onClosed != NULL) {
+          result = ioReactorApplyAction(poller, poller->callbacks->onClosed(poller->ctx, poller), &removed, &stopChain);
+          if (result == ioReactorStepStop || result == ioReactorStepError) {
+            return result;
+          }
+          continue;
+        }
         return ioReactorStepError;
       }
       if (poller->callbacks->onLowWatermark != NULL

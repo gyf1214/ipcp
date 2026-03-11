@@ -467,6 +467,45 @@ static void testIoReactorTcpWritableRearmsAfterFlush(void) {
   close(socketFds[1]);
 }
 
+static void testIoReactorWritableFailureInvokesClosedCallback(void) {
+  ioReactor_t reactor;
+  ioTcpPoller_t tcpPoller;
+  ioPollerCallbacks_t callbacks = {0};
+  reactorCallbackCounts_t counts = {0};
+  int socketFds[2];
+  char payload[] = "wfail";
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&tcpPoller, 0, sizeof(tcpPoller));
+  tcpPoller.poller.reactor = NULL;
+  tcpPoller.poller.fd = socketFds[0];
+  tcpPoller.poller.events = EPOLLRDHUP;
+  tcpPoller.poller.kind = ioPollerTcp;
+
+  callbacks.onClosed = reactorClosedRetarget;
+  callbacks.onReadable = reactorReadableCount;
+  callbacks.onLowWatermark = reactorLowWatermarkCount;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &tcpPoller.poller, &callbacks, &counts, true),
+      "tcp poller add should succeed");
+  testAssertTrue(ioTcpWrite(&tcpPoller, payload, (long)sizeof(payload)), "queue write should succeed");
+
+  /* Force writable flush failure while preserving an EPOLLOUT-ready registration in epoll. */
+  tcpPoller.poller.fd = -1;
+  testAssertTrue(
+      ioReactorStep(&reactor, 100) == ioReactorStepReady,
+      "writable failure should be handled via closed callback, not reactor error");
+  testAssertTrue(counts.closedCalls == 1, "writable failure should trigger closed callback once");
+  testAssertTrue(counts.lowWatermarkCalls == 0, "closed handling should stop writable callback chain");
+  testAssertTrue(counts.readableCalls == 0, "closed handling should stop readable callback chain");
+
+  ioReactorDispose(&reactor);
+  close(socketFds[0]);
+  close(socketFds[1]);
+}
+
 static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
   ioListenPoller_t listenPoller;
   ioTcpPoller_t acceptedPoller;
@@ -795,6 +834,7 @@ void runIoTests(void) {
   testIoReactorStepRetargetStopsCallbackChainWithoutRemoval();
   testIoPollerHeadersAndLowWatermarkEdge();
   testIoReactorTcpWritableRearmsAfterFlush();
+  testIoReactorWritableFailureInvokesClosedCallback();
   testIoListenPollerAcceptNonBlockingInitializesTcpPoller();
   testIoDetachedPollerSkipsEpollCtl();
   testIoTcpWriteEpollCtlFailureDoesNotQueue();

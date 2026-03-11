@@ -348,13 +348,6 @@ long long serverNowMs(const server_t *server) {
   return server->nowMsFn(server->nowCtx);
 }
 
-bool serverServiceTunWriteEvent(server_t *server) {
-  if (server == NULL) {
-    return false;
-  }
-  return ioTunServiceWriteEvent(&server->tunPoller);
-}
-
 int serverRetryBlockedTunRoundRobin(server_t *server) {
   int i;
   int start;
@@ -879,7 +872,6 @@ static int isValidTapClaim(const unsigned char *claim, long claimNbytes) {
 
 typedef enum {
   preAuthStateWaitClaim = 0,
-  preAuthStateSendChallenge,
   preAuthStateWaitHello,
 } preAuthState_t;
 
@@ -1080,16 +1072,7 @@ static bool serverDispatchPreAuth(
     if (!preAuthQueueChallenge(conn)) {
       return serverClosePreAuthConn(server, preAuthSlot);
     }
-    conn->authState = preAuthStateSendChallenge;
-  }
-
-  if (conn->authState == preAuthStateSendChallenge && (event == ioEventTcpWrite || event == ioEventTimeout)) {
-    if (!ioTcpServiceWriteEvent(&conn->tcpPoller)) {
-      return serverClosePreAuthConn(server, preAuthSlot);
-    }
-    if (ioTcpQueuedBytes(&conn->tcpPoller) == 0) {
-      conn->authState = preAuthStateWaitHello;
-    }
+    conn->authState = preAuthStateWaitHello;
   }
 
   if (conn->authState == preAuthStateWaitHello && event == ioEventTcpRead) {
@@ -1783,30 +1766,6 @@ static ioPollerAction_t serverOnPreAuthReadable(void *ctx, ioReactor_t *reactor,
   return retargeted ? ioPollerRetargeted : ioPollerContinue;
 }
 
-static ioPollerAction_t serverOnPreAuthLowWatermark(void *ctx, ioPoller_t *poller, long queuedBytes) {
-  serverRuntimeCtx_t *runtime = ctx;
-  int preAuthSlot;
-  bool retargeted = false;
-  (void)queuedBytes;
-  if (runtime == NULL || runtime->server == NULL || poller == NULL) {
-    return ioPollerStop;
-  }
-  preAuthSlot = serverFindPreAuthSlotByPollerPtr(runtime->server, poller);
-  if (preAuthSlot < 0) {
-    return ioPollerContinue;
-  }
-  if (!serverDispatchPreAuth(
-          runtime->server,
-          preAuthSlot,
-          ioEventTcpWrite,
-          runtime->resolveClaimFn,
-          runtime->resolveClaimCtx,
-          &retargeted)) {
-    return ioPollerStop;
-  }
-  return retargeted ? ioPollerRetargeted : ioPollerContinue;
-}
-
 static ioPollerAction_t serverOnPreAuthClosed(void *ctx, ioPoller_t *poller) {
   serverRuntimeCtx_t *runtime = ctx;
   int preAuthSlot;
@@ -1843,7 +1802,7 @@ static const ioPollerCallbacks_t serverActiveCallbacks = {
 
 static const ioPollerCallbacks_t serverPreAuthCallbacks = {
     .onClosed = serverOnPreAuthClosed,
-    .onLowWatermark = serverOnPreAuthLowWatermark,
+    .onLowWatermark = NULL,
     .onReadable = serverOnPreAuthReadable,
 };
 
