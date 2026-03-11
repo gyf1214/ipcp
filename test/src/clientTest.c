@@ -85,11 +85,6 @@ static int readWireFrame(int fd, protocolFrame_t *frame) {
   return readAll(fd, frame->buf + ProtocolWireLengthSize, contentNbytes);
 }
 
-static void setupPairs(int tunPair[2], int tcpPair[2]) {
-  testAssertTrue(sessionTestTunPairOpen(tunPair), "tun socketpair should succeed");
-  testAssertTrue(sessionTestTcpPairOpen(tcpPair), "tcp socketpair should succeed");
-}
-
 static long long fakeNow(void *ctx) {
   (void)ctx;
   return fakeNowMs;
@@ -296,6 +291,57 @@ cleanup:
   return result;
 }
 
+static void clientLoopPairsSetup(clientFixture_t *fixture) {
+  testAssertTrue(fixture != NULL, "run-loop fixture should not be null");
+  fixture->tunPair[0] = -1;
+  fixture->tunPair[1] = -1;
+  fixture->tcpPair[0] = -1;
+  fixture->tcpPair[1] = -1;
+  testAssertTrue(sessionTestTunPairOpen(fixture->tunPair), "tun socketpair should succeed");
+  testAssertTrue(sessionTestTcpPairOpen(fixture->tcpPair), "tcp socketpair should succeed");
+}
+
+static pid_t clientLoopStartChild(clientFixture_t *fixture) {
+  pid_t pid;
+  testAssertTrue(fixture != NULL, "run-loop fixture should not be null");
+  pid = fork();
+  testAssertTrue(pid >= 0, "fork should succeed");
+  if (pid == 0) {
+    close(fixture->tunPair[1]);
+    close(fixture->tcpPair[1]);
+    _exit(
+        clientRunLoopOnFds(
+            fixture->tunPair[0],
+            fixture->tcpPair[0],
+            testClaim,
+            sizeof(testClaim),
+            testClientKey,
+            &heartbeatCfg)
+            == 0
+            ? 0
+            : 1);
+  }
+  close(fixture->tunPair[0]);
+  fixture->tunPair[0] = -1;
+  close(fixture->tcpPair[0]);
+  fixture->tcpPair[0] = -1;
+  return pid;
+}
+
+static void clientLoopWaitChild(pid_t pid, int *status) {
+  testAssertTrue(status != NULL, "run-loop status should not be null");
+  testAssertTrue(pid > 0, "run-loop child pid should be valid");
+  testAssertTrue(waitpid(pid, status, 0) == pid, "waitpid should succeed");
+}
+
+static void clientLoopPairsTeardown(clientFixture_t *fixture) {
+  if (fixture == NULL) {
+    return;
+  }
+  sessionTestTunPairClose(fixture->tunPair);
+  sessionTestTcpPairClose(fixture->tcpPair);
+}
+
 static void testClientRunLoopRejectsInvalidArgs(void) {
   testAssertTrue(
       clientRunLoopOnFds(-1, -1, NULL, 0, NULL, &heartbeatCfg) != 0,
@@ -344,42 +390,30 @@ static void testSessionRunClientRejectsInvalidConfig(void) {
 }
 
 static void testClientRunLoopFailsOnInvalidChallengeLength(void) {
-  int tunPair[2];
-  int tcpPair[2];
+  clientFixture_t fixture;
   pid_t pid;
   protocolFrame_t claimFrame;
   protocolRawMsg_t rawChallenge;
   protocolFrame_t challengeFrame;
   int status = 0;
 
-  setupPairs(tunPair, tcpPair);
-  pid = fork();
-  testAssertTrue(pid >= 0, "fork should succeed");
-  if (pid == 0) {
-    close(tunPair[1]);
-    close(tcpPair[1]);
-    _exit(clientRunLoopOnFds(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
-  }
-
-  close(tunPair[0]);
-  close(tcpPair[0]);
-  testAssertTrue(readWireFrame(tcpPair[1], &claimFrame) == 0, "server should receive claim wire frame");
+  clientLoopPairsSetup(&fixture);
+  pid = clientLoopStartChild(&fixture);
+  testAssertTrue(readWireFrame(fixture.tcpPair[1], &claimFrame) == 0, "server should receive claim wire frame");
 
   rawChallenge.buf = "bad";
   rawChallenge.nbytes = 3;
   testAssertTrue(protocolEncodeRaw(&rawChallenge, &challengeFrame) == protocolStatusOk, "encode raw challenge should succeed");
-  testAssertTrue(writeWireFrame(tcpPair[1], &challengeFrame) == 0, "write invalid challenge should succeed");
+  testAssertTrue(writeWireFrame(fixture.tcpPair[1], &challengeFrame) == 0, "write invalid challenge should succeed");
 
-  close(tcpPair[1]);
-  close(tunPair[1]);
-  testAssertTrue(waitpid(pid, &status, 0) == pid, "waitpid should succeed");
+  clientLoopPairsTeardown(&fixture);
+  clientLoopWaitChild(pid, &status);
   testAssertTrue(WIFEXITED(status), "child should exit normally");
   testAssertTrue(WEXITSTATUS(status) == 1, "client should fail on invalid challenge length");
 }
 
 static void testClientRunLoopHandshakeAndStopOnPeerClose(void) {
-  int tunPair[2];
-  int tcpPair[2];
+  clientFixture_t fixture;
   pid_t pid;
   protocolFrame_t claimFrame;
   protocolRawMsg_t claimMsg;
@@ -393,19 +427,10 @@ static void testClientRunLoopHandshakeAndStopOnPeerClose(void) {
   unsigned char challengeNonce[ProtocolNonceSize];
 
   memset(challengeNonce, 0x55, sizeof(challengeNonce));
-  setupPairs(tunPair, tcpPair);
-  pid = fork();
-  testAssertTrue(pid >= 0, "fork should succeed");
-  if (pid == 0) {
-    close(tunPair[1]);
-    close(tcpPair[1]);
-    _exit(clientRunLoopOnFds(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
-  }
+  clientLoopPairsSetup(&fixture);
+  pid = clientLoopStartChild(&fixture);
 
-  close(tunPair[0]);
-  close(tcpPair[0]);
-
-  testAssertTrue(readWireFrame(tcpPair[1], &claimFrame) == 0, "server should receive claim");
+  testAssertTrue(readWireFrame(fixture.tcpPair[1], &claimFrame) == 0, "server should receive claim");
   {
     protocolDecoderInit(&decoder);
     consumed = 0;
@@ -421,9 +446,9 @@ static void testClientRunLoopHandshakeAndStopOnPeerClose(void) {
   rawChallenge.buf = (const char *)challengeNonce;
   rawChallenge.nbytes = ProtocolNonceSize;
   testAssertTrue(protocolEncodeRaw(&rawChallenge, &challengeFrame) == protocolStatusOk, "encode challenge should succeed");
-  testAssertTrue(writeWireFrame(tcpPair[1], &challengeFrame) == 0, "write challenge should succeed");
+  testAssertTrue(writeWireFrame(fixture.tcpPair[1], &challengeFrame) == 0, "write challenge should succeed");
 
-  testAssertTrue(readWireFrame(tcpPair[1], &helloFrame) == 0, "server should receive hello");
+  testAssertTrue(readWireFrame(fixture.tcpPair[1], &helloFrame) == 0, "server should receive hello");
   {
     protocolDecoderInit(&decoder);
     consumed = 0;
@@ -436,9 +461,8 @@ static void testClientRunLoopHandshakeAndStopOnPeerClose(void) {
   testAssertTrue(helloMsg.nbytes == ProtocolNonceSize * 2, "hello payload size should include echoed and client nonce");
   testAssertTrue(memcmp(helloMsg.buf, challengeNonce, ProtocolNonceSize) == 0, "hello should echo server nonce");
 
-  close(tcpPair[1]);
-  close(tunPair[1]);
-  testAssertTrue(waitpid(pid, &status, 0) == pid, "waitpid should succeed");
+  clientLoopPairsTeardown(&fixture);
+  clientLoopWaitChild(pid, &status);
   testAssertTrue(WIFEXITED(status), "child should exit normally");
   testAssertTrue(WEXITSTATUS(status) == 0, "client should return success when peer closes after handshake");
 }
