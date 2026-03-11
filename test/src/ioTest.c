@@ -68,37 +68,22 @@ static void testIoPollerReadError(void) {
   testAssertTrue(status == ioStatusError, "ioPollerRead should reject null poller");
 }
 
-static void testIoTunOpenRejectNullName(void) {
-  testAssertTrue(ioTunOpen(NULL, ioIfModeTun) < 0, "ioTunOpen should reject NULL interface name");
-}
-
-static void testIoTunOpenRejectInvalidMode(void) {
-  testAssertTrue(ioTunOpen("tun0", (ioIfMode_t)99) < 0, "ioTunOpen should reject invalid interface mode");
-}
-
-static void testIoTcpListenRejectInvalidIp(void) {
-  testAssertTrue(ioTcpListen("not-an-ip", 5000) < 0, "ioTcpListen should reject invalid listen IP");
-}
-
-static void testIoTcpConnectRejectInvalidIp(void) {
-  testAssertTrue(ioTcpConnect("not-an-ip", 5000) < 0, "ioTcpConnect should reject invalid remote IP");
-}
-
 static void testIoTcpListenBacklogIsGreaterThanOne(void) {
   testAssertTrue(IoTcpListenBacklog > 1, "listen backlog should allow more than one pending client");
 }
 
-static void testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty(void) {
-  int listenFd = ioTcpListen("127.0.0.1", 46110);
-  int connFd = -1;
+static void testIoListenPollerAcceptWouldBlockWhenQueueEmpty(void) {
+  ioListenPoller_t listenPoller;
+  ioTcpPoller_t connPoller;
   ioStatus_t status;
 
-  testAssertTrue(listenFd >= 0, "ioTcpListen should succeed");
-  status = ioTcpAcceptNonBlocking(listenFd, &connFd, NULL, 0, NULL);
-  testAssertTrue(status == ioStatusWouldBlock, "ioTcpAcceptNonBlocking should report empty queue");
-  testAssertTrue(connFd == -1, "ioTcpAcceptNonBlocking should leave conn fd unset on would-block");
+  testAssertTrue(ioPollerListen(&listenPoller, "127.0.0.1", 46110), "listen poller listen should succeed");
+  memset(&connPoller, 0, sizeof(connPoller));
+  status = ioPollerAccept(&listenPoller, &connPoller, NULL, 0, NULL);
+  testAssertTrue(status == ioStatusWouldBlock, "ioPollerAccept should report empty queue");
+  testAssertTrue(connPoller.poller.fd == 0, "ioPollerAccept should leave output poller unchanged on would-block");
 
-  close(listenFd);
+  ioListenPollerDispose(&listenPoller);
 }
 
 static void testIoListenPollerListenRejectNullPoller(void) {
@@ -136,24 +121,25 @@ static void testIoTcpPollerConnectRejectInvalidArgs(void) {
 }
 
 static void testIoTcpPollerConnectInitializesPoller(void) {
+  ioListenPoller_t listenPoller;
   ioTcpPoller_t tcpPoller;
-  int listenFd;
-  int acceptedFd = -1;
+  ioTcpPoller_t acceptedPoller;
   int attempts;
   ioStatus_t status;
 
+  memset(&listenPoller, 0, sizeof(listenPoller));
   memset(&tcpPoller, 0, sizeof(tcpPoller));
-  listenFd = ioTcpListen("127.0.0.1", 46113);
-  testAssertTrue(listenFd >= 0, "listen setup should succeed");
+  memset(&acceptedPoller, 0, sizeof(acceptedPoller));
+  testAssertTrue(ioPollerListen(&listenPoller, "127.0.0.1", 46113), "listen setup should succeed");
   testAssertTrue(
       ioPollerConnect(&tcpPoller, "127.0.0.1", 46113),
       "tcp poller connect should succeed against local listener");
 
-  status = ioTcpAcceptNonBlocking(listenFd, &acceptedFd, NULL, 0, NULL);
+  status = ioPollerAccept(&listenPoller, &acceptedPoller, NULL, 0, NULL);
   if (status == ioStatusWouldBlock) {
     for (attempts = 0; attempts < 10 && status == ioStatusWouldBlock; attempts++) {
       usleep(1000);
-      status = ioTcpAcceptNonBlocking(listenFd, &acceptedFd, NULL, 0, NULL);
+      status = ioPollerAccept(&listenPoller, &acceptedPoller, NULL, 0, NULL);
     }
   }
 
@@ -164,9 +150,9 @@ static void testIoTcpPollerConnectInitializesPoller(void) {
   testAssertTrue((tcpPoller.poller.events & EPOLLIN) != 0, "connected tcp poller should enable EPOLLIN");
   testAssertTrue((tcpPoller.poller.events & EPOLLRDHUP) != 0, "connected tcp poller should enable EPOLLRDHUP");
 
-  close(acceptedFd);
+  ioTcpPollerDispose(&acceptedPoller);
   ioTcpPollerDispose(&tcpPoller);
-  close(listenFd);
+  ioListenPollerDispose(&listenPoller);
 }
 
 static void testIoTunPollerOpenRejectInvalidArgs(void) {
@@ -508,13 +494,13 @@ static void testIoReactorWritableFailureInvokesClosedCallback(void) {
 
 static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
   ioListenPoller_t listenPoller;
+  ioTcpPoller_t clientPoller;
   ioTcpPoller_t acceptedPoller;
-  int clientFd = -1;
   ioStatus_t status;
 
+  memset(&clientPoller, 0, sizeof(clientPoller));
   testAssertTrue(ioPollerListen(&listenPoller, "127.0.0.1", 46111), "listen poller listen should succeed");
-  clientFd = ioTcpConnect("127.0.0.1", 46111);
-  testAssertTrue(clientFd >= 0, "client connect should succeed");
+  testAssertTrue(ioPollerConnect(&clientPoller, "127.0.0.1", 46111), "client connect should succeed");
 
   status = ioPollerAccept(&listenPoller, &acceptedPoller, NULL, 0, NULL);
   if (status == ioStatusWouldBlock) {
@@ -527,7 +513,7 @@ static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
   testAssertTrue(acceptedPoller.poller.reactor == NULL, "accepted tcp poller should start detached from epoll");
   testAssertTrue(acceptedPoller.poller.kind == ioPollerKindTcp, "accepted poller kind should be tcp");
 
-  close(clientFd);
+  ioTcpPollerDispose(&clientPoller);
   ioTcpPollerDispose(&acceptedPoller);
   ioListenPollerDispose(&listenPoller);
 }
@@ -816,12 +802,8 @@ void runIoTests(void) {
   testIoPollerReadOk();
   testIoPollerReadClosed();
   testIoPollerReadError();
-  testIoTunOpenRejectNullName();
-  testIoTunOpenRejectInvalidMode();
-  testIoTcpListenRejectInvalidIp();
-  testIoTcpConnectRejectInvalidIp();
   testIoTcpListenBacklogIsGreaterThanOne();
-  testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty();
+  testIoListenPollerAcceptWouldBlockWhenQueueEmpty();
   testIoListenPollerListenRejectNullPoller();
   testIoListenPollerAcceptNonBlockingRejectInvalidArgs();
   testIoTcpPollerConnectRejectInvalidArgs();

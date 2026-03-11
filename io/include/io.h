@@ -117,10 +117,6 @@ bool ioReactorAddPoller(
 bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled);
 ioReactorStepResult_t ioReactorStep(ioReactor_t *reactor, int timeoutMs);
 
-int ioTunOpen(const char *ifName, ioIfMode_t mode);
-int ioTcpListen(const char *listenIP, int port);
-ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort);
-int ioTcpConnect(const char *remoteIP, int port);
 bool ioPollerListen(ioListenPoller_t *poller, const char *listenIP, int port);
 ioStatus_t ioPollerAccept(
     ioListenPoller_t *listenPoller,

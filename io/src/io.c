@@ -557,7 +557,7 @@ ioStatus_t ioPollerRead(ioPoller_t *poller, void *buf, long capacity, long *outN
   return ioReadSome(poller->fd, buf, capacity, outNbytes);
 }
 
-int ioTunOpen(const char *ifName, ioIfMode_t mode) {
+static int ioTunOpen(const char *ifName, ioIfMode_t mode) {
   struct ifreq ifr;
   int fd;
   short ifFlags = 0;
@@ -609,7 +609,7 @@ static int fillPeerInfo(const struct sockaddr_in *clientAddr, char *peerIp, long
   return 0;
 }
 
-int ioTcpListen(const char *listenIP, int port) {
+static int ioTcpListen(const char *listenIP, int port) {
   int listenFd;
   struct sockaddr_in serverAddr;
 
@@ -639,7 +639,7 @@ int ioTcpListen(const char *listenIP, int port) {
   return listenFd;
 }
 
-ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort) {
+static ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort) {
   struct sockaddr_in clientAddr;
   socklen_t addrLen = sizeof(clientAddr);
   int listenFlags;
@@ -686,7 +686,7 @@ ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, lo
   return ioStatusOk;
 }
 
-int ioTcpConnect(const char *remoteIP, int port) {
+static int ioTcpConnect(const char *remoteIP, int port) {
   int connFd;
   struct sockaddr_in remoteAddr;
 
