@@ -451,6 +451,65 @@ static void testIoDetachedPollerSkipsEpollCtl(void) {
   testAssertTrue(ioTcpQueuedBytes(&tcpPoller) == 1, "detached queue write should still buffer bytes");
 }
 
+static void testIoTcpWriteEpollCtlFailureDoesNotQueue(void) {
+  ioReactor_t reactor;
+  ioTcpPoller_t tcpPoller;
+  ioPollerCallbacks_t callbacks = {0};
+  int socketFds[2];
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&tcpPoller, 0, sizeof(tcpPoller));
+  tcpPoller.poller.reactor = NULL;
+  tcpPoller.poller.fd = socketFds[0];
+  tcpPoller.poller.events = EPOLLRDHUP;
+  tcpPoller.poller.kind = ioPollerTcp;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &tcpPoller.poller, &callbacks, NULL, true),
+      "tcp poller add should succeed");
+  testAssertTrue(close(reactor.epollFd) == 0, "closing epoll fd should succeed");
+
+  testAssertTrue(!ioTcpWrite(&tcpPoller, "x", 1), "tcp write should fail when epoll ctl mod fails");
+  testAssertTrue(ioTcpQueuedBytes(&tcpPoller) == 0, "failed tcp write should not leave queued bytes");
+  testAssertTrue((tcpPoller.poller.events & EPOLLOUT) == 0, "failed tcp write should keep EPOLLOUT disabled");
+
+  reactor.epollFd = -1;
+  ioReactorDeinit(&reactor);
+  close(socketFds[0]);
+  close(socketFds[1]);
+}
+
+static void testIoTunWriteEpollCtlFailureDoesNotQueue(void) {
+  ioReactor_t reactor;
+  ioTunPoller_t tunPoller;
+  ioPollerCallbacks_t callbacks = {0};
+  int socketFds[2];
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&tunPoller, 0, sizeof(tunPoller));
+  tunPoller.poller.reactor = NULL;
+  tunPoller.poller.fd = socketFds[0];
+  tunPoller.poller.events = EPOLLRDHUP;
+  tunPoller.poller.kind = ioPollerTun;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &tunPoller.poller, &callbacks, NULL, true),
+      "tun poller add should succeed");
+  testAssertTrue(close(reactor.epollFd) == 0, "closing epoll fd should succeed");
+
+  testAssertTrue(!ioTunWrite(&tunPoller, "x", 1), "tun write should fail when epoll ctl mod fails");
+  testAssertTrue(ioTunQueuedBytes(&tunPoller) == 0, "failed tun write should not leave queued bytes");
+  testAssertTrue(tunPoller.frameCount == 0, "failed tun write should not enqueue frame metadata");
+  testAssertTrue((tunPoller.poller.events & EPOLLOUT) == 0, "failed tun write should keep EPOLLOUT disabled");
+
+  reactor.epollFd = -1;
+  ioReactorDeinit(&reactor);
+  close(socketFds[0]);
+  close(socketFds[1]);
+}
+
 void runIoTests(void) {
   testIoReadSomeOk();
   testIoReadSomeClosed();
@@ -474,4 +533,6 @@ void runIoTests(void) {
   testIoReactorTcpWritableRearmsAfterFlush();
   testIoListenPollerAcceptNonBlockingInitializesTcpPoller();
   testIoDetachedPollerSkipsEpollCtl();
+  testIoTcpWriteEpollCtlFailureDoesNotQueue();
+  testIoTunWriteEpollCtlFailureDoesNotQueue();
 }
