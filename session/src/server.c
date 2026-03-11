@@ -794,6 +794,10 @@ int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadline
     }
     memset(conn, 0, sizeof(*conn));
     conn->connFd = connFd;
+    conn->tcpPoller.poller.fd = connFd;
+    conn->tcpPoller.poller.kind = ioPollerTcp;
+    conn->tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+    conn->tcpPoller.poller.readEnabled = true;
     conn->authDeadlineMs = authDeadlineMs;
     conn->resolvedActiveSlot = -1;
     protocolDecoderInit(&conn->decoder);
@@ -829,6 +833,15 @@ bool serverRemovePreAuthConn(server_t *server, int preAuthSlot) {
   conn->authState = 0;
   conn->authDeadlineMs = 0;
   conn->resolvedActiveSlot = -1;
+  conn->tcpPoller.poller.reactor = NULL;
+  conn->tcpPoller.poller.fd = -1;
+  conn->tcpPoller.poller.events = 0;
+  conn->tcpPoller.poller.callbacks = NULL;
+  conn->tcpPoller.poller.ctx = NULL;
+  conn->tcpPoller.poller.readEnabled = false;
+  conn->tcpPoller.outOffset = 0;
+  conn->tcpPoller.outNbytes = 0;
+  memset(conn->tcpPoller.outBuf, 0, sizeof(conn->tcpPoller.outBuf));
   conn->connFd = -1;
   conn->active = false;
   server->preAuthCount--;
@@ -857,7 +870,7 @@ bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot) {
     return false;
   }
 
-  connFd = preAuth->connFd;
+  connFd = preAuth->tcpPoller.poller.fd;
   if (serverAddClient(
           server, preAuth->resolvedActiveSlot, connFd, preAuth->resolvedKey, preAuth->claim, preAuth->claimNbytes)
       < 0) {
@@ -897,7 +910,7 @@ static bool serverClosePreAuthConn(server_t *server, int preAuthSlot) {
   if (conn == NULL) {
     return false;
   }
-  connFd = conn->connFd;
+  connFd = conn->tcpPoller.poller.fd;
   (void)serverEpollCtl(server->epollFd, EPOLL_CTL_DEL, connFd, 0, NULL);
   close(connFd);
   return serverRemovePreAuthConn(server, preAuthSlot);
@@ -924,15 +937,12 @@ static bool serverSetPreAuthWriteEnabled(server_t *server, int connFd, bool writ
 static bool preAuthReadIntoCarry(preAuthConn_t *conn) {
   long nbytes = 0;
   ioStatus_t status;
-  ioPoller_t poller;
 
   if (conn->tcpReadCarryNbytes >= (long)sizeof(conn->tcpReadCarryBuf)) {
     return false;
   }
-  memset(&poller, 0, sizeof(poller));
-  poller.fd = conn->connFd;
   status = ioPollerRead(
-      &poller,
+      &conn->tcpPoller.poller,
       conn->tcpReadCarryBuf + conn->tcpReadCarryNbytes,
       (long)sizeof(conn->tcpReadCarryBuf) - conn->tcpReadCarryNbytes,
       &nbytes);
@@ -1013,7 +1023,7 @@ static bool preAuthQueueChallenge(preAuthConn_t *conn) {
 static bool preAuthFlushChallenge(preAuthConn_t *conn) {
   while (conn->authWriteNbytes > 0) {
     ssize_t wrote =
-        write(conn->connFd, conn->authWriteBuf + conn->authWriteOffset, (size_t)conn->authWriteNbytes);
+        write(conn->tcpPoller.poller.fd, conn->authWriteBuf + conn->authWriteOffset, (size_t)conn->authWriteNbytes);
     if (wrote > 0) {
       conn->authWriteOffset += (long)wrote;
       conn->authWriteNbytes -= (long)wrote;
@@ -1120,7 +1130,7 @@ static bool serverDispatchPreAuth(
       return serverClosePreAuthConn(server, preAuthSlot);
     }
     conn->authState = preAuthStateSendChallenge;
-    if (!serverSetPreAuthWriteEnabled(server, conn->connFd, true)) {
+    if (!serverSetPreAuthWriteEnabled(server, conn->tcpPoller.poller.fd, true)) {
       return false;
     }
   }
@@ -1131,7 +1141,7 @@ static bool serverDispatchPreAuth(
     }
     if (conn->authWriteNbytes == 0) {
       conn->authState = preAuthStateWaitHello;
-      if (!serverSetPreAuthWriteEnabled(server, conn->connFd, false)) {
+      if (!serverSetPreAuthWriteEnabled(server, conn->tcpPoller.poller.fd, false)) {
         return false;
       }
     }

@@ -992,6 +992,8 @@ static void testServerCreateAndRemovePreAuthConnResetsState(void) {
   testAssertTrue(slot >= 0, "pre-auth slot should be allocated");
   conn = serverPreAuthAt(&server, slot);
   testAssertTrue(conn != NULL, "pre-auth connection should be retrievable");
+  testAssertTrue(conn->tcpPoller.poller.fd == tcpPair[0], "pre-auth create should initialize embedded tcp poller fd");
+  testAssertTrue(conn->tcpPoller.poller.kind == ioPollerTcp, "pre-auth create should mark embedded poller as tcp");
   conn->decoder.frame.nbytes = 99;
   conn->decoder.offset = 11;
   conn->decoder.hasFrame = 1;
@@ -1049,6 +1051,10 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   memcpy(conn->resolvedKey, testKey, sizeof(conn->resolvedKey));
   memcpy(conn->claim, claim2, sizeof(claim2));
   conn->claimNbytes = (long)sizeof(claim2);
+  conn->tcpPoller.poller.fd = tcpPair[0];
+  conn->tcpPoller.poller.kind = ioPollerTcp;
+  conn->tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  conn->tcpPoller.poller.readEnabled = true;
   protocolDecoderInit(&conn->decoder);
   conn->decoder.hasFrame = 1;
   conn->decoder.offset = 7;
@@ -1060,10 +1066,14 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
 
   helloDecoder = conn->decoder;
   memcpy(helloCarryBuf, conn->tcpReadCarryBuf, (size_t)helloCarryNbytes);
+  testAssertTrue(conn->tcpPoller.poller.fd == tcpPair[0], "pre-auth poller should own connection fd before promote");
   testAssertTrue(serverPromoteToActiveSlot(&server, slot), "promote should create active session");
   testAssertTrue(server.preAuthCount == 0, "promote should remove pre-auth slot");
   testAssertTrue(server.activeCount == 1, "promote should increment active count");
   testAssertTrue(serverConnFdAt(&server, 0) == tcpPair[0], "promote should preserve connection fd");
+  testAssertTrue(
+      server.activeConns[0].tcpPoller.poller.fd == tcpPair[0],
+      "promote should bind active poller to pre-auth-owned connection fd");
 
   activeSession = serverSessionAt(&server, 0);
   testAssertTrue(activeSession != NULL, "promoted active session should exist");

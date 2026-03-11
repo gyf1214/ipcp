@@ -14,6 +14,7 @@ typedef enum {
 
 typedef struct {
   int connFd;
+  ioTcpPoller_t tcpPoller;
   long long authDeadlineMs;
   int resolvedActiveSlot;
   unsigned char resolvedKey[ProtocolPskSize];
