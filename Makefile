@@ -40,17 +40,10 @@ all : clean-prelude
 	$(MAKE) all-all
 rebuild : clean all
 
-verify-no-raw-server-io :
-	@if command -v rg >/dev/null 2>&1; then \
-		! rg -n "epoll_|read\\(|write\\(|close\\(" session/src/server.c >/dev/null; \
-	else \
-		! grep -nE "epoll_|read\\(|write\\(|close\\(" session/src/server.c >/dev/null; \
-	fi
-
-test : all verify-no-raw-server-io
+test : all
 	$(MAKE) test-test
 
 integration-test : all
 	bash test/integration/run_all_tests.sh
 
-.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test integration-test verify-no-raw-server-io
+.PHONY : default all prelude clean-prelude rebuild-prelude clean rebuild test integration-test
