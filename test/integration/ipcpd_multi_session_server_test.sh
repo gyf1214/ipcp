@@ -321,6 +321,11 @@ if ! ns_exec "$serverNs" timeout 8 ping -I tun0 -c 2 -W 1 10.250.0.3 >/dev/null 
   dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
   exit 1
 fi
+if ! ns_exec "$clientNsA" timeout 8 ping -I tun0 -c 2 -W 1 10.250.0.3 >/dev/null 2>&1; then
+  echo "expected client A to ping client B over routed tun path" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
 
 rxA0="$(read_rx_packets "$clientNsA" tun0)"
 rxB0="$(read_rx_packets "$clientNsB" tun0)"
@@ -335,6 +340,23 @@ if [[ "$rxA1" -le "$rxA0" ]]; then
 fi
 if [[ "$rxB1" -le "$rxB0" ]]; then
   echo "expected client B to receive server broadcast fanout packets" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+
+rxSrv0="$(read_rx_packets "$serverNs" tun0)"
+rxB2_0="$(read_rx_packets "$clientNsB" tun0)"
+ns_exec "$clientNsA" timeout 8 ping -I tun0 -b -c 3 -W 1 10.250.0.255 >/dev/null 2>&1 || true
+sleep 1
+rxSrv1="$(read_rx_packets "$serverNs" tun0)"
+rxB2_1="$(read_rx_packets "$clientNsB" tun0)"
+if [[ "$rxSrv1" -le "$rxSrv0" ]]; then
+  echo "expected server tun to receive client-originated broadcast packets" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
+  exit 1
+fi
+if [[ "$rxB2_1" -le "$rxB2_0" ]]; then
+  echo "expected client B to receive client-originated broadcast fanout packets" >&2
   dump_logs "$serverLog" "$clientLogA" "$clientLogB" "$clientLogC"
   exit 1
 fi

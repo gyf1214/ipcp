@@ -4,8 +4,6 @@
 
 #include "ioTest.h"
 #include "protocolTest.h"
-#include "clientTest.h"
-#include "serverTest.h"
 #include "sessionTest.h"
 #include "logTest.h"
 

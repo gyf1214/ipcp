@@ -4,8 +4,8 @@
 #include "protocol.h"
 
 typedef struct {
-  configIfMode_t ifMode;
-  unsigned char claim[SessionClaimSize];
+  ioIfMode_t ifMode;
+  unsigned char claim[DaemonClaimSize];
   long claimNbytes;
   unsigned char key[ProtocolPskSize];
 } cryptServerKeyEntry_t;
@@ -21,7 +21,7 @@ void cryptServerKeyStoreZero(cryptServerKeyStore_t *store);
 int cryptServerKeyStoreLoadFromConfig(cryptServerKeyStore_t *store, const daemonConfig_t *cfg);
 int cryptServerKeyStoreLookup(
     const cryptServerKeyStore_t *store,
-    configIfMode_t ifMode,
+    ioIfMode_t ifMode,
     const unsigned char *claim,
     long claimNbytes,
     unsigned char key[ProtocolPskSize],

@@ -222,6 +222,12 @@ ns_exec "$serverNs" ip link set tap0 up
 ns_exec "$clientNsA" ip link set tap0 up
 ns_exec "$clientNsB" ip link set tap0 up
 
+if ! ns_exec "$clientNsA" timeout 8 ping -I tap0 -c 2 -W 1 10.251.0.3 >/dev/null 2>&1; then
+  echo "expected client A to ping client B over tap routed path" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB"
+  exit 1
+fi
+
 rxA0="$(read_rx_packets "$clientNsA" tap0)"
 rxB0="$(read_rx_packets "$clientNsB" tap0)"
 ns_exec "$serverNs" timeout 8 ping -I tap0 -c 3 -W 1 10.251.0.200 >/dev/null 2>&1 || true
@@ -236,6 +242,23 @@ if [[ "$rxA1" -le "$rxA0" ]]; then
 fi
 if [[ "$rxB1" -le "$rxB0" ]]; then
   echo "expected client B rx counter to increase from server tap broadcast ingress" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB"
+  exit 1
+fi
+
+rxSrv0="$(read_rx_packets "$serverNs" tap0)"
+rxB2_0="$(read_rx_packets "$clientNsB" tap0)"
+ns_exec "$clientNsA" timeout 8 ping -I tap0 -b -c 3 -W 1 10.251.0.255 >/dev/null 2>&1 || true
+sleep 1
+rxSrv1="$(read_rx_packets "$serverNs" tap0)"
+rxB2_1="$(read_rx_packets "$clientNsB" tap0)"
+if [[ "$rxSrv1" -le "$rxSrv0" ]]; then
+  echo "expected server tap rx counter to increase from client-originated broadcast ingress" >&2
+  dump_logs "$serverLog" "$clientLogA" "$clientLogB"
+  exit 1
+fi
+if [[ "$rxB2_1" -le "$rxB2_0" ]]; then
+  echo "expected client B rx counter to increase from client-originated broadcast fanout" >&2
   dump_logs "$serverLog" "$clientLogA" "$clientLogB"
   exit 1
 fi

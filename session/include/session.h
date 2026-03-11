@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 
+#include "io.h"
 #include "protocol.h"
 
 #define SessionClaimSize 16
@@ -25,21 +26,30 @@ typedef struct {
   unsigned char directedBroadcast[4];
 } sessionServerIdentity_t;
 
-int sessionRunServer(
-    int tunFd,
-    int listenFd,
-    sessionServerResolveClaimFn_t resolveClaimFn,
-    void *resolveClaimCtx,
-    const char *ifModeLabel,
-    const sessionServerIdentity_t *serverIdentity,
-    int authTimeoutMs,
-    const sessionHeartbeatConfig_t *heartbeatCfg,
-    int maxActiveSessions,
-    int maxPreAuthSessions);
-int sessionRunClient(
-    int tunFd,
-    int connFd,
-    const unsigned char *claim,
-    long claimNbytes,
-    const unsigned char key[ProtocolPskSize],
-    const sessionHeartbeatConfig_t *heartbeatCfg);
+typedef struct {
+  const char *ifName;
+  ioIfMode_t ifMode;
+  const char *listenIP;
+  int port;
+  sessionServerResolveClaimFn_t resolveClaimFn;
+  void *resolveClaimCtx;
+  const sessionServerIdentity_t *serverIdentity;
+  int authTimeoutMs;
+  sessionHeartbeatConfig_t heartbeat;
+  int maxActiveSessions;
+  int maxPreAuthSessions;
+} sessionServerConfig_t;
+
+typedef struct {
+  const char *ifName;
+  ioIfMode_t ifMode;
+  const char *remoteIP;
+  int port;
+  const unsigned char *claim;
+  long claimNbytes;
+  const unsigned char *key;
+  sessionHeartbeatConfig_t heartbeat;
+} sessionClientConfig_t;
+
+int sessionRunServer(const sessionServerConfig_t *cfg);
+int sessionRunClient(const sessionClientConfig_t *cfg);

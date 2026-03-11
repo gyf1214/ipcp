@@ -87,10 +87,14 @@ sessionQueueResult_t sessionQueueTunWithBackpressure(
   return sessionQueueResultError;
 }
 
-sessionQueueResult_t sessionQueueTunWithDrop(ioTunPoller_t *tunPoller, const void *data, long nbytes) {
+sessionQueueResult_t sessionQueueTunWithDropForSession(
+    ioTunPoller_t *tunPoller, session_t *session, const void *data, long nbytes) {
   long queued;
-  if (tunPoller == NULL || data == NULL || nbytes <= 0) {
+  if (tunPoller == NULL || session == NULL || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
+  }
+  if (sessionHasOverflow(session)) {
+    return sessionQueueResultBlocked;
   }
   if (ioTunWrite(tunPoller, data, nbytes)) {
     return sessionQueueResultQueued;
@@ -159,7 +163,7 @@ sessionQueueResult_t sessionQueueTcpWithDrop(
   if (destPoller == NULL || session == NULL || data == NULL || nbytes <= 0 || destSlot < 0) {
     return sessionQueueResultError;
   }
-  if (sessionOverflowTargetsDestSlot(session, destSlot)) {
+  if (sessionHasOverflow(session)) {
     return sessionQueueResultBlocked;
   }
 
@@ -253,7 +257,7 @@ static bool pipeTun(
     return false;
   }
 
-  status = ioTunRead(tunPoller->tunFd, payload, maxPayload, &nbytes);
+  status = ioPollerRead(&tunPoller->poller, payload, maxPayload, &nbytes);
   if (status == ioStatusWouldBlock) {
     return true;
   }
@@ -266,7 +270,8 @@ static bool pipeTun(
   msg.nbytes = nbytes;
   msg.buf = payload;
   if (session->isServer) {
-    result = serverSendMessage(sessionServer(session), tcpPoller, key, &msg);
+    activeConn_t *conn = (activeConn_t *)tcpPoller->poller.ctx;
+    result = serverSendMessage(sessionServer(session), conn, key, &msg);
   } else {
     client_t *client = sessionClient(session);
     result = clientSendMessage(
@@ -319,13 +324,11 @@ static bool pipeTcpBytes(
 
     if (msg.type == protocolMsgData && session->isServer) {
       server_t *server = sessionServer(session);
-      int sourceSlot = serverFindSlotByFd(server, tcpPoller->tcpFd);
-      const char *ifModeLabel = server != NULL && server->serverIdentity.claimNbytes == 6 ? "tap" : "tun";
-      if (sourceSlot < 0 || !serverRouteTcpIngressPacket(server, sourceSlot, ifModeLabel, msg.buf, msg.nbytes)) {
+      activeConn_t *conn = (activeConn_t *)tcpPoller->poller.ctx;
+      if (!serverRouteTcpIngressPacket(server, conn, msg.buf, msg.nbytes)) {
         return false;
       }
       result = sessionQueueResultQueued;
-      session->lastValidInboundMs = now;
     } else if (msg.type == protocolMsgData) {
       result = sessionQueueTunWithBackpressure(tcpPoller, tunPoller, session, msg.buf, msg.nbytes);
       if (result == sessionQueueResultQueued) {
@@ -334,8 +337,9 @@ static bool pipeTcpBytes(
       }
       session->lastValidInboundMs = now;
     } else if (session->isServer) {
+      activeConn_t *conn = (activeConn_t *)tcpPoller->poller.ctx;
       result = serverHandleInboundMessage(
-          sessionServer(session), tcpPoller, key, &session->lastValidInboundMs, &msg);
+          sessionServer(session), conn, key, &session->lastValidInboundMs, &msg);
     } else {
       client_t *client = sessionClient(session);
       result = clientHandleInboundMessage(
@@ -380,7 +384,7 @@ static bool pipeTcp(
     session->tcpReadCarryNbytes = 0;
   }
 
-  readStatus = ioTcpRead(tcpPoller->tcpFd, session->tcpReadBuf, sizeof(session->tcpReadBuf), &nbytes);
+  readStatus = ioPollerRead(&tcpPoller->poller, session->tcpReadBuf, sizeof(session->tcpReadBuf), &nbytes);
   if (readStatus == ioStatusWouldBlock) {
     return true;
   }
@@ -601,38 +605,49 @@ sessionStepResult_t sessionStep(
   return sessionHandleConnEvent(session, tcpPoller, tunPoller, event, key);
 }
 
-int sessionRunServer(
-    int tunFd,
-    int listenFd,
-    sessionServerResolveClaimFn_t resolveClaimFn,
-    void *resolveClaimCtx,
-    const char *ifModeLabel,
-    const sessionServerIdentity_t *serverIdentity,
-    int authTimeoutMs,
-    const sessionHeartbeatConfig_t *heartbeatCfg,
-    int maxActiveSessions,
-    int maxPreAuthSessions) {
-  return serverServeMultiClient(
-      tunFd,
-      listenFd,
-      resolveClaimFn,
-      resolveClaimCtx,
-      ifModeLabel,
-      serverIdentity,
-      authTimeoutMs,
-      heartbeatCfg,
-      maxActiveSessions,
-      maxPreAuthSessions);
+int sessionRunServer(const sessionServerConfig_t *cfg) {
+  if (cfg == NULL
+      || cfg->ifName == NULL
+      || cfg->ifName[0] == '\0'
+      || (cfg->ifMode != ioIfModeTun && cfg->ifMode != ioIfModeTap)
+      || cfg->listenIP == NULL
+      || cfg->port <= 0
+      || cfg->port > 65535
+      || cfg->resolveClaimFn == NULL
+      || cfg->authTimeoutMs <= 0
+      || cfg->heartbeat.intervalMs <= 0
+      || cfg->heartbeat.timeoutMs <= cfg->heartbeat.intervalMs
+      || cfg->maxActiveSessions <= 0
+      || cfg->maxPreAuthSessions <= 0) {
+    return -1;
+  }
+  return serverServeLocal(cfg);
 }
 
-int sessionRunClient(
-    int tunFd,
-    int connFd,
-    const unsigned char *claim,
-    long claimNbytes,
-    const unsigned char key[ProtocolPskSize],
-    const sessionHeartbeatConfig_t *heartbeatCfg) {
-  return clientServeConn(tunFd, connFd, claim, claimNbytes, key, heartbeatCfg);
+int sessionRunClient(const sessionClientConfig_t *cfg) {
+  if (cfg == NULL
+      || cfg->ifName == NULL
+      || cfg->ifName[0] == '\0'
+      || (cfg->ifMode != ioIfModeTun && cfg->ifMode != ioIfModeTap)
+      || cfg->remoteIP == NULL
+      || cfg->port <= 0
+      || cfg->port > 65535
+      || cfg->claim == NULL
+      || cfg->claimNbytes <= 0
+      || cfg->key == NULL
+      || cfg->heartbeat.intervalMs <= 0
+      || cfg->heartbeat.timeoutMs <= cfg->heartbeat.intervalMs) {
+    return -1;
+  }
+  return clientServeRemote(
+      cfg->ifName,
+      cfg->ifMode,
+      cfg->remoteIP,
+      cfg->port,
+      cfg->claim,
+      cfg->claimNbytes,
+      cfg->key,
+      &cfg->heartbeat);
 }
 
 bool sessionApiSmoke(void) {

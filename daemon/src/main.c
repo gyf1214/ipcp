@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <errno.h>
 #include <sodium.h>
 
@@ -13,21 +12,10 @@
 #include "protocol.h"
 #include "session.h"
 
-static ioIfMode_t toIoIfMode(configIfMode_t mode) {
-  if (mode == configIfModeTap) {
-    return ioIfModeTap;
-  }
-  return ioIfModeTun;
-}
-
 typedef struct {
   const cryptServerKeyStore_t *store;
-  configIfMode_t ifMode;
+  ioIfMode_t ifMode;
 } serverKeyLookupCtx_t;
-
-static const char *ifModeLabel(configIfMode_t mode) {
-  return mode == configIfModeTap ? "tap" : "tun";
-}
 
 static int serverLookupByClaim(
     void *ctx,
@@ -44,98 +32,65 @@ static int serverLookupByClaim(
 
 static int listenTcp(
     const char *ifName,
-    configIfMode_t ifMode,
+    ioIfMode_t ifMode,
     const char *listenIP,
     int port,
-    const sessionServerIdentity_t *serverIdentity,
+    const daemonServerIdentity_t *serverIdentity,
     const cryptServerKeyStore_t *keyStore,
     int authTimeoutMs,
     int maxPreAuthSessions,
     const sessionHeartbeatConfig_t *heartbeatCfg) {
   serverKeyLookupCtx_t lookupCtx;
-  int tunFd = -1;
-  int listenFd = ioTcpListen(listenIP, port);
-  if (listenFd < 0) {
-    errf("listen setup failed: %s", strerror(errno));
-    return -1;
-  }
-  logf("listening on %s:%d", listenIP, port);
-  logf("opening tun device %s", ifName);
-  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
-  if (tunFd < 0) {
-    errf("failed to open tun device %s: %s", ifName, strerror(errno));
-    close(listenFd);
-    return -1;
-  }
-  logf("successfully opened tun device %s", ifName);
+  sessionServerIdentity_t sessionIdentity;
 
   lookupCtx.store = keyStore;
   lookupCtx.ifMode = ifMode;
-  if (sessionRunServer(
-          tunFd,
-          listenFd,
-          serverLookupByClaim,
-          &lookupCtx,
-          ifModeLabel(ifMode),
-          serverIdentity,
-          authTimeoutMs,
-          heartbeatCfg,
-          keyStore->count,
-          maxPreAuthSessions)
-      != 0) {
-    close(tunFd);
-    close(listenFd);
+  memcpy(&sessionIdentity, serverIdentity, sizeof(sessionIdentity));
+  sessionServerConfig_t sessionCfg = {
+      .ifName = ifName,
+      .ifMode = ifMode,
+      .listenIP = listenIP,
+      .port = port,
+      .resolveClaimFn = serverLookupByClaim,
+      .resolveClaimCtx = &lookupCtx,
+      .serverIdentity = &sessionIdentity,
+      .authTimeoutMs = authTimeoutMs,
+      .heartbeat = *heartbeatCfg,
+      .maxActiveSessions = keyStore->count,
+      .maxPreAuthSessions = maxPreAuthSessions,
+  };
+  if (sessionRunServer(&sessionCfg) != 0) {
+    errf("server session failed: %s", strerror(errno));
     return -1;
   }
 
-  close(tunFd);
-  close(listenFd);
   return 0;
 }
 
 static int connTcp(
     const char *ifName,
-    configIfMode_t ifMode,
+    ioIfMode_t ifMode,
     const char *remoteIP,
     int port,
     const unsigned char *claim,
     long claimNbytes,
     const unsigned char key[ProtocolPskSize],
     const sessionHeartbeatConfig_t *heartbeatCfg) {
-  int tunFd = -1;
-  int connFd = -1;
-  int status = -1;
-
-  logf("opening tun device %s", ifName);
-  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
-  if (tunFd < 0) {
-    errf("failed to open tun device %s: %s", ifName, strerror(errno));
-    goto cleanup;
-  }
-  logf("successfully opened tun device %s", ifName);
-
-  connFd = ioTcpConnect(remoteIP, port);
-  if (connFd < 0) {
-    errf("connect to %s:%d failed: %s", remoteIP, port, strerror(errno));
-    goto cleanup;
-  }
-  logf("connected to %s:%d", remoteIP, port);
-
-  if (sessionRunClient(tunFd, connFd, claim, claimNbytes, key, heartbeatCfg) != 0) {
+  sessionClientConfig_t sessionCfg = {
+      .ifName = ifName,
+      .ifMode = ifMode,
+      .remoteIP = remoteIP,
+      .port = port,
+      .claim = claim,
+      .claimNbytes = claimNbytes,
+      .key = key,
+      .heartbeat = *heartbeatCfg,
+  };
+  if (sessionRunClient(&sessionCfg) != 0) {
     errf("client session failed");
-    goto cleanup;
+    return -1;
   }
-
-  status = 0;
-
-cleanup:
-  if (connFd >= 0) {
-    close(connFd);
-  }
-  if (tunFd >= 0) {
-    close(tunFd);
-  }
-  return status;
+  return 0;
 }
 
 int main(int argc, char **argv) {
