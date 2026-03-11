@@ -124,8 +124,6 @@ bool serverInit(
   server->tunPoller.poller.reactor = NULL;
   server->tunPoller.poller.fd = tunFd;
   server->tunPoller.poller.kind = ioPollerTun;
-  server->listenFd = listenFd;
-  server->epollFd = -1;
   server->reactor.epollFd = -1;
   server->tunPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   server->tunPoller.poller.readEnabled = true;
@@ -150,13 +148,11 @@ bool serverInit(
 
   for (i = 0; i < server->maxActiveSessions; i++) {
     server->activeConns[i].owner = server;
-    server->activeConns[i].connFd = -1;
     server->activeConns[i].keyRef = NULL;
     server->activeConns[i].keySlot = -1;
   }
   for (i = 0; i < server->maxPreAuthSessions; i++) {
     server->preAuthConns[i].owner = server;
-    server->preAuthConns[i].connFd = -1;
     server->preAuthConns[i].resolvedActiveSlot = -1;
   }
 
@@ -227,7 +223,6 @@ int serverAddClient(
   }
 
   server->activeConns[activeSlot].owner = server;
-  server->activeConns[activeSlot].connFd = connFd;
   server->activeConns[activeSlot].session = session;
   sessionAttachServer(session, server);
   server->activeConns[activeSlot].tcpPoller.poller.reactor = server->reactor.epollFd >= 0 ? &server->reactor : NULL;
@@ -295,27 +290,10 @@ bool serverRemoveClient(server_t *server, int slot) {
   memset(server->activeConns[slot].claim, 0, sizeof(server->activeConns[slot].claim));
   server->activeConns[slot].claimNbytes = 0;
   server->activeConns[slot].heartbeatAckPending = false;
-  server->activeConns[slot].connFd = -1;
   server->activeConns[slot].session = NULL;
   server->activeConns[slot].active = false;
   server->activeCount--;
   return true;
-}
-
-int serverFindSlotByFd(const server_t *server, int connFd) {
-  int i;
-
-  if (server == NULL || server->activeConns == NULL || connFd < 0) {
-    return -1;
-  }
-
-  for (i = 0; i < server->maxActiveSessions; i++) {
-    if (server->activeConns[i].active && server->activeConns[i].connFd == connFd) {
-      return i;
-    }
-  }
-
-  return -1;
 }
 
 int serverFindSlotByClaim(const server_t *server, const unsigned char *claim, long claimNbytes) {
@@ -334,38 +312,6 @@ int serverFindSlotByClaim(const server_t *server, const unsigned char *claim, lo
     }
     if (memcmp(server->activeConns[i].claim, claim, (size_t)claimNbytes) == 0) {
       return i;
-    }
-  }
-
-  return -1;
-}
-
-int serverFindPreAuthSlotByFd(const server_t *server, int connFd) {
-  int i;
-
-  if (server == NULL || server->preAuthConns == NULL || connFd < 0) {
-    return -1;
-  }
-
-  for (i = 0; i < server->maxPreAuthSessions; i++) {
-    if (server->preAuthConns[i].active && server->preAuthConns[i].connFd == connFd) {
-      return i;
-    }
-  }
-
-  return -1;
-}
-
-int serverPickEgressClient(const server_t *server) {
-  int i;
-
-  if (server == NULL || server->activeConns == NULL) {
-    return -1;
-  }
-
-  for (i = 0; i < server->maxActiveSessions; i++) {
-    if (server->activeConns[i].active) {
-      return server->activeConns[i].connFd;
     }
   }
 
@@ -743,13 +689,6 @@ session_t *serverSessionAt(server_t *server, int slot) {
   return server->activeConns[slot].session;
 }
 
-int serverConnFdAt(const server_t *server, int slot) {
-  if (!activeSlotIndexValid(server, slot) || !server->activeConns[slot].active) {
-    return -1;
-  }
-  return server->activeConns[slot].connFd;
-}
-
 const unsigned char *serverKeyAt(const server_t *server, int slot) {
   if (!activeSlotIndexValid(server, slot) || !server->activeConns[slot].active) {
     return NULL;
@@ -795,7 +734,6 @@ int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadline
     }
     memset(conn, 0, sizeof(*conn));
     conn->owner = server;
-    conn->connFd = connFd;
     conn->tcpPoller.poller.fd = connFd;
     conn->tcpPoller.poller.kind = ioPollerTcp;
     conn->tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
@@ -846,7 +784,6 @@ bool serverRemovePreAuthConn(server_t *server, int preAuthSlot) {
   conn->tcpPoller.outOffset = 0;
   conn->tcpPoller.outNbytes = 0;
   memset(conn->tcpPoller.outBuf, 0, sizeof(conn->tcpPoller.outBuf));
-  conn->connFd = -1;
   conn->active = false;
   server->preAuthCount--;
   return true;
@@ -888,7 +825,6 @@ bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot) {
   sessionAttachServer(session, server);
 
   memcpy(keySlot, preAuth->resolvedKey, ProtocolPskSize);
-  server->activeConns[activeSlot].connFd = preAuth->tcpPoller.poller.fd;
   server->activeConns[activeSlot].session = session;
   memset(&server->activeConns[activeSlot].tcpPoller, 0, sizeof(server->activeConns[activeSlot].tcpPoller));
   server->activeConns[activeSlot].owner = server;
@@ -1161,7 +1097,6 @@ static bool serverDispatchPreAuth(
       (void)serverDropActiveConn(server, activeSlot);
       return false;
     }
-    server->activeConns[activeSlot].connFd = server->activeConns[activeSlot].tcpPoller.poller.fd;
     if (!serverRemovePreAuthConn(server, preAuthSlot)) {
       (void)serverDropActiveConn(server, activeSlot);
       return false;
@@ -1902,7 +1837,6 @@ int serverServeMultiClient(
   if (!ioReactorInit(&server.reactor)) {
     goto cleanup;
   }
-  server.epollFd = server.reactor.epollFd;
   server.tunPoller.poller.reactor = &server.reactor;
 
   runtimeCtx.server = &server;

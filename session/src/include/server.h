@@ -14,7 +14,6 @@ typedef enum {
 
 typedef struct {
   server_t *owner;
-  int connFd;
   ioTcpPoller_t tcpPoller;
   long long authDeadlineMs;
   int resolvedActiveSlot;
@@ -34,7 +33,6 @@ typedef struct {
 
 typedef struct {
   server_t *owner;
-  int connFd;
   session_t *session;
   ioTcpPoller_t tcpPoller;
   const unsigned char *keyRef;
@@ -46,8 +44,6 @@ typedef struct {
 } activeConn_t;
 
 struct server_t {
-  int listenFd;
-  int epollFd;
   ioReactor_t reactor;
   ioTunPoller_t tunPoller;
   bool tunReadPaused;
@@ -92,10 +88,7 @@ int serverAddClient(
     long claimNbytes);
 bool serverRemoveClient(server_t *server, int slot);
 
-int serverFindSlotByFd(const server_t *server, int connFd);
 int serverFindSlotByClaim(const server_t *server, const unsigned char *claim, long claimNbytes);
-int serverFindPreAuthSlotByFd(const server_t *server, int connFd);
-int serverPickEgressClient(const server_t *server);
 int serverClientCount(const server_t *server);
 long long serverNowMs(const server_t *server);
 
@@ -126,7 +119,6 @@ bool serverHeartbeatTick(long long nowMs, long long lastValidInboundMs, long lon
 bool serverServiceBackpressure(server_t *server, int slot, ioEvent_t event);
 
 session_t *serverSessionAt(server_t *server, int slot);
-int serverConnFdAt(const server_t *server, int slot);
 const unsigned char *serverKeyAt(const server_t *server, int slot);
 const unsigned char *serverAuthoritativeKeyAt(const server_t *server, int slot);
 bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, long claimNbytes);

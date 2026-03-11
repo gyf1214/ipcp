@@ -253,30 +253,6 @@ static void testServerRejectsBeyondMaxSessions(void) {
   serverDeinit(&server);
 }
 
-static void testServerFindSlotByFdAndPickEgress(void) {
-  server_t server;
-  int slot0;
-  int slot1;
-
-  testAssertTrue(
-      serverInit(&server, 30, 31, 3, 3, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
-  slot0 = serverAddClient(&server, 0, 300, testKey, claim2, sizeof(claim2));
-  slot1 = serverAddClient(&server, 1, 301, testKey, claim3, sizeof(claim3));
-  testAssertTrue(slot0 == 0 && slot1 == 1, "server should allocate first two slots");
-
-  testAssertTrue(serverFindSlotByFd(&server, 300) == slot0, "fd should map to slot 0");
-  testAssertTrue(serverFindSlotByFd(&server, 301) == slot1, "fd should map to slot 1");
-  testAssertTrue(serverFindSlotByFd(&server, 999) < 0, "unknown fd should not map to slot");
-
-  testAssertTrue(serverPickEgressClient(&server) == 300, "egress pick should choose first active client");
-
-  testAssertTrue(serverRemoveClient(&server, slot0), "slot 0 removal should succeed");
-  testAssertTrue(serverPickEgressClient(&server) == 301, "egress pick should move to next active client");
-
-  serverDeinit(&server);
-}
-
 static void testServerFindSlotByClaim(void) {
   server_t server;
   int slot0;
@@ -823,7 +799,6 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   testAssertTrue(serverInit(&server, tunPair[0], 91, 1, 1, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
   testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "slot should be active");
   testAssertTrue(ioReactorInit(&server.reactor), "reactor init should succeed");
-  server.epollFd = server.reactor.epollFd;
   server.tunPoller.poller.reactor = &server.reactor;
   testAssertTrue(
       ioReactorAddPoller(&server.reactor, &server.tunPoller.poller, &runtimeEventFixtureCallbacks, NULL, true),
@@ -983,7 +958,7 @@ static void testServerCreateAndRemovePreAuthConnResetsState(void) {
   testAssertTrue(serverRemovePreAuthConn(&server, slot), "pre-auth remove should succeed");
   testAssertTrue(serverPreAuthAt(&server, slot) == NULL, "removed pre-auth slot should be inactive");
   testAssertTrue(server.preAuthCount == 0, "pre-auth count should decrement after remove");
-  testAssertTrue(server.preAuthConns[slot].connFd == -1, "removed slot should reset conn fd");
+  testAssertTrue(server.preAuthConns[slot].tcpPoller.poller.fd == -1, "removed slot should reset poller fd");
   testAssertTrue(server.preAuthConns[slot].claimNbytes == 0, "removed slot should clear claim length");
   testAssertTrue(server.preAuthConns[slot].tcpReadCarryNbytes == 0, "removed slot should clear carry length");
   testAssertTrue(server.preAuthConns[slot].authWriteOffset == 0, "removed slot should reset auth write offset");
@@ -1036,7 +1011,6 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   memcpy(conn->tcpReadCarryBuf, "hello", (size_t)helloCarryNbytes);
   conn->tcpReadCarryNbytes = helloCarryNbytes;
   testAssertTrue(ioReactorInit(&server.reactor), "reactor init should succeed");
-  server.epollFd = server.reactor.epollFd;
   conn->tcpPoller.poller.reactor = &server.reactor;
   testAssertTrue(
       ioReactorAddPoller(&server.reactor, &conn->tcpPoller.poller, &runtimeEventFixtureCallbacks, NULL, true),
@@ -1048,7 +1022,6 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   testAssertTrue(serverPromoteToActiveSlot(&server, slot), "promote should create active session");
   testAssertTrue(server.preAuthCount == 1, "promote should keep pre-auth slot until handoff");
   testAssertTrue(server.activeCount == 1, "promote should increment active count");
-  testAssertTrue(serverConnFdAt(&server, 0) == tcpPair[0], "promote should preserve connection fd");
   testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == -1, "active poller should be detached before handoff");
   testAssertTrue(
       ioTcpPollerHandoff(
@@ -1432,7 +1405,6 @@ void runServerTests(void) {
   testServerActiveKeyBorrowUsesAuthoritativeStorage();
   testServerRemoveClientClearsBorrowedPollerState();
   testServerRejectsBeyondMaxSessions();
-  testServerFindSlotByFdAndPickEgress();
   testServerFindSlotByClaim();
   testServerRoundRobinRetryCursorRotates();
   testServerPendingTunToTcpOwnerControlsRetryAndReadInterest();
