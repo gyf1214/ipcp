@@ -127,6 +127,13 @@ static int serverFixtureAddClient(
     const unsigned char key[ProtocolPskSize],
     const unsigned char *claim,
     long claimNbytes);
+static int serverFixtureAddClientWithFd(
+    serverFixture_t *fixture,
+    int keySlot,
+    int connFd,
+    const unsigned char key[ProtocolPskSize],
+    const unsigned char *claim,
+    long claimNbytes);
 static void serverFixtureTeardown(serverFixture_t *fixture);
 
 static void testServerServeMultiClientRejectsInvalidArgs(void) {
@@ -202,161 +209,156 @@ static void testSessionRunEntrypointsRejectInvalidConfigs(void) {
 }
 
 static void testServerAddRemoveAndReuseSlots(void) {
-  server_t server;
+  serverFixture_t fixture;
   int slot0;
   int slot1;
   int reusedSlot;
 
-  testAssertTrue(
-      serverInit(&server, 10, 11, 2, 2, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
+  serverFixtureSetup(&fixture, 11, 2, 2, &testHeartbeatCfg, NULL, NULL);
 
-  slot0 = serverAddClient(&server, 0, 100, testKey, claim2, sizeof(claim2));
-  slot1 = serverAddClient(&server, 1, 101, testKey, claim3, sizeof(claim3));
+  slot0 = serverFixtureAddClientWithFd(&fixture, 0, 100, testKey, claim2, sizeof(claim2));
+  slot1 = serverFixtureAddClientWithFd(&fixture, 1, 101, testKey, claim3, sizeof(claim3));
   testAssertTrue(slot0 == 0, "first client should use slot 0");
   testAssertTrue(slot1 == 1, "second client should use slot 1");
-  testAssertTrue(serverClientCount(&server) == 2, "client count should track active clients");
+  testAssertTrue(serverClientCount(&fixture.server) == 2, "client count should track active clients");
 
-  testAssertTrue(serverRemoveClient(&server, slot0), "remove should succeed for active slot");
-  testAssertTrue(serverClientCount(&server) == 1, "client count should decrement after remove");
+  testAssertTrue(serverRemoveClient(&fixture.server, slot0), "remove should succeed for active slot");
+  testAssertTrue(serverClientCount(&fixture.server) == 1, "client count should decrement after remove");
 
-  reusedSlot = serverAddClient(&server, 0, 102, testKey, claim4, sizeof(claim4));
+  reusedSlot = serverFixtureAddClientWithFd(&fixture, 0, 102, testKey, claim4, sizeof(claim4));
   testAssertTrue(reusedSlot == 0, "server should reuse first free slot");
-  testAssertTrue(serverClientCount(&server) == 2, "client count should return to cap");
+  testAssertTrue(serverClientCount(&fixture.server) == 2, "client count should return to cap");
 
-  serverDeinit(&server);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerActiveKeyBorrowUsesAuthoritativeStorage(void) {
-  server_t server;
+  serverFixture_t fixture;
   unsigned char zeroKey[ProtocolPskSize];
   const unsigned char *borrowed;
   const unsigned char *authoritative;
 
   memset(zeroKey, 0, sizeof(zeroKey));
+  serverFixtureSetup(&fixture, 15, 2, 2, &testHeartbeatCfg, NULL, NULL);
   testAssertTrue(
-      serverInit(&server, 14, 15, 2, 2, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
-  testAssertTrue(
-      serverAddClient(&server, 0, 140, testKey, claim2, sizeof(claim2)) == 0,
+      serverFixtureAddClientWithFd(&fixture, 0, 140, testKey, claim2, sizeof(claim2)) == 0,
       "server should add active client");
 
-  borrowed = serverKeyAt(&server, 0);
-  authoritative = serverAuthoritativeKeyAt(&server, 0);
+  borrowed = serverKeyAt(&fixture.server, 0);
+  authoritative = serverAuthoritativeKeyAt(&fixture.server, 0);
   testAssertTrue(borrowed != NULL, "borrowed key should be available for active slot");
   testAssertTrue(authoritative != NULL, "authoritative key should be available for slot");
   testAssertTrue(borrowed == authoritative, "active key should borrow authoritative storage");
   testAssertTrue(memcmp(authoritative, testKey, ProtocolPskSize) == 0, "authoritative slot should store resolved key");
 
-  testAssertTrue(serverRemoveClient(&server, 0), "remove should succeed");
-  authoritative = serverAuthoritativeKeyAt(&server, 0);
+  testAssertTrue(serverRemoveClient(&fixture.server, 0), "remove should succeed");
+  authoritative = serverAuthoritativeKeyAt(&fixture.server, 0);
   testAssertTrue(memcmp(authoritative, zeroKey, ProtocolPskSize) == 0, "authoritative key bytes should zeroize on remove");
-  testAssertTrue(server.activeConns[0].keyRef == NULL, "active slot should clear borrowed key reference on remove");
-  testAssertTrue(server.activeConns[0].keySlot == -1, "active slot should clear borrowed key slot index on remove");
+  testAssertTrue(fixture.server.activeConns[0].keyRef == NULL, "active slot should clear borrowed key reference on remove");
+  testAssertTrue(fixture.server.activeConns[0].keySlot == -1, "active slot should clear borrowed key slot index on remove");
 
-  serverDeinit(&server);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerRemoveClientClearsBorrowedPollerState(void) {
-  server_t server;
-
+  serverFixture_t fixture;
+  serverFixtureSetup(&fixture, 17, 2, 2, &testHeartbeatCfg, NULL, NULL);
   testAssertTrue(
-      serverInit(&server, 16, 17, 2, 2, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
-  testAssertTrue(
-      serverAddClient(&server, 0, 160, testKey, claim2, sizeof(claim2)) == 0,
+      serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2)) == 0,
       "server should add active client");
-  testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == 160, "active poller should borrow active connection fd");
   testAssertTrue(
-      server.activeConns[0].tcpPoller.poller.ctx == &server.activeConns[0],
+      fixture.server.activeConns[0].tcpPoller.poller.fd == fixture.tcpPair[0],
+      "active poller should borrow active connection fd");
+  testAssertTrue(
+      fixture.server.activeConns[0].tcpPoller.poller.ctx == &fixture.server.activeConns[0],
       "active poller should carry active-conn callback ctx");
 
-  testAssertTrue(serverRemoveClient(&server, 0), "remove should succeed");
-  testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == -1, "remove should clear borrowed poller fd");
-  testAssertTrue(server.activeConns[0].tcpPoller.poller.reactor == NULL, "remove should clear borrowed poller reactor");
-  testAssertTrue(server.activeConns[0].tcpPoller.poller.events == 0, "remove should clear borrowed poller events");
-  testAssertTrue(server.activeConns[0].tcpPoller.poller.ctx == NULL, "remove should clear borrowed poller callback ctx");
-  testAssertTrue(server.activeConns[0].session == NULL, "remove should clear borrowed session reference");
+  testAssertTrue(serverRemoveClient(&fixture.server, 0), "remove should succeed");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.poller.fd == -1, "remove should clear borrowed poller fd");
+  testAssertTrue(
+      fixture.server.activeConns[0].tcpPoller.poller.reactor == NULL,
+      "remove should clear borrowed poller reactor");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.poller.events == 0, "remove should clear borrowed poller events");
+  testAssertTrue(
+      fixture.server.activeConns[0].tcpPoller.poller.ctx == NULL,
+      "remove should clear borrowed poller callback ctx");
+  testAssertTrue(fixture.server.activeConns[0].session == NULL, "remove should clear borrowed session reference");
 
-  serverDeinit(&server);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerRejectsBeyondMaxSessions(void) {
-  server_t server;
+  serverFixture_t fixture;
 
+  serverFixtureSetup(&fixture, 21, 1, 1, &testHeartbeatCfg, NULL, NULL);
   testAssertTrue(
-      serverInit(&server, 20, 21, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
-  testAssertTrue(
-      serverAddClient(&server, 0, 200, testKey, claim2, sizeof(claim2)) == 0,
+      serverFixtureAddClientWithFd(&fixture, 0, 200, testKey, claim2, sizeof(claim2)) == 0,
       "first slot should be accepted");
   testAssertTrue(
-      serverAddClient(&server, 0, 201, testKey, claim3, sizeof(claim3)) < 0,
+      serverFixtureAddClientWithFd(&fixture, 0, 201, testKey, claim3, sizeof(claim3)) < 0,
       "server should reject client when max reached");
 
-  serverDeinit(&server);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerFindSlotByClaim(void) {
-  server_t server;
+  serverFixture_t fixture;
   int slot0;
   int slot1;
   unsigned char mismatchLenClaim[] = {10, 0, 0};
   unsigned char unknownClaim[] = {10, 0, 0, 99};
 
-  testAssertTrue(
-      serverInit(&server, 35, 36, 3, 3, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
-  slot0 = serverAddClient(&server, 0, 350, testKey, claim2, sizeof(claim2));
-  slot1 = serverAddClient(&server, 1, 351, testKey, claim3, sizeof(claim3));
+  serverFixtureSetup(&fixture, 36, 3, 3, &testHeartbeatCfg, NULL, NULL);
+  slot0 = serverFixtureAddClientWithFd(&fixture, 0, 350, testKey, claim2, sizeof(claim2));
+  slot1 = serverFixtureAddClientWithFd(&fixture, 1, 351, testKey, claim3, sizeof(claim3));
   testAssertTrue(slot0 == 0 && slot1 == 1, "server should allocate slots for claim tests");
 
   testAssertTrue(
-      serverFindSlotByClaim(&server, claim2, sizeof(claim2)) == slot0,
+      serverFindSlotByClaim(&fixture.server, claim2, sizeof(claim2)) == slot0,
       "claim lookup should return exact matching slot");
   testAssertTrue(
-      serverFindSlotByClaim(&server, claim3, sizeof(claim3)) == slot1,
+      serverFindSlotByClaim(&fixture.server, claim3, sizeof(claim3)) == slot1,
       "claim lookup should return second matching slot");
   testAssertTrue(
-      serverFindSlotByClaim(&server, unknownClaim, sizeof(unknownClaim)) < 0,
+      serverFindSlotByClaim(&fixture.server, unknownClaim, sizeof(unknownClaim)) < 0,
       "unknown claim should not match");
   testAssertTrue(
-      serverFindSlotByClaim(&server, mismatchLenClaim, sizeof(mismatchLenClaim)) < 0,
+      serverFindSlotByClaim(&fixture.server, mismatchLenClaim, sizeof(mismatchLenClaim)) < 0,
       "claim length mismatch should not match");
 
-  testAssertTrue(serverRemoveClient(&server, slot0), "remove slot 0 should succeed");
+  testAssertTrue(serverRemoveClient(&fixture.server, slot0), "remove slot 0 should succeed");
   testAssertTrue(
-      serverFindSlotByClaim(&server, claim2, sizeof(claim2)) < 0,
+      serverFindSlotByClaim(&fixture.server, claim2, sizeof(claim2)) < 0,
       "inactive slot should be ignored for claim lookup");
 
-  serverDeinit(&server);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerRoundRobinRetryCursorRotates(void) {
-  server_t server;
+  serverFixture_t fixture;
 
+  serverFixtureSetup(&fixture, 51, 4, 4, &testHeartbeatCfg, NULL, NULL);
+  testAssertTrue(fixture.server.retryCursor == 0, "retry cursor should start at zero");
   testAssertTrue(
-      serverInit(&server, 50, 51, 4, 4, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
-  testAssertTrue(server.retryCursor == 0, "retry cursor should start at zero");
-  testAssertTrue(
-      serverAddClient(&server, 0, 500, testKey, claim2, sizeof(claim2)) == 0,
+      serverFixtureAddClientWithFd(&fixture, 0, 500, testKey, claim2, sizeof(claim2)) == 0,
       "first client should be added");
   testAssertTrue(
-      serverAddClient(&server, 1, 501, testKey, claim3, sizeof(claim3)) == 1,
+      serverFixtureAddClientWithFd(&fixture, 1, 501, testKey, claim3, sizeof(claim3)) == 1,
       "second client should be added");
   testAssertTrue(
-      serverAddClient(&server, 2, 502, testKey, claim4, sizeof(claim4)) == 2,
+      serverFixtureAddClientWithFd(&fixture, 2, 502, testKey, claim4, sizeof(claim4)) == 2,
       "third client should be added");
 
-  server.retryCursor = 1;
-  testAssertTrue(serverRetryBlockedTunRoundRobin(&server) == 2, "retry pass should advance cursor to next slot");
-  testAssertTrue(server.retryCursor == 2, "retry cursor should rotate after retry pass");
+  fixture.server.retryCursor = 1;
+  testAssertTrue(
+      serverRetryBlockedTunRoundRobin(&fixture.server) == 2,
+      "retry pass should advance cursor to next slot");
+  testAssertTrue(fixture.server.retryCursor == 2, "retry cursor should rotate after retry pass");
 
-  testAssertTrue(serverRetryBlockedTunRoundRobin(&server) == 0, "retry pass should wrap cursor");
-  testAssertTrue(server.retryCursor == 0, "retry cursor should wrap to zero");
+  testAssertTrue(serverRetryBlockedTunRoundRobin(&fixture.server) == 0, "retry pass should wrap cursor");
+  testAssertTrue(fixture.server.retryCursor == 0, "retry cursor should wrap to zero");
 
-  serverDeinit(&server);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
@@ -397,10 +399,10 @@ static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
 }
 
 static void testServerRoutesTunIngressByClaimMatch(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPairA[2];
+  serverFixture_t fixture;
   int tcpPairB[2];
+  int slotA;
+  int slotB;
   unsigned char payload[] = {
       0x45, 0x00, 0x00, 0x14,
       0x00, 0x00, 0x00, 0x00,
@@ -408,40 +410,30 @@ static void testServerRoutesTunIngressByClaimMatch(void) {
       10, 0, 0, 1,
       10, 0, 0, 3,
   };
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 60, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  testAssertTrue(
-      serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
-      "slot A should be added");
-  testAssertTrue(
-      serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1,
-      "slot B should be added");
+  serverFixtureSetup(&fixture, 60, 3, 3, &testHeartbeatCfg, NULL, NULL);
+  slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slotA == 0, "slot A should be added");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp pair B should be created");
+  slotB = serverFixtureAddClientWithFd(&fixture, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+  testAssertTrue(slotB == 1, "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, payload, sizeof(payload)),
+      serverRouteTunIngressPacket(&fixture.server, payload, sizeof(payload)),
       "tun ingress routing should succeed for matching claim");
   testAssertTrue(
-      server.activeConns[0].tcpPoller.outNbytes == 0,
+      fixture.server.activeConns[0].tcpPoller.outNbytes == 0,
       "non-matching client should have no queued tcp bytes");
   testAssertTrue(
-      server.activeConns[1].tcpPoller.outNbytes > 0,
+      fixture.server.activeConns[1].tcpPoller.outNbytes > 0,
       "matching client should have queued encrypted frame bytes");
 
-  serverDeinit(&server);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
-  close(tcpPairB[0]);
-  close(tcpPairB[1]);
-  close(tunPair[0]);
-  close(tunPair[1]);
+  serverFixtureTeardown(&fixture);
+  sessionTestTcpPairClose(tcpPairB);
 }
 
 static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPairA[2];
+  serverFixture_t fixture;
+  int slot;
   unsigned char unmatched[] = {
       0x45, 0x00, 0x00, 0x14,
       0x00, 0x00, 0x00, 0x00,
@@ -457,64 +449,58 @@ static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(v
       224, 1, 2, 3,
   };
   unsigned char malformed[] = {0x45, 0x00, 0x00, 0x14};
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp socketpair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 61, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  serverFixtureSetup(&fixture, 61, 2, 2, &testHeartbeatCfg, NULL, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "slot A should be added");
+
   testAssertTrue(
-      serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0,
-      "slot A should be added");
+      serverRouteTunIngressPacket(&fixture.server, unmatched, sizeof(unmatched)),
+      "unmatched route should not fail");
+  testAssertTrue(
+      serverRouteTunIngressPacket(&fixture.server, multicast, sizeof(multicast)),
+      "multicast drop should not fail");
+  testAssertTrue(
+      serverRouteTunIngressPacket(&fixture.server, malformed, sizeof(malformed)),
+      "malformed drop should not fail");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue to any client");
 
-  testAssertTrue(serverRouteTunIngressPacket(&server, unmatched, sizeof(unmatched)), "unmatched route should not fail");
-  testAssertTrue(serverRouteTunIngressPacket(&server, multicast, sizeof(multicast)), "multicast drop should not fail");
-  testAssertTrue(serverRouteTunIngressPacket(&server, malformed, sizeof(malformed)), "malformed drop should not fail");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue to any client");
-
-  serverDeinit(&server);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
-  close(tunPair[0]);
-  close(tunPair[1]);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerFanoutTapBroadcastToAllClients(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPairA[2];
+  serverFixture_t fixture;
   int tcpPairB[2];
+  int slotA;
+  int slotB;
   unsigned char tapBroadcast[] = {
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
       0x02, 0x00, 0x5e, 0x00, 0x00, 0x01,
       0x08, 0x00,
   };
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 62, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  server.mode = sessionIfModeTap;
-  testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
-  testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+  serverFixtureSetup(&fixture, 62, 3, 3, &testHeartbeatCfg, NULL, NULL);
+  fixture.server.mode = sessionIfModeTap;
+  slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slotA == 0, "slot A should be added");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp pair B should be created");
+  slotB = serverFixtureAddClientWithFd(&fixture, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+  testAssertTrue(slotB == 1, "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, tapBroadcast, sizeof(tapBroadcast)),
+      serverRouteTunIngressPacket(&fixture.server, tapBroadcast, sizeof(tapBroadcast)),
       "tap broadcast fanout should not fail");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive tap broadcast");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive tap broadcast");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive tap broadcast");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive tap broadcast");
 
-  serverDeinit(&server);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
-  close(tcpPairB[0]);
-  close(tcpPairB[1]);
-  close(tunPair[0]);
-  close(tunPair[1]);
+  serverFixtureTeardown(&fixture);
+  sessionTestTcpPairClose(tcpPairB);
 }
 
 static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPairA[2];
+  serverFixture_t fixture;
   int tcpPairB[2];
+  int slotA;
+  int slotB;
   unsigned char directedBroadcast[] = {
       0x45, 0x00, 0x00, 0x14,
       0x00, 0x00, 0x00, 0x00,
@@ -544,58 +530,53 @@ static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
       224, 1, 2, 3,
   };
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 63, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  server.serverIdentity.directedBroadcastEnabled = true;
-  server.serverIdentity.directedBroadcast[0] = 10;
-  server.serverIdentity.directedBroadcast[1] = 250;
-  server.serverIdentity.directedBroadcast[2] = 0;
-  server.serverIdentity.directedBroadcast[3] = 255;
-  testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
-  testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+  serverFixtureSetup(&fixture, 63, 3, 3, &testHeartbeatCfg, NULL, NULL);
+  fixture.server.serverIdentity.directedBroadcastEnabled = true;
+  fixture.server.serverIdentity.directedBroadcast[0] = 10;
+  fixture.server.serverIdentity.directedBroadcast[1] = 250;
+  fixture.server.serverIdentity.directedBroadcast[2] = 0;
+  fixture.server.serverIdentity.directedBroadcast[3] = 255;
+  slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slotA == 0, "slot A should be added");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp pair B should be created");
+  slotB = serverFixtureAddClientWithFd(&fixture, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+  testAssertTrue(slotB == 1, "slot B should be added");
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, directedBroadcast, sizeof(directedBroadcast)),
+      serverRouteTunIngressPacket(&fixture.server, directedBroadcast, sizeof(directedBroadcast)),
       "directed broadcast fanout should not fail");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive directed broadcast");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive directed broadcast");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive directed broadcast");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive directed broadcast");
 
-  server.activeConns[0].tcpPoller.outNbytes = 0;
-  server.activeConns[1].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, limitedBroadcast, sizeof(limitedBroadcast)),
+      serverRouteTunIngressPacket(&fixture.server, limitedBroadcast, sizeof(limitedBroadcast)),
       "limited broadcast fanout should not fail");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive limited broadcast");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive limited broadcast");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive limited broadcast");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive limited broadcast");
 
-  server.activeConns[0].tcpPoller.outNbytes = 0;
-  server.activeConns[1].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, nonMatchingDirected, sizeof(nonMatchingDirected)),
+      serverRouteTunIngressPacket(&fixture.server, nonMatchingDirected, sizeof(nonMatchingDirected)),
       "non-matching directed broadcast should not fail");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
 
-  testAssertTrue(serverRouteTunIngressPacket(&server, multicast, sizeof(multicast)), "multicast drop should not fail");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "multicast should not queue client A");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "multicast should not queue client B");
+  testAssertTrue(serverRouteTunIngressPacket(&fixture.server, multicast, sizeof(multicast)), "multicast drop should not fail");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "multicast should not queue client A");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes == 0, "multicast should not queue client B");
 
-  serverDeinit(&server);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
-  close(tcpPairB[0]);
-  close(tcpPairB[1]);
-  close(tunPair[0]);
-  close(tunPair[1]);
+  serverFixtureTeardown(&fixture);
+  sessionTestTcpPairClose(tcpPairB);
 }
 
 static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPairA[2];
+  serverFixture_t fixture;
   int tcpPairB[2];
+  int slotA;
+  int slotB;
   unsigned char limitedBroadcast[] = {
       0x45, 0x00, 0x00, 0x14,
       0x00, 0x00, 0x00, 0x00,
@@ -604,37 +585,32 @@ static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
       255, 255, 255, 255,
   };
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B socketpair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 64, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  server.serverIdentity.directedBroadcastEnabled = true;
-  server.serverIdentity.directedBroadcast[0] = 10;
-  server.serverIdentity.directedBroadcast[1] = 250;
-  server.serverIdentity.directedBroadcast[2] = 0;
-  server.serverIdentity.directedBroadcast[3] = 255;
-  testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be added");
-  testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be added");
+  serverFixtureSetup(&fixture, 64, 3, 3, &testHeartbeatCfg, NULL, NULL);
+  fixture.server.serverIdentity.directedBroadcastEnabled = true;
+  fixture.server.serverIdentity.directedBroadcast[0] = 10;
+  fixture.server.serverIdentity.directedBroadcast[1] = 250;
+  fixture.server.serverIdentity.directedBroadcast[2] = 0;
+  fixture.server.serverIdentity.directedBroadcast[3] = 255;
+  slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slotA == 0, "slot A should be added");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp pair B should be created");
+  slotB = serverFixtureAddClientWithFd(&fixture, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+  testAssertTrue(slotB == 1, "slot B should be added");
 
-  server.activeConns[0].tcpPoller.outOffset = 0;
-  server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
+  fixture.server.activeConns[0].tcpPoller.outOffset = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
 
   testAssertTrue(
-      serverRouteTunIngressPacket(&server, limitedBroadcast, sizeof(limitedBroadcast)),
+      serverRouteTunIngressPacket(&fixture.server, limitedBroadcast, sizeof(limitedBroadcast)),
       "broadcast fanout with saturation should not fail");
   testAssertTrue(
-      server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity,
+      fixture.server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity,
       "saturated client queue should remain unchanged");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "non-saturated client should still receive broadcast");
-  testAssertTrue(!serverHasPendingTunToTcp(&server), "broadcast best-effort skip should not set shared pending packet");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "non-saturated client should still receive broadcast");
+  testAssertTrue(!serverHasPendingTunToTcp(&fixture.server), "broadcast best-effort skip should not set shared pending packet");
 
-  serverDeinit(&server);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
-  close(tcpPairB[0]);
-  close(tcpPairB[1]);
-  close(tunPair[0]);
-  close(tunPair[1]);
+  serverFixtureTeardown(&fixture);
+  sessionTestTcpPairClose(tcpPairB);
 }
 
 static void testServerQueueWithDropSkipsOverflowWithoutPendingState(void) {
@@ -663,10 +639,10 @@ static void testServerQueueWithDropSkipsOverflowWithoutPendingState(void) {
 }
 
 static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPairA[2];
+  serverFixture_t fixture;
   int tcpPairB[2];
+  int slotA;
+  int slotB;
   unsigned char toPeer[] = {
       0x45, 0x00, 0x00, 0x14,
       0x00, 0x00, 0x00, 0x00,
@@ -716,93 +692,88 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
       0x08, 0x00,
   };
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp A pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp B pair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 83, 3, 3, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  server.mode = sessionIfModeTun;
-  testAssertTrue(serverAddClient(&server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2)) == 0, "slot A should be active");
-  testAssertTrue(serverAddClient(&server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3)) == 1, "slot B should be active");
-  server.serverIdentity.claim[0] = 10;
-  server.serverIdentity.claim[1] = 0;
-  server.serverIdentity.claim[2] = 0;
-  server.serverIdentity.claim[3] = 1;
-  server.serverIdentity.claimNbytes = 4;
-  server.serverIdentity.directedBroadcastEnabled = true;
-  server.serverIdentity.directedBroadcast[0] = 10;
-  server.serverIdentity.directedBroadcast[1] = 0;
-  server.serverIdentity.directedBroadcast[2] = 0;
-  server.serverIdentity.directedBroadcast[3] = 255;
-  server.activeConns[0].session->lastValidInboundMs = 0;
+  serverFixtureSetup(&fixture, 83, 3, 3, &testHeartbeatCfg, NULL, NULL);
+  fixture.server.mode = sessionIfModeTun;
+  slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slotA == 0, "slot A should be active");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp B pair should be created");
+  slotB = serverFixtureAddClientWithFd(&fixture, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+  testAssertTrue(slotB == 1, "slot B should be active");
+  fixture.server.serverIdentity.claim[0] = 10;
+  fixture.server.serverIdentity.claim[1] = 0;
+  fixture.server.serverIdentity.claim[2] = 0;
+  fixture.server.serverIdentity.claim[3] = 1;
+  fixture.server.serverIdentity.claimNbytes = 4;
+  fixture.server.serverIdentity.directedBroadcastEnabled = true;
+  fixture.server.serverIdentity.directedBroadcast[0] = 10;
+  fixture.server.serverIdentity.directedBroadcast[1] = 0;
+  fixture.server.serverIdentity.directedBroadcast[2] = 0;
+  fixture.server.serverIdentity.directedBroadcast[3] = 255;
+  fixture.server.activeConns[0].session->lastValidInboundMs = 0;
 
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], toPeer, sizeof(toPeer)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], toPeer, sizeof(toPeer)),
       "unicast to other client should route");
   testAssertTrue(
-      server.activeConns[0].session->lastValidInboundMs > 0,
+      fixture.server.activeConns[0].session->lastValidInboundMs > 0,
       "valid tcp ingress should refresh source session inbound timestamp");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "source client should not receive self echo");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "destination client should receive routed frame");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "source client should not receive self echo");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "destination client should receive routed frame");
 
-  server.activeConns[0].tcpPoller.outNbytes = 0;
-  server.activeConns[1].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], toServer, sizeof(toServer)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], toServer, sizeof(toServer)),
       "unicast to server identity should route to tun");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "server-local route should not enqueue source tcp");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "server-local route should not enqueue peer tcp");
-  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "server-local route should enqueue tun payload");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "server-local route should not enqueue source tcp");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes == 0, "server-local route should not enqueue peer tcp");
+  testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) > 0, "server-local route should enqueue tun payload");
 
-  server.tunPoller.queuedBytes = 0;
-  server.tunPoller.frameCount = 0;
-  server.activeConns[0].tcpPoller.outNbytes = 0;
-  server.activeConns[1].tcpPoller.outNbytes = 0;
+  fixture.server.tunPoller.queuedBytes = 0;
+  fixture.server.tunPoller.frameCount = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], broadcast, sizeof(broadcast)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], broadcast, sizeof(broadcast)),
       "broadcast should fanout to peers and tun");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "broadcast should exclude source tcp");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "broadcast should fanout to peer tcp");
-  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "broadcast should enqueue tun payload");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "broadcast should exclude source tcp");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "broadcast should fanout to peer tcp");
+  testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) > 0, "broadcast should enqueue tun payload");
 
-  server.tunPoller.queuedBytes = 0;
-  server.tunPoller.frameCount = 0;
-  server.activeConns[0].tcpPoller.outNbytes = 0;
-  server.activeConns[1].tcpPoller.outNbytes = 0;
+  fixture.server.tunPoller.queuedBytes = 0;
+  fixture.server.tunPoller.frameCount = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], selfDest, sizeof(selfDest)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], selfDest, sizeof(selfDest)),
       "self destination should drop");
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], unknownDest, sizeof(unknownDest)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], unknownDest, sizeof(unknownDest)),
       "unknown destination should drop");
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], multicast, sizeof(multicast)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], multicast, sizeof(multicast)),
       "multicast should drop");
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], malformed, sizeof(malformed)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], malformed, sizeof(malformed)),
       "malformed should drop");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue source tcp");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes == 0, "drop cases should not queue peer tcp");
-  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) == 0, "drop cases should not queue tun payload");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue source tcp");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes == 0, "drop cases should not queue peer tcp");
+  testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) == 0, "drop cases should not queue tun payload");
 
-  server.mode = sessionIfModeTap;
-  server.tunPoller.queuedBytes = 0;
-  server.tunPoller.frameCount = 0;
-  server.activeConns[0].tcpPoller.outNbytes = 0;
-  server.activeConns[1].tcpPoller.outNbytes = 0;
+  fixture.server.mode = sessionIfModeTap;
+  fixture.server.tunPoller.queuedBytes = 0;
+  fixture.server.tunPoller.frameCount = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
+  fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], tapBroadcast, sizeof(tapBroadcast)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], tapBroadcast, sizeof(tapBroadcast)),
       "tap broadcast should fanout to peers and tun");
-  testAssertTrue(server.activeConns[0].tcpPoller.outNbytes == 0, "tap broadcast should exclude source tcp");
-  testAssertTrue(server.activeConns[1].tcpPoller.outNbytes > 0, "tap broadcast should fanout to peer tcp");
-  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "tap broadcast should enqueue tun payload");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "tap broadcast should exclude source tcp");
+  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "tap broadcast should fanout to peer tcp");
+  testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) > 0, "tap broadcast should enqueue tun payload");
 
-  serverDeinit(&server);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
-  close(tcpPairB[0]);
-  close(tcpPairB[1]);
-  close(tunPair[0]);
-  close(tunPair[1]);
+  serverFixtureTeardown(&fixture);
+  sessionTestTcpPairClose(tcpPairB);
 }
 
 static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
@@ -895,10 +866,23 @@ static int serverFixtureAddClient(
     const unsigned char key[ProtocolPskSize],
     const unsigned char *claim,
     long claimNbytes) {
+  return serverFixtureAddClientWithFd(fixture, keySlot, fixture != NULL ? fixture->tcpPair[0] : -1, key, claim, claimNbytes);
+}
+
+static int serverFixtureAddClientWithFd(
+    serverFixture_t *fixture,
+    int keySlot,
+    int connFd,
+    const unsigned char key[ProtocolPskSize],
+    const unsigned char *claim,
+    long claimNbytes) {
   if (fixture == NULL || key == NULL || claim == NULL || claimNbytes <= 0) {
     return -1;
   }
-  return serverAddClient(&fixture->server, keySlot, fixture->tcpPair[0], key, claim, claimNbytes);
+  if (connFd < 0) {
+    return -1;
+  }
+  return serverAddClient(&fixture->server, keySlot, connFd, key, claim, claimNbytes);
 }
 
 static void serverFixtureTeardown(serverFixture_t *fixture) {
@@ -1146,7 +1130,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
   testAssertTrue(slotA == 0, "first client should be added");
   testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp pair B should be created");
-  slotB = serverAddClient(&fixture.server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+  slotB = serverFixtureAddClientWithFd(&fixture, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
   testAssertTrue(slotB == 1, "second client should be added");
   ownerSession = serverSessionAt(&fixture.server, slotA);
   otherSession = serverSessionAt(&fixture.server, slotB);
