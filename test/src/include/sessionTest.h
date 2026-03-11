@@ -95,6 +95,13 @@ static inline bool sessionEventFixtureWaitEventOfKind(
   return false;
 }
 
+bool sessionEventFixtureHasNoEventOfKind(
+    sessionEventFixture_t *fixture,
+    ioReactor_t *reactor,
+    int attempts,
+    int timeoutMs,
+    ioEvent_t unexpected);
+
 void runClientTests(void);
 void runServerTests(void);
 void runSessionTests(void);

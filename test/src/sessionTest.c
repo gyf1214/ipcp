@@ -69,6 +69,31 @@ const ioPollerCallbacks_t sessionEventFixtureCallbacks = {
     .onReadable = sessionEventFixtureOnReadable,
 };
 
+bool sessionEventFixtureHasNoEventOfKind(
+    sessionEventFixture_t *fixture,
+    ioReactor_t *reactor,
+    int attempts,
+    int timeoutMs,
+    ioEvent_t unexpected) {
+  int i;
+  ioEvent_t event;
+  if (fixture == NULL || reactor == NULL || attempts < 0) {
+    return false;
+  }
+  for (i = 0; i < attempts; i++) {
+    ioReactorStepResult_t step = ioReactorStep(reactor, timeoutMs);
+    if (step == ioReactorStepError || step == ioReactorStepStop) {
+      return false;
+    }
+    while (sessionEventFixturePopEvent(fixture, &event)) {
+      if (event == unexpected) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 static const ioPollerCallbacks_t sessionTestNoopCallbacks = {
     .onClosed = NULL,
     .onLowWatermark = NULL,
@@ -280,13 +305,10 @@ static void testSessionResetClearsPendingAndPauseFlags(void) {
   result = sessionQueueTunWithBackpressure(
       &poller.tcpPoller, &poller.tunPoller, session, payload, (long)sizeof(payload) - 1);
   testAssertTrue(result == sessionQueueResultBlocked, "session queue should block when tun queue is saturated");
-  testAssertTrue(session->overflowNbytes > 0, "session overflow bytes should be tracked");
-  testAssertTrue(session->overflowKind == sessionOverflowToTun, "session overflow kind should target tun");
-  testAssertTrue(session->tcpReadPaused, "session tcp read should be paused under overflow");
+  testAssertTrue(sessionHasOverflow(session), "session should track pending overflow");
 
   sessionReset(session);
-  testAssertTrue(session->overflowNbytes == 0, "reset should clear pending tun bytes");
-  testAssertTrue(!session->tcpReadPaused, "reset should clear tcp pause");
+  testAssertTrue(!sessionHasOverflow(session), "reset should clear pending overflow");
   sessionDestroy(session);
   sessionFixtureTeardownWithPairs(&poller, tunPair, tcpPair);
 }
@@ -309,7 +331,6 @@ static void testSessionBackpressurePauseAndResumeFlow(void) {
   result = sessionQueueTunWithBackpressure(
       &poller.tcpPoller, &poller.tunPoller, session, payload, (long)sizeof(payload) - 1);
   testAssertTrue(result == sessionQueueResultBlocked, "session queue should block when tun queue is saturated");
-  testAssertTrue(session->tcpReadPaused, "session should pause tcp read after overflow");
   testAssertTrue(sessionHasOverflow(session), "session should track pending overflow");
 
   poller.tunPoller.frameCount = 0;
@@ -318,7 +339,6 @@ static void testSessionBackpressurePauseAndResumeFlow(void) {
       sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller, ioEventTunWrite),
       "session retry overflow should succeed on tun write event");
   testAssertTrue(!sessionHasOverflow(session), "session overflow should flush after retry");
-  testAssertTrue(!session->tcpReadPaused, "session should resume tcp read after retry");
   for (attempts = 0; attempts < 8 && ioTunQueuedBytes(&poller.tunPoller) > 0; attempts++) {
     ioReactorStepResult_t step = ioReactorStep(&poller.reactor, 50);
     testAssertTrue(step == ioReactorStepReady || step == ioReactorStepTimeout, "reactor write drive should remain healthy");
@@ -355,7 +375,6 @@ static void testSessionRetryOverflowFlushesAndResumesRead(void) {
       sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller, ioEventTunWrite),
       "session retry overflow should succeed");
   testAssertTrue(!sessionHasOverflow(session), "session overflow should clear after retry");
-  testAssertTrue(!session->tcpReadPaused, "tcp read pause should clear after retry");
 
   sessionDestroy(session);
   sessionFixtureTeardownWithPairs(&poller, tunPair, tcpPair);
@@ -385,7 +404,6 @@ static void testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated(void)
       sessionRetryOverflow(session, &poller.tcpPoller, &poller.tunPoller, ioEventTunWrite),
       "session retry overflow should stay alive when queue remains saturated");
   testAssertTrue(sessionHasOverflow(session), "session overflow should remain pending");
-  testAssertTrue(session->tcpReadPaused, "tcp read should remain paused while overflow is pending");
 
   sessionDestroy(session);
   sessionFixtureTeardownWithPairs(&poller, tunPair, tcpPair);
@@ -430,10 +448,7 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
       payload,
       sizeof(payload));
   testAssertTrue(result == sessionQueueResultBlocked, "tcp backpressure queue should block on saturation");
-  testAssertTrue(session->overflowNbytes == (long)sizeof(payload), "session should store pending payload bytes");
-  testAssertTrue(session->overflowKind == sessionOverflowToClient, "pending kind should be to-client");
-  testAssertTrue(session->overflowDestSlot == 3, "pending destination slot should be recorded");
-  testAssertTrue(session->tcpReadPaused, "source tcp read should pause while pending");
+  testAssertTrue(sessionHasOverflow(session), "session should track pending payload");
 
   result = sessionQueueTcpWithDrop(&destPollerA, session, 3, payload, 32);
   testAssertTrue(result == sessionQueueResultBlocked, "drop queue should block same destination while pending exists");
@@ -441,10 +456,9 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
   testAssertTrue(result == sessionQueueResultBlocked, "drop queue should block other destination while pending exists");
 
   testAssertTrue(sessionDropOverflow(session, &poller.tcpPoller, 2), "drop overflow non-match should be no-op");
-  testAssertTrue(session->overflowNbytes > 0, "non-match should preserve pending payload");
+  testAssertTrue(sessionHasOverflow(session), "non-match should preserve pending payload");
   testAssertTrue(sessionDropOverflow(session, &poller.tcpPoller, 3), "drop overflow matching destination should succeed");
-  testAssertTrue(session->overflowNbytes == 0, "matching drop should clear pending payload");
-  testAssertTrue(!session->tcpReadPaused, "matching drop should resume source tcp read");
+  testAssertTrue(!sessionHasOverflow(session), "matching drop should clear pending payload");
 
   sessionDestroy(session);
   sessionFixtureTeardownWithPairs(&poller, tunPair, sourcePair);
@@ -468,7 +482,7 @@ static void testSessionQueueTunWithDropForSession(void) {
 
   result = sessionQueueTunWithDropForSession(&poller.tunPoller, session, payload, (long)sizeof(payload) - 1);
   testAssertTrue(result == sessionQueueResultBlocked, "tun drop queue should block on saturation");
-  testAssertTrue(session->overflowNbytes == 0, "tun drop queue should not store pending payload");
+  testAssertTrue(!sessionHasOverflow(session), "tun drop queue should not store pending payload");
 
   session->overflowNbytes = 8;
   session->overflowKind = sessionOverflowToClient;

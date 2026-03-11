@@ -481,6 +481,7 @@ static void testClientSessionRuntimeWiringAcceptsClientContext(void) {
 static void testClientResetHeartbeatStateInitializesRuntimeScaffold(void) {
   clientFixture_t fixture;
   client_t *client = NULL;
+  ioReactorStepResult_t step;
 
   testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   client = &fixture.client;
@@ -490,7 +491,10 @@ static void testClientResetHeartbeatStateInitializesRuntimeScaffold(void) {
   clientResetHeartbeatState(client, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs, 11);
   testAssertTrue(client->preAuthState == clientPreAuthSendClaim, "client runtime state should reset to send-claim");
   testAssertTrue(!client->runFailed, "client runtime reset should clear run-failed flag");
-  testAssertTrue(client->reactor.epollFd >= 0, "client runtime reset should preserve embedded reactor registration");
+  step = ioReactorStep(&client->reactor, 0);
+  testAssertTrue(
+      step == ioReactorStepReady || step == ioReactorStepTimeout,
+      "client runtime reset should preserve a healthy embedded reactor");
 
   clientFixtureTeardown(&fixture);
 }
@@ -501,6 +505,7 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
   char fill[IoPollerQueueCapacity];
   char payload[128];
   sessionQueueResult_t result;
+  bool sawTunRead = false;
 
   memset(fill, 'w', sizeof(fill));
   memset(payload, 'z', sizeof(payload));
@@ -515,8 +520,11 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
       payload,
       sizeof(payload));
   testAssertTrue(result == sessionQueueResultBlocked, "client queue api should block on overflow");
-  testAssertTrue(client->tunReadPaused, "client queue api should pause tun reads on overflow");
   testAssertTrue(client->runtimeOverflowNbytes > 0, "client queue api should store pending tcp payload");
+  sessionEventFixtureReset(&fixture.events);
+  testAssertTrue(write(fixture.tunPair[1], "p", 1) == 1, "tun peer write should succeed");
+  sawTunRead = !sessionEventFixtureHasNoEventOfKind(&fixture.events, &client->reactor, 4, 25, ioEventTunRead);
+  testAssertTrue(!sawTunRead, "tun read should remain paused while runtime overflow is pending");
 
   clientFixtureTeardown(&fixture);
 }
@@ -591,6 +599,7 @@ static void testClientBackpressureServiceSkipsRetryOnTimeoutEvent(void) {
   session_t *session;
   const char tunPayload[] = "pending-tun";
   const char tcpPayload[] = "pending-tcp";
+  bool sawTunRead = false;
 
   testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
@@ -604,6 +613,7 @@ static void testClientBackpressureServiceSkipsRetryOnTimeoutEvent(void) {
   memcpy(client->runtimeOverflowBuf, tcpPayload, sizeof(tcpPayload));
   client->runtimeOverflowNbytes = sizeof(tcpPayload);
   client->tunReadPaused = true;
+  testAssertTrue(ioTunSetReadEnabled(&client->tunPoller, false), "test setup should disable tun reads");
 
   testAssertTrue(
       clientServiceBackpressure(
@@ -612,10 +622,12 @@ static void testClientBackpressureServiceSkipsRetryOnTimeoutEvent(void) {
           ioEventTimeout,
           testClientKey),
       "client backpressure service should continue on timeout event");
-  testAssertTrue(session->overflowNbytes == (long)sizeof(tunPayload), "timeout event should not retry pending tun overflow");
+  testAssertTrue(sessionHasOverflow(session), "timeout event should not retry pending tun overflow");
   testAssertTrue(client->runtimeOverflowNbytes == (long)sizeof(tcpPayload), "timeout event should not retry pending tcp overflow");
-  testAssertTrue(session->tcpReadPaused, "timeout event should keep tcp reads paused while overflow is pending");
-  testAssertTrue(client->tunReadPaused, "timeout event should keep tun reads paused while overflow is pending");
+  sessionEventFixtureReset(&fixture.events);
+  testAssertTrue(write(fixture.tunPair[1], "q", 1) == 1, "tun peer write should succeed");
+  sawTunRead = !sessionEventFixtureHasNoEventOfKind(&fixture.events, &client->reactor, 4, 25, ioEventTunRead);
+  testAssertTrue(!sawTunRead, "timeout event should keep tun reads paused while overflow is pending");
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);

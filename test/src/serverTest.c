@@ -135,6 +135,29 @@ static int serverFixtureAddClientWithFd(
     const unsigned char *claim,
     long claimNbytes);
 static void serverFixtureTeardown(serverFixture_t *fixture);
+static bool serverFixtureAttachTunEventCapture(serverFixture_t *fixture, sessionEventFixture_t *events);
+
+static bool serverFixtureAttachTunEventCapture(serverFixture_t *fixture, sessionEventFixture_t *events) {
+  bool readEnabled;
+  if (fixture == NULL || events == NULL) {
+    return false;
+  }
+  sessionEventFixtureReset(events);
+  if (!ioReactorInit(&fixture->server.reactor)) {
+    return false;
+  }
+  readEnabled = (fixture->server.tunPoller.poller.events & EPOLLIN) != 0;
+  if (!ioReactorAddPoller(
+          &fixture->server.reactor,
+          &fixture->server.tunPoller.poller,
+          &sessionEventFixtureCallbacks,
+          events,
+          readEnabled)) {
+    ioReactorDispose(&fixture->server.reactor);
+    return false;
+  }
+  return true;
+}
 
 static void testServerServeMultiClientRejectsInvalidArgs(void) {
   server_t server;
@@ -363,6 +386,7 @@ static void testServerRoundRobinRetryCursorRotates(void) {
 
 static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
   serverFixture_t fixture;
+  sessionEventFixture_t events;
   unsigned char payload[] = "pending-owner-payload";
   serverPendingRetry_t retry;
   int slot;
@@ -379,7 +403,11 @@ static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
       "storing pending tun-to-tcp payload should succeed");
   testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "server should report pending tun-to-tcp payload");
   testAssertTrue(serverPendingTunToTcpOwner(&fixture.server) == 0, "server should record pending owner slot");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending is active");
+  testAssertTrue(serverFixtureAttachTunEventCapture(&fixture, &events), "tun event capture should attach");
+  testAssertTrue(write(fixture.tunPair[1], "a", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureHasNoEventOfKind(&events, &fixture.server.reactor, 4, 25, ioEventTunRead),
+      "server should disable tun readable callbacks while pending is active");
 
   retry = serverRetryPendingTunToTcp(&fixture.server, 1, &fixture.server.activeConns[0].tcpPoller);
   testAssertTrue(retry == serverPendingRetryBlocked, "non-owner retry should be blocked");
@@ -394,7 +422,12 @@ static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
   testAssertTrue(
       serverSetTunReadEnabled(&fixture.server, true),
       "read interest should be re-enabled after pending payload clears");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) != 0, "server should enable tun epollin when requested");
+  sessionEventFixtureReset(&events);
+  testAssertTrue(write(fixture.tunPair[1], "b", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureWaitEventOfKind(&events, &fixture.server.reactor, 25, ioEventTunRead),
+      "server should re-enable tun readable callbacks when requested");
+  ioReactorDispose(&fixture.server.reactor);
   serverFixtureTeardown(&fixture);
 }
 
@@ -421,10 +454,10 @@ static void testServerRoutesTunIngressByClaimMatch(void) {
       serverRouteTunIngressPacket(&fixture.server, payload, sizeof(payload)),
       "tun ingress routing should succeed for matching claim");
   testAssertTrue(
-      fixture.server.activeConns[0].tcpPoller.outNbytes == 0,
+      ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0,
       "non-matching client should have no queued tcp bytes");
   testAssertTrue(
-      fixture.server.activeConns[1].tcpPoller.outNbytes > 0,
+      ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) > 0,
       "matching client should have queued encrypted frame bytes");
 
   serverFixtureTeardown(&fixture);
@@ -462,7 +495,7 @@ static void testServerDropsTunIngressOnUnmatchedBroadcastMulticastAndMalformed(v
   testAssertTrue(
       serverRouteTunIngressPacket(&fixture.server, malformed, sizeof(malformed)),
       "malformed drop should not fail");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue to any client");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0, "drop cases should not queue to any client");
 
   serverFixtureTeardown(&fixture);
 }
@@ -489,8 +522,8 @@ static void testServerFanoutTapBroadcastToAllClients(void) {
   testAssertTrue(
       serverRouteTunIngressPacket(&fixture.server, tapBroadcast, sizeof(tapBroadcast)),
       "tap broadcast fanout should not fail");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive tap broadcast");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive tap broadcast");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) > 0, "client A should receive tap broadcast");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) > 0, "client B should receive tap broadcast");
 
   serverFixtureTeardown(&fixture);
   sessionTestTcpPairClose(tcpPairB);
@@ -545,28 +578,40 @@ static void testServerFanoutTunBroadcastsBySubnetPolicy(void) {
   testAssertTrue(
       serverRouteTunIngressPacket(&fixture.server, directedBroadcast, sizeof(directedBroadcast)),
       "directed broadcast fanout should not fail");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive directed broadcast");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive directed broadcast");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) > 0,
+      "client A should receive directed broadcast");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) > 0,
+      "client B should receive directed broadcast");
 
   fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
   fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
       serverRouteTunIngressPacket(&fixture.server, limitedBroadcast, sizeof(limitedBroadcast)),
       "limited broadcast fanout should not fail");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes > 0, "client A should receive limited broadcast");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "client B should receive limited broadcast");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) > 0,
+      "client A should receive limited broadcast");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) > 0,
+      "client B should receive limited broadcast");
 
   fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
   fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
       serverRouteTunIngressPacket(&fixture.server, nonMatchingDirected, sizeof(nonMatchingDirected)),
       "non-matching directed broadcast should not fail");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes == 0, "non-matching directed broadcast should drop");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0,
+      "non-matching directed broadcast should drop");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) == 0,
+      "non-matching directed broadcast should drop");
 
   testAssertTrue(serverRouteTunIngressPacket(&fixture.server, multicast, sizeof(multicast)), "multicast drop should not fail");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "multicast should not queue client A");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes == 0, "multicast should not queue client B");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0, "multicast should not queue client A");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) == 0, "multicast should not queue client B");
 
   serverFixtureTeardown(&fixture);
   sessionTestTcpPairClose(tcpPairB);
@@ -604,9 +649,11 @@ static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
       serverRouteTunIngressPacket(&fixture.server, limitedBroadcast, sizeof(limitedBroadcast)),
       "broadcast fanout with saturation should not fail");
   testAssertTrue(
-      fixture.server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity,
+      ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == IoPollerQueueCapacity,
       "saturated client queue should remain unchanged");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "non-saturated client should still receive broadcast");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) > 0,
+      "non-saturated client should still receive broadcast");
   testAssertTrue(!serverHasPendingTunToTcp(&fixture.server), "broadcast best-effort skip should not set shared pending packet");
 
   serverFixtureTeardown(&fixture);
@@ -632,7 +679,7 @@ static void testServerQueueWithDropSkipsOverflowWithoutPendingState(void) {
       (long)sizeof(payload) - 1);
   testAssertTrue(result == sessionQueueResultBlocked, "queue-with-drop should report dropped on overflow");
   testAssertTrue(
-      fixture.server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity - 2,
+      ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == IoPollerQueueCapacity - 2,
       "queue-with-drop should leave queue unchanged when dropping");
   testAssertTrue(!serverHasPendingTunToTcp(&fixture.server), "queue-with-drop should not use shared pending state");
   serverFixtureTeardown(&fixture);
@@ -717,16 +764,20 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   testAssertTrue(
       fixture.server.activeConns[0].session->lastValidInboundMs > 0,
       "valid tcp ingress should refresh source session inbound timestamp");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "source client should not receive self echo");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "destination client should receive routed frame");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0, "source client should not receive self echo");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) > 0, "destination client should receive routed frame");
 
   fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
   fixture.server.activeConns[1].tcpPoller.outNbytes = 0;
   testAssertTrue(
       serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], toServer, sizeof(toServer)),
       "unicast to server identity should route to tun");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "server-local route should not enqueue source tcp");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes == 0, "server-local route should not enqueue peer tcp");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0,
+      "server-local route should not enqueue source tcp");
+  testAssertTrue(
+      ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) == 0,
+      "server-local route should not enqueue peer tcp");
   testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) > 0, "server-local route should enqueue tun payload");
 
   fixture.server.tunPoller.queuedBytes = 0;
@@ -736,8 +787,8 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   testAssertTrue(
       serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], broadcast, sizeof(broadcast)),
       "broadcast should fanout to peers and tun");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "broadcast should exclude source tcp");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "broadcast should fanout to peer tcp");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0, "broadcast should exclude source tcp");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) > 0, "broadcast should fanout to peer tcp");
   testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) > 0, "broadcast should enqueue tun payload");
 
   fixture.server.tunPoller.queuedBytes = 0;
@@ -756,8 +807,8 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   testAssertTrue(
       serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], malformed, sizeof(malformed)),
       "malformed should drop");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "drop cases should not queue source tcp");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes == 0, "drop cases should not queue peer tcp");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0, "drop cases should not queue source tcp");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) == 0, "drop cases should not queue peer tcp");
   testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) == 0, "drop cases should not queue tun payload");
 
   fixture.server.mode = sessionIfModeTap;
@@ -768,8 +819,8 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
   testAssertTrue(
       serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], tapBroadcast, sizeof(tapBroadcast)),
       "tap broadcast should fanout to peers and tun");
-  testAssertTrue(fixture.server.activeConns[0].tcpPoller.outNbytes == 0, "tap broadcast should exclude source tcp");
-  testAssertTrue(fixture.server.activeConns[1].tcpPoller.outNbytes > 0, "tap broadcast should fanout to peer tcp");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[0].tcpPoller) == 0, "tap broadcast should exclude source tcp");
+  testAssertTrue(ioTcpQueuedBytes(&fixture.server.activeConns[1].tcpPoller) > 0, "tap broadcast should fanout to peer tcp");
   testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) > 0, "tap broadcast should enqueue tun payload");
 
   serverFixtureTeardown(&fixture);
@@ -919,6 +970,7 @@ static void testServerHeartbeatTimeoutStopsSession(void) {
 static void testServerCreateAndRemovePreAuthConnResetsState(void) {
   serverFixture_t fixture;
   int slot;
+  int reusedSlot;
   preAuthConn_t *conn;
 
   serverFixtureSetup(&fixture, 84, 2, 2, &testHeartbeatCfg, NULL, NULL);
@@ -952,15 +1004,15 @@ static void testServerCreateAndRemovePreAuthConnResetsState(void) {
   testAssertTrue(serverRemovePreAuthConn(&fixture.server, slot), "pre-auth remove should succeed");
   testAssertTrue(serverPreAuthAt(&fixture.server, slot) == NULL, "removed pre-auth slot should be inactive");
   testAssertTrue(fixture.server.preAuthCount == 0, "pre-auth count should decrement after remove");
-  testAssertTrue(fixture.server.preAuthConns[slot].tcpPoller.poller.fd == -1, "removed slot should reset poller fd");
-  testAssertTrue(fixture.server.preAuthConns[slot].claimNbytes == 0, "removed slot should clear claim length");
-  testAssertTrue(fixture.server.preAuthConns[slot].tcpReadCarryNbytes == 0, "removed slot should clear carry length");
-  testAssertTrue(fixture.server.preAuthConns[slot].authWriteOffset == 0, "removed slot should reset auth write offset");
-  testAssertTrue(fixture.server.preAuthConns[slot].authWriteNbytes == 0, "removed slot should reset auth write length");
-  testAssertTrue(fixture.server.preAuthConns[slot].authState == 0, "removed slot should reset auth state");
-  testAssertTrue(fixture.server.preAuthConns[slot].decoder.hasFrame == 0, "removed slot should clear decoder state");
-  testAssertTrue(fixture.server.preAuthConns[slot].decoder.offset == 0, "removed slot should clear decoder offset");
-  testAssertTrue(fixture.server.preAuthConns[slot].decoder.frame.nbytes == 0, "removed slot should clear decoder frame length");
+  testAssertTrue(
+      sessionTestInitTcpPollerFromFd(&fixture.server.preAuthConns[slot].tcpPoller, fixture.tcpPair[0]),
+      "reused pre-auth tcp poller init should succeed");
+  fixture.server.preAuthConns[slot].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  fixture.server.preAuthConns[slot].tcpPoller.poller.readEnabled = true;
+  reusedSlot = serverCreatePreAuthConn(&fixture.server, slot, 54321);
+  testAssertTrue(reusedSlot == slot, "removed pre-auth slot should be reusable");
+  testAssertTrue(serverPreAuthAt(&fixture.server, reusedSlot) != NULL, "reused pre-auth slot should become active");
+  testAssertTrue(serverRemovePreAuthConn(&fixture.server, reusedSlot), "reused pre-auth slot should remove cleanly");
   serverFixtureTeardown(&fixture);
 }
 
@@ -1077,6 +1129,7 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
 static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   unsigned char key[ProtocolPskSize];
   serverFixture_t fixture;
+  sessionEventFixture_t events;
   int slotA;
   char fill[IoPollerQueueCapacity];
   char tunPayload[128];
@@ -1104,14 +1157,20 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
       "session should continue on overflow");
   testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "server overflow should retain pending data in server");
   testAssertTrue(fixture.server.tunReadPaused, "server server should mark tun read paused while pending exists");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
+  testAssertTrue(serverFixtureAttachTunEventCapture(&fixture, &events), "tun event capture should attach");
+  testAssertTrue(write(fixture.tunPair[1], "c", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureHasNoEventOfKind(&events, &fixture.server.reactor, 4, 25, ioEventTunRead),
+      "server should disable tun readable callbacks while pending exists");
 
+  ioReactorDispose(&fixture.server.reactor);
   serverFixtureTeardown(&fixture);
 }
 
 static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(void) {
   unsigned char key[ProtocolPskSize];
   serverFixture_t fixture;
+  sessionEventFixture_t events;
   int slotA;
   int slotB;
   int tcpPairB[2];
@@ -1150,7 +1209,11 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       "overflow on owner should continue");
   testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "owner overflow should store server pending bytes");
   testAssertTrue(fixture.server.tunReadPaused, "server server should mark tun read paused while pending exists");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while server pending exists");
+  testAssertTrue(serverFixtureAttachTunEventCapture(&fixture, &events), "tun event capture should attach");
+  testAssertTrue(write(fixture.tunPair[1], "d", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureHasNoEventOfKind(&events, &fixture.server.reactor, 4, 25, ioEventTunRead),
+      "tun readable callbacks should be disabled while pending exists");
 
   testAssertTrue(
       runSessionStepSplit(otherSession, otherPoller, &fixture.server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
@@ -1158,7 +1221,11 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(
       serverServiceBackpressure(&fixture.server, slotB, ioEventTcpWrite),
       "non-owner backpressure service should continue");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "non-owner should not consume server pending");
+  sessionEventFixtureReset(&events);
+  testAssertTrue(write(fixture.tunPair[1], "e", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureHasNoEventOfKind(&events, &fixture.server.reactor, 4, 25, ioEventTunRead),
+      "non-owner backpressure should not re-enable tun readable callbacks");
 
   ownerPoller->outOffset = 0;
   ownerPoller->outNbytes = IoPollerLowWatermark + 100;
@@ -1171,7 +1238,11 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   queued = ioTcpQueuedBytes(ownerPoller);
   testAssertTrue(queued > IoPollerLowWatermark, "owner queue should remain above low watermark");
   testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "owner pending payload should remain while queue is above low watermark");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
+  sessionEventFixtureReset(&events);
+  testAssertTrue(write(fixture.tunPair[1], "f", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureHasNoEventOfKind(&events, &fixture.server.reactor, 4, 25, ioEventTunRead),
+      "tun readable callbacks should stay disabled above low watermark");
 
   ownerPoller->outOffset = 0;
   ownerPoller->outNbytes = IoPollerLowWatermark;
@@ -1185,8 +1256,13 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       "owner backpressure service should continue at low watermark");
   testAssertTrue(!serverHasPendingTunToTcp(&fixture.server), "owner pending payload should clear once queue drains to low watermark");
   testAssertTrue(!fixture.server.tunReadPaused, "server server should clear tun read paused at low watermark");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
+  sessionEventFixtureReset(&events);
+  testAssertTrue(write(fixture.tunPair[1], "g", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureWaitEventOfKind(&events, &fixture.server.reactor, 25, ioEventTunRead),
+      "tun readable callbacks should resume at low watermark");
 
+  ioReactorDispose(&fixture.server.reactor);
   serverFixtureTeardown(&fixture);
   sessionTestTcpPairClose(tcpPairB);
 }
@@ -1194,6 +1270,7 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
 static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(void) {
   unsigned char key[ProtocolPskSize];
   serverFixture_t fixture;
+  sessionEventFixture_t events;
   int slotA;
   char fill[IoPollerQueueCapacity];
   char tunPayload[128];
@@ -1220,12 +1297,21 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
       runSessionStepSplit(session, poller, &fixture.server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
   testAssertTrue(fixture.server.tunReadPaused, "server server should mark tun read paused while pending is active");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
+  testAssertTrue(serverFixtureAttachTunEventCapture(&fixture, &events), "tun event capture should attach");
+  testAssertTrue(write(fixture.tunPair[1], "h", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureHasNoEventOfKind(&events, &fixture.server.reactor, 4, 25, ioEventTunRead),
+      "tun readable callbacks should be disabled while pending is active");
 
   testAssertTrue(serverRemoveClient(&fixture.server, slotA), "owner removal should succeed");
   testAssertTrue(!fixture.server.tunReadPaused, "server server should clear tun read paused after owner drop");
-  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
+  sessionEventFixtureReset(&events);
+  testAssertTrue(write(fixture.tunPair[1], "i", 1) == 1, "tun peer write should succeed");
+  testAssertTrue(
+      sessionEventFixtureWaitEventOfKind(&events, &fixture.server.reactor, 25, ioEventTunRead),
+      "tun readable callbacks should re-enable after owner disconnect drop");
 
+  ioReactorDispose(&fixture.server.reactor);
   serverFixtureTeardown(&fixture);
 }
 
