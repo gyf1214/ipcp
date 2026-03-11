@@ -114,7 +114,7 @@ ioStatus_t ioTcpRead(int tcpFd, void *buf, long capacity, long *outNbytes);
 ioStatus_t ioTunRead(int tunFd, void *buf, long capacity, long *outNbytes);
 
 bool ioReactorInit(ioReactor_t *reactor);
-void ioReactorDeinit(ioReactor_t *reactor);
+void ioReactorDispose(ioReactor_t *reactor);
 bool ioReactorAddPoller(
     ioReactor_t *reactor,
     ioPoller_t *poller,
@@ -138,6 +138,8 @@ ioStatus_t ioListenPollerAcceptNonBlocking(
     int *peerPort);
 bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port);
 bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode);
+void ioTcpPollerDispose(ioTcpPoller_t *poller);
+void ioTunPollerDispose(ioTunPoller_t *poller);
 
 int ioTcpPollerInit(ioTcpPoller_t *poller, ioReactor_t *reactor, int tcpFd);
 int ioTunPollerInit(ioTunPoller_t *poller, ioReactor_t *reactor, int tunFd);

@@ -98,7 +98,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   poller->tunPoller.poller.events = EPOLLRDHUP;
   poller->tunPoller.poller.kind = ioPollerTun;
   if (!ioReactorAddPoller(&poller->reactor, &poller->tunPoller.poller, &splitPollerCallbacks, poller, true)) {
-    ioReactorDeinit(&poller->reactor);
+    ioReactorDispose(&poller->reactor);
     return -1;
   }
 
@@ -108,7 +108,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   poller->tcpPoller.poller.events = EPOLLRDHUP;
   poller->tcpPoller.poller.kind = ioPollerTcp;
   if (!ioReactorAddPoller(&poller->reactor, &poller->tcpPoller.poller, &splitPollerCallbacks, poller, true)) {
-    ioReactorDeinit(&poller->reactor);
+    ioReactorDispose(&poller->reactor);
     return -1;
   }
   return 0;
@@ -116,7 +116,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
 
 static void teardownSplitPollers(splitPollersFixture_t *poller) {
   if (poller != NULL) {
-    ioReactorDeinit(&poller->reactor);
+    ioReactorDispose(&poller->reactor);
   }
 }
 

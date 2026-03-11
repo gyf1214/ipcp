@@ -109,7 +109,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   poller->client.tunPoller.poller.kind = ioPollerTun;
   if (!ioReactorAddPoller(
           &poller->client.reactor, &poller->client.tunPoller.poller, &splitPollerCallbacks, poller, true)) {
-    ioReactorDeinit(&poller->client.reactor);
+    ioReactorDispose(&poller->client.reactor);
     return -1;
   }
 
@@ -120,7 +120,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   poller->client.tcpPoller.poller.kind = ioPollerTcp;
   if (!ioReactorAddPoller(
           &poller->client.reactor, &poller->client.tcpPoller.poller, &splitPollerCallbacks, poller, true)) {
-    ioReactorDeinit(&poller->client.reactor);
+    ioReactorDispose(&poller->client.reactor);
     return -1;
   }
   return 0;
@@ -128,7 +128,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
 
 static void teardownSplitPollers(splitPollersFixture_t *poller) {
   if (poller != NULL) {
-    ioReactorDeinit(&poller->client.reactor);
+    ioReactorDispose(&poller->client.reactor);
   }
 }
 
@@ -344,7 +344,7 @@ static int clientRunLoopOnFds(
   result = clientRunLoop(&client);
 
 cleanup:
-  ioReactorDeinit(&client.reactor);
+  ioReactorDispose(&client.reactor);
   sessionDestroy(session);
   return result;
 }

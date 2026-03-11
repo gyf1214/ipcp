@@ -147,6 +147,24 @@ static int tunFrameNext(int index) {
   return (index + 1) % IoTunQueueFrameCapacity;
 }
 
+static void pollerDispose(ioPoller_t *poller) {
+  if (poller == NULL) {
+    return;
+  }
+  if (poller->fd >= 0) {
+    if (poller->reactor != NULL && poller->reactor->epollFd >= 0) {
+      (void)epoll_ctl(poller->reactor->epollFd, EPOLL_CTL_DEL, poller->fd, NULL);
+    }
+    (void)close(poller->fd);
+  }
+  poller->reactor = NULL;
+  poller->fd = -1;
+  poller->events = 0;
+  poller->callbacks = NULL;
+  poller->ctx = NULL;
+  poller->readEnabled = false;
+}
+
 static bool tunQueueWrite(ioTunPoller_t *poller, const void *data, long nbytes) {
   long start = -1;
   long tailSpace;
@@ -299,7 +317,7 @@ bool ioReactorInit(ioReactor_t *reactor) {
   return reactor->epollFd >= 0;
 }
 
-void ioReactorDeinit(ioReactor_t *reactor) {
+void ioReactorDispose(ioReactor_t *reactor) {
   if (reactor == NULL) {
     return;
   }
@@ -763,6 +781,16 @@ bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port) {
   return true;
 }
 
+void ioTcpPollerDispose(ioTcpPoller_t *poller) {
+  if (poller == NULL) {
+    return;
+  }
+  pollerDispose(&poller->poller);
+  poller->outOffset = 0;
+  poller->outNbytes = 0;
+  memset(poller->outBuf, 0, sizeof(poller->outBuf));
+}
+
 bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode) {
   int tunFd;
 
@@ -786,6 +814,21 @@ bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode)
   poller->poller.kind = ioPollerTun;
   poller->poller.readEnabled = true;
   return true;
+}
+
+void ioTunPollerDispose(ioTunPoller_t *poller) {
+  if (poller == NULL) {
+    return;
+  }
+  pollerDispose(&poller->poller);
+  poller->readPos = 0;
+  poller->writePos = 0;
+  poller->queuedBytes = 0;
+  poller->frameHead = 0;
+  poller->frameTail = 0;
+  poller->frameCount = 0;
+  memset(poller->frames, 0, sizeof(poller->frames));
+  memset(poller->outBuf, 0, sizeof(poller->outBuf));
 }
 
 int ioTcpPollerInit(ioTcpPoller_t *poller, ioReactor_t *reactor, int tcpFd) {

@@ -551,8 +551,6 @@ int clientServeRemote(
   client_t client;
   session_t *session = NULL;
   int result = -1;
-  bool tunOpened = false;
-  bool tcpOpened = false;
 
   if (ifName == NULL
       || ifName[0] == '\0'
@@ -591,12 +589,10 @@ int clientServeRemote(
     errf("setup tun poller failed: %s", strerror(errno));
     goto cleanup;
   }
-  tunOpened = true;
   if (!ioTcpPollerConnect(&client.tcpPoller, remoteIP, port)) {
     errf("setup tcp poller failed: %s", strerror(errno));
     goto cleanup;
   }
-  tcpOpened = true;
 
   if (!clientRegisterRuntimePollers(&client)) {
     errf("reactor registration failed: %s", strerror(errno));
@@ -609,13 +605,9 @@ cleanup:
   if (session != NULL) {
     sessionDestroy(session);
   }
-  ioReactorDeinit(&client.reactor);
-  if (tcpOpened && client.tcpPoller.poller.fd >= 0) {
-    close(client.tcpPoller.poller.fd);
-  }
-  if (tunOpened && client.tunPoller.poller.fd >= 0) {
-    close(client.tunPoller.poller.fd);
-  }
+  ioTcpPollerDispose(&client.tcpPoller);
+  ioTunPollerDispose(&client.tunPoller);
+  ioReactorDispose(&client.reactor);
 
   return result;
 }

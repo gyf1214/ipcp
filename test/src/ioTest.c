@@ -153,7 +153,7 @@ static void testIoTcpPollerConnectInitializesPoller(void) {
   testAssertTrue((tcpPoller.poller.events & EPOLLRDHUP) != 0, "connected tcp poller should enable EPOLLRDHUP");
 
   close(acceptedFd);
-  close(tcpPoller.poller.fd);
+  ioTcpPollerDispose(&tcpPoller);
   close(listenFd);
 }
 
@@ -206,8 +206,8 @@ static void testIoReactorInitAndAddPoller(void) {
   testAssertTrue(ioReactorSetPollerReadEnabled(&poller, true), "read enable should succeed");
   testAssertTrue((poller.events & EPOLLIN) != 0, "read enable should set EPOLLIN bit");
 
-  ioReactorDeinit(&reactor);
-  testAssertTrue(reactor.epollFd == -1, "ioReactorDeinit should reset epoll fd");
+  ioReactorDispose(&reactor);
+  testAssertTrue(reactor.epollFd == -1, "ioReactorDispose should reset epoll fd");
   close(pipeFds[0]);
   close(pipeFds[1]);
 }
@@ -280,7 +280,7 @@ static void testIoReactorStepTimeoutAndStop(void) {
   testAssertTrue(ioReactorStep(&reactor, 50) == ioReactorStepStop, "readable stop action should stop reactor step");
   testAssertTrue(counts.readableCalls == 1, "readable callback should run once");
 
-  ioReactorDeinit(&reactor);
+  ioReactorDispose(&reactor);
   close(pipeFds[0]);
   close(pipeFds[1]);
 }
@@ -308,7 +308,7 @@ static void testIoReactorStepRemoveStopsCallbackChain(void) {
   testAssertTrue(counts.readableCalls == 0, "remove action should stop callback chain");
   testAssertTrue(!ioReactorSetPollerReadEnabled(&poller, false), "removed poller should no longer support epoll mod");
 
-  ioReactorDeinit(&reactor);
+  ioReactorDispose(&reactor);
   close(socketFds[0]);
 }
 
@@ -351,7 +351,7 @@ static void testIoPollerHeadersAndLowWatermarkEdge(void) {
   testAssertTrue(ioReactorStep(&reactor, 20) == ioReactorStepTimeout, "no repeated low-watermark callback when already below threshold");
   testAssertTrue(counts.lowWatermarkCalls == 1, "low-watermark callback should be edge-triggered");
 
-  ioReactorDeinit(&reactor);
+  ioReactorDispose(&reactor);
   close(socketFds[0]);
   close(socketFds[1]);
 }
@@ -402,7 +402,7 @@ static void testIoReactorTcpWritableRearmsAfterFlush(void) {
   nread = read(socketFds[1], peerBuf, sizeof(payload));
   testAssertTrue(nread == (long)sizeof(payload), "second payload should reach peer");
 
-  ioReactorDeinit(&reactor);
+  ioReactorDispose(&reactor);
   close(socketFds[0]);
   close(socketFds[1]);
 }
@@ -429,7 +429,7 @@ static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
   testAssertTrue(acceptedPoller.poller.kind == ioPollerTcp, "accepted poller kind should be tcp");
 
   close(clientFd);
-  close(acceptedPoller.poller.fd);
+  ioTcpPollerDispose(&acceptedPoller);
   close(listenPoller.poller.fd);
 }
 
@@ -475,7 +475,7 @@ static void testIoTcpWriteEpollCtlFailureDoesNotQueue(void) {
   testAssertTrue((tcpPoller.poller.events & EPOLLOUT) == 0, "failed tcp write should keep EPOLLOUT disabled");
 
   reactor.epollFd = -1;
-  ioReactorDeinit(&reactor);
+  ioReactorDispose(&reactor);
   close(socketFds[0]);
   close(socketFds[1]);
 }
@@ -505,9 +505,86 @@ static void testIoTunWriteEpollCtlFailureDoesNotQueue(void) {
   testAssertTrue((tunPoller.poller.events & EPOLLOUT) == 0, "failed tun write should keep EPOLLOUT disabled");
 
   reactor.epollFd = -1;
-  ioReactorDeinit(&reactor);
+  ioReactorDispose(&reactor);
   close(socketFds[0]);
   close(socketFds[1]);
+}
+
+static void testIoTcpPollerDisposeDetachesClosesAndResetsState(void) {
+  ioReactor_t reactor;
+  ioTcpPoller_t tcpPoller;
+  ioPollerCallbacks_t callbacks = {0};
+  int socketFds[2];
+  int disposedFd;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&tcpPoller, 0, sizeof(tcpPoller));
+  tcpPoller.poller.reactor = NULL;
+  tcpPoller.poller.fd = socketFds[0];
+  tcpPoller.poller.events = EPOLLRDHUP;
+  tcpPoller.poller.kind = ioPollerTcp;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &tcpPoller.poller, &callbacks, NULL, true),
+      "tcp poller add should succeed");
+  testAssertTrue(ioTcpWrite(&tcpPoller, "abc", 3), "tcp write should queue");
+  testAssertTrue(ioTcpQueuedBytes(&tcpPoller) == 3, "tcp queue should contain bytes before dispose");
+
+  disposedFd = tcpPoller.poller.fd;
+  ioTcpPollerDispose(&tcpPoller);
+
+  testAssertTrue(tcpPoller.poller.fd == -1, "tcp dispose should reset fd");
+  testAssertTrue(tcpPoller.poller.reactor == NULL, "tcp dispose should detach reactor");
+  testAssertTrue(tcpPoller.poller.events == 0, "tcp dispose should reset event mask");
+  testAssertTrue(ioTcpQueuedBytes(&tcpPoller) == 0, "tcp dispose should clear queue");
+  testAssertTrue(fcntl(disposedFd, F_GETFD) < 0 && errno == EBADF, "tcp dispose should close fd");
+  testAssertTrue(
+      !ioReactorSetPollerReadEnabled(&tcpPoller.poller, false),
+      "disposed tcp poller should no longer support read toggles");
+
+  close(socketFds[1]);
+  ioReactorDispose(&reactor);
+}
+
+static void testIoTunPollerDisposeDetachesClosesAndResetsState(void) {
+  ioReactor_t reactor;
+  ioTunPoller_t tunPoller;
+  ioPollerCallbacks_t callbacks = {0};
+  int socketFds[2];
+  int disposedFd;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&tunPoller, 0, sizeof(tunPoller));
+  tunPoller.poller.reactor = NULL;
+  tunPoller.poller.fd = socketFds[0];
+  tunPoller.poller.events = EPOLLRDHUP;
+  tunPoller.poller.kind = ioPollerTun;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &tunPoller.poller, &callbacks, NULL, true),
+      "tun poller add should succeed");
+  testAssertTrue(ioTunWrite(&tunPoller, "abc", 3), "tun write should queue");
+  testAssertTrue(ioTunQueuedBytes(&tunPoller) == 3, "tun queue should contain bytes before dispose");
+  testAssertTrue(tunPoller.frameCount == 1, "tun queue metadata should include one frame before dispose");
+
+  disposedFd = tunPoller.poller.fd;
+  ioTunPollerDispose(&tunPoller);
+
+  testAssertTrue(tunPoller.poller.fd == -1, "tun dispose should reset fd");
+  testAssertTrue(tunPoller.poller.reactor == NULL, "tun dispose should detach reactor");
+  testAssertTrue(tunPoller.poller.events == 0, "tun dispose should reset event mask");
+  testAssertTrue(ioTunQueuedBytes(&tunPoller) == 0, "tun dispose should clear queued bytes");
+  testAssertTrue(tunPoller.frameCount == 0, "tun dispose should clear frame queue");
+  testAssertTrue(tunPoller.readPos == 0 && tunPoller.writePos == 0, "tun dispose should reset queue cursors");
+  testAssertTrue(fcntl(disposedFd, F_GETFD) < 0 && errno == EBADF, "tun dispose should close fd");
+  testAssertTrue(
+      !ioReactorSetPollerReadEnabled(&tunPoller.poller, false),
+      "disposed tun poller should no longer support read toggles");
+
+  close(socketFds[1]);
+  ioReactorDispose(&reactor);
 }
 
 void runIoTests(void) {
@@ -535,4 +612,6 @@ void runIoTests(void) {
   testIoDetachedPollerSkipsEpollCtl();
   testIoTcpWriteEpollCtlFailureDoesNotQueue();
   testIoTunWriteEpollCtlFailureDoesNotQueue();
+  testIoTcpPollerDisposeDetachesClosesAndResetsState();
+  testIoTunPollerDisposeDetachesClosesAndResetsState();
 }
