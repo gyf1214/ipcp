@@ -143,6 +143,7 @@ bool ioTcpPollerHandoff(
     const ioPollerCallbacks_t *callbacks,
     void *ctx,
     bool readEnabled);
+void ioListenPollerDispose(ioListenPoller_t *poller);
 void ioTcpPollerDispose(ioTcpPoller_t *poller);
 void ioTunPollerDispose(ioTunPoller_t *poller);
 

@@ -859,6 +859,13 @@ bool ioTcpPollerHandoff(
   return true;
 }
 
+void ioListenPollerDispose(ioListenPoller_t *poller) {
+  if (poller == NULL) {
+    return;
+  }
+  pollerDispose(&poller->poller);
+}
+
 void ioTcpPollerDispose(ioTcpPoller_t *poller) {
   if (poller == NULL) {
     return;

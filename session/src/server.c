@@ -14,6 +14,8 @@
 
 static const ioPollerCallbacks_t serverActiveCallbacks;
 static const ioPollerCallbacks_t serverPreAuthCallbacks;
+static void serverActiveConnDispose(server_t *server, int slot);
+static void serverPreAuthConnDispose(server_t *server, int preAuthSlot);
 
 static long long defaultNowMs(void *ctx) {
   struct timespec ts;
@@ -104,8 +106,6 @@ static const unsigned char *serverAuthoritativeKeySlotConst(const server_t *serv
 
 bool serverInit(
     server_t *server,
-    int tunFd,
-    int listenFd,
     int maxActiveSessions,
     int maxPreAuthSessions,
     const sessionHeartbeatConfig_t *heartbeatCfg,
@@ -116,9 +116,7 @@ bool serverInit(
   if (server == NULL
       || heartbeatCfg == NULL
       || maxActiveSessions <= 0
-      || maxPreAuthSessions <= 0
-      || tunFd < 0
-      || listenFd < 0) {
+      || maxPreAuthSessions <= 0) {
     return false;
   }
 
@@ -134,8 +132,14 @@ bool serverInit(
     return false;
   }
 
+  server->listenPoller.poller.reactor = NULL;
+  server->listenPoller.poller.fd = -1;
+  server->listenPoller.poller.kind = ioPollerKindListen;
+  server->listenPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  server->listenPoller.poller.readEnabled = true;
+
   server->tunPoller.poller.reactor = NULL;
-  server->tunPoller.poller.fd = tunFd;
+  server->tunPoller.poller.fd = -1;
   server->tunPoller.poller.kind = ioPollerKindTun;
   server->reactor.epollFd = -1;
   server->tunPoller.poller.events = EPOLLIN | EPOLLRDHUP;
@@ -883,8 +887,8 @@ static bool serverClosePreAuthConn(server_t *server, int preAuthSlot) {
   if (conn == NULL) {
     return false;
   }
-  ioTcpPollerDispose(&conn->tcpPoller);
-  return serverRemovePreAuthConn(server, preAuthSlot);
+  serverPreAuthConnDispose(server, preAuthSlot);
+  return true;
 }
 
 static bool preAuthReadIntoCarry(preAuthConn_t *conn) {
@@ -1572,6 +1576,44 @@ typedef struct {
 static const ioPollerCallbacks_t serverPreAuthCallbacks;
 static const ioPollerCallbacks_t serverActiveCallbacks;
 
+static void serverActiveConnDispose(server_t *server, int slot) {
+  if (!activeSlotIndexValid(server, slot) || !server->activeConns[slot].active) {
+    return;
+  }
+  ioTcpPollerDispose(&server->activeConns[slot].tcpPoller);
+  (void)serverRemoveClient(server, slot);
+}
+
+static void serverPreAuthConnDispose(server_t *server, int preAuthSlot) {
+  preAuthConn_t *conn;
+  if (!preAuthSlotIndexValid(server, preAuthSlot)) {
+    return;
+  }
+  conn = &server->preAuthConns[preAuthSlot];
+  if (conn->tcpPoller.poller.fd >= 0) {
+    ioTcpPollerDispose(&conn->tcpPoller);
+  }
+  if (conn->active) {
+    (void)serverRemovePreAuthConn(server, preAuthSlot);
+  }
+}
+
+static void serverRuntimeDispose(server_t *server) {
+  int i;
+  if (server == NULL) {
+    return;
+  }
+  for (i = 0; i < server->maxActiveSessions; i++) {
+    serverActiveConnDispose(server, i);
+  }
+  for (i = 0; i < server->maxPreAuthSessions; i++) {
+    serverPreAuthConnDispose(server, i);
+  }
+  ioTunPollerDispose(&server->tunPoller);
+  ioListenPollerDispose(&server->listenPoller);
+  ioReactorDispose(&server->reactor);
+}
+
 static ioPollerAction_t serverOnListenReadable(void *ctx, ioReactor_t *reactor, ioListenPoller_t *listenPoller) {
   serverRuntimeCtx_t *runtime = ctx;
   server_t *server;
@@ -1734,8 +1776,7 @@ static ioPollerAction_t serverOnActiveClosed(void *ctx, ioPoller_t *poller) {
   if (slot < 0) {
     return ioPollerContinue;
   }
-  ioTcpPollerDispose(&server->activeConns[slot].tcpPoller);
-  (void)serverRemoveClient(server, slot);
+  serverActiveConnDispose(server, slot);
   return ioPollerRetargeted;
 }
 
@@ -1784,8 +1825,7 @@ static ioPollerAction_t serverOnPreAuthClosed(void *ctx, ioPoller_t *poller) {
   if (preAuthSlot < 0) {
     return ioPollerContinue;
   }
-  ioTcpPollerDispose(&server->preAuthConns[preAuthSlot].tcpPoller);
-  (void)serverRemovePreAuthConn(server, preAuthSlot);
+  serverPreAuthConnDispose(server, preAuthSlot);
   return ioPollerRetargeted;
 }
 
@@ -1813,107 +1853,94 @@ static const ioPollerCallbacks_t serverPreAuthCallbacks = {
     .onReadable = serverOnPreAuthReadable,
 };
 
-int serverServeMultiClient(
-    int tunFd,
-    int listenFd,
-    sessionServerResolveClaimFn_t resolveClaimFn,
-    void *resolveClaimCtx,
-    sessionIfMode_t mode,
-    const sessionServerIdentity_t *serverIdentity,
-    int authTimeoutMs,
-    const sessionHeartbeatConfig_t *heartbeatCfg,
-    int maxActiveSessions,
-    int maxPreAuthSessions) {
-  server_t server;
-  ioListenPoller_t listenPoller;
+int serverServeMultiClient(server_t *server) {
   serverRuntimeCtx_t runtimeCtx;
-  int rc = -1;
-  int i;
+  if (server == NULL
+      || server->resolveClaimFn == NULL
+      || (server->mode != sessionIfModeTun && server->mode != sessionIfModeTap)
+      || server->authTimeoutMs <= 0
+      || server->maxActiveSessions <= 0
+      || server->maxPreAuthSessions <= 0
+      || server->listenPoller.poller.fd < 0
+      || server->tunPoller.poller.fd < 0) {
+    return -1;
+  }
 
-  if (tunFd < 0
-      || listenFd < 0
-      || resolveClaimFn == NULL
-      || (mode != sessionIfModeTun && mode != sessionIfModeTap)
-      || authTimeoutMs <= 0
-      || heartbeatCfg == NULL
-      || maxActiveSessions <= 0
-      || maxPreAuthSessions <= 0) {
+  if (!ioReactorInit(&server->reactor)) {
+    return -1;
+  }
+  runtimeCtx.server = server;
+
+  if (!ioReactorAddPoller(&server->reactor, &server->listenPoller.poller, &serverListenCallbacks, &runtimeCtx, true)) {
+    ioReactorDispose(&server->reactor);
+    return -1;
+  }
+  if (!ioReactorAddPoller(&server->reactor, &server->tunPoller.poller, &serverTunCallbacks, &runtimeCtx, true)) {
+    ioReactorDispose(&server->reactor);
+    return -1;
+  }
+
+  while (1) {
+    ioReactorStepResult_t step = ioReactorStep(&server->reactor, 200);
+    if (step == ioReactorStepError || step == ioReactorStepStop) {
+      return -1;
+    }
+    if (!serverTickAllClients(server)) {
+      return -1;
+    }
+    if (!serverTickPreAuth(server, server->resolveClaimFn, server->resolveClaimCtx)) {
+      return -1;
+    }
+  }
+}
+
+int serverServeLocal(const sessionServerConfig_t *cfg) {
+  server_t server;
+  int rc = -1;
+
+  if (cfg == NULL
+      || cfg->ifName == NULL
+      || cfg->ifName[0] == '\0'
+      || (cfg->ifMode != ioIfModeTun && cfg->ifMode != ioIfModeTap)
+      || cfg->listenIP == NULL
+      || cfg->port <= 0
+      || cfg->port > 65535
+      || cfg->resolveClaimFn == NULL
+      || cfg->authTimeoutMs <= 0
+      || cfg->heartbeat.intervalMs <= 0
+      || cfg->heartbeat.timeoutMs <= cfg->heartbeat.intervalMs
+      || cfg->maxActiveSessions <= 0
+      || cfg->maxPreAuthSessions <= 0) {
     return -1;
   }
   if (!serverInit(
           &server,
-          tunFd,
-          listenFd,
-          maxActiveSessions,
-          maxPreAuthSessions,
-          heartbeatCfg,
+          cfg->maxActiveSessions,
+          cfg->maxPreAuthSessions,
+          &cfg->heartbeat,
           NULL,
           NULL)) {
     return -1;
   }
-  if (serverIdentity != NULL) {
-    server.serverIdentity = *serverIdentity;
-  }
-  server.mode = mode;
-  memset(&listenPoller, 0, sizeof(listenPoller));
-  listenPoller.poller.reactor = NULL;
-  listenPoller.poller.fd = listenFd;
-  listenPoller.poller.kind = ioPollerKindListen;
-  listenPoller.poller.events = EPOLLIN | EPOLLRDHUP;
-  listenPoller.poller.readEnabled = true;
 
-  if (!ioReactorInit(&server.reactor)) {
+  server.resolveClaimFn = cfg->resolveClaimFn;
+  server.resolveClaimCtx = cfg->resolveClaimCtx;
+  server.authTimeoutMs = cfg->authTimeoutMs;
+  server.mode = cfg->ifMode == ioIfModeTap ? sessionIfModeTap : sessionIfModeTun;
+  if (cfg->serverIdentity != NULL) {
+    server.serverIdentity = *cfg->serverIdentity;
+  }
+
+  if (!ioPollerOpenTun(&server.tunPoller, cfg->ifName, cfg->ifMode)) {
     goto cleanup;
   }
-  server.tunPoller.poller.reactor = &server.reactor;
-
-  runtimeCtx.server = &server;
-  server.resolveClaimFn = resolveClaimFn;
-  server.resolveClaimCtx = resolveClaimCtx;
-  server.authTimeoutMs = authTimeoutMs;
-
-  if (!ioReactorAddPoller(&server.reactor, &listenPoller.poller, &serverListenCallbacks, &runtimeCtx, true)) {
+  if (!ioPollerListen(&server.listenPoller, cfg->listenIP, cfg->port)) {
     goto cleanup;
   }
-  if (!ioReactorAddPoller(&server.reactor, &server.tunPoller.poller, &serverTunCallbacks, &runtimeCtx, true)) {
-    goto cleanup;
-  }
-
-  while (1) {
-    ioReactorStepResult_t step = ioReactorStep(&server.reactor, 200);
-    if (step == ioReactorStepError || step == ioReactorStepStop) {
-      goto cleanup;
-    }
-    if (!serverTickAllClients(&server)) {
-      goto cleanup;
-    }
-    if (!serverTickPreAuth(&server, resolveClaimFn, resolveClaimCtx)) {
-      goto cleanup;
-    }
-  }
+  rc = serverServeMultiClient(&server);
 
 cleanup:
-  for (i = 0; i < server.maxActiveSessions; i++) {
-    if (server.activeConns[i].active) {
-      ioTcpPollerDispose(&server.activeConns[i].tcpPoller);
-    }
-  }
-  for (i = 0; i < server.maxPreAuthSessions; i++) {
-    preAuthConn_t *conn = serverPreAuthAt(&server, i);
-    if (conn != NULL) {
-      ioTcpPollerDispose(&conn->tcpPoller);
-      (void)serverRemovePreAuthConn(&server, i);
-    }
-  }
-  ioTunPollerDispose(&server.tunPoller);
-  {
-    ioTcpPoller_t listenDispose = {0};
-    listenDispose.poller.fd = listenPoller.poller.fd;
-    listenDispose.poller.reactor = NULL;
-    ioTcpPollerDispose(&listenDispose);
-    listenPoller.poller.fd = -1;
-  }
+  serverRuntimeDispose(&server);
   serverDeinit(&server);
-  ioReactorDispose(&server.reactor);
   return rc;
 }

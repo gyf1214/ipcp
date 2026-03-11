@@ -529,7 +529,7 @@ static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
 
   close(clientFd);
   ioTcpPollerDispose(&acceptedPoller);
-  close(listenPoller.poller.fd);
+  ioListenPollerDispose(&listenPoller);
 }
 
 static void testIoDetachedPollerSkipsEpollCtl(void) {

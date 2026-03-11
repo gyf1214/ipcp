@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "log.h"
 #include "client.h"
@@ -607,11 +606,6 @@ sessionStepResult_t sessionStep(
 }
 
 int sessionRunServer(const sessionServerConfig_t *cfg) {
-  int tunFd;
-  int listenFd;
-  sessionIfMode_t mode;
-  int rc;
-
   if (cfg == NULL
       || cfg->ifName == NULL
       || cfg->ifName[0] == '\0'
@@ -627,32 +621,7 @@ int sessionRunServer(const sessionServerConfig_t *cfg) {
       || cfg->maxPreAuthSessions <= 0) {
     return -1;
   }
-
-  tunFd = ioTunOpen(cfg->ifName, cfg->ifMode);
-  if (tunFd < 0) {
-    return -1;
-  }
-  listenFd = ioTcpListen(cfg->listenIP, cfg->port);
-  if (listenFd < 0) {
-    close(tunFd);
-    return -1;
-  }
-  mode = cfg->ifMode == ioIfModeTap ? sessionIfModeTap : sessionIfModeTun;
-
-  rc = serverServeMultiClient(
-      tunFd,
-      listenFd,
-      cfg->resolveClaimFn,
-      cfg->resolveClaimCtx,
-      mode,
-      cfg->serverIdentity,
-      cfg->authTimeoutMs,
-      &cfg->heartbeat,
-      cfg->maxActiveSessions,
-      cfg->maxPreAuthSessions);
-  close(tunFd);
-  close(listenFd);
-  return rc;
+  return serverServeLocal(cfg);
 }
 
 int sessionRunClient(const sessionClientConfig_t *cfg) {

@@ -88,22 +88,44 @@ static int fakeLookup(
   return 0;
 }
 
+static bool serverInitFixture(
+    server_t *server,
+    int tunFd,
+    int listenFd,
+    int maxActiveSessions,
+    int maxPreAuthSessions,
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    sessionNowMsFn_t nowMsFn,
+    void *nowCtx) {
+  if (!serverInit(server, maxActiveSessions, maxPreAuthSessions, heartbeatCfg, nowMsFn, nowCtx)) {
+    return false;
+  }
+  server->tunPoller.poller.fd = tunFd;
+  server->listenPoller.poller.fd = listenFd;
+  return true;
+}
+
+#define serverInit(...) serverInitFixture(__VA_ARGS__)
+
 static void testServerServeMultiClientRejectsInvalidArgs(void) {
+  server_t server;
+  memset(&server, 0, sizeof(server));
   testAssertTrue(
-      serverServeMultiClient(-1, -1, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
-      "server server should reject invalid fds");
+      serverServeMultiClient(NULL) < 0,
+      "server server should reject null server");
   testAssertTrue(
-      serverServeMultiClient(1, 2, NULL, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 2) < 0,
-      "server server should reject null lookup callback");
+      serverServeMultiClient(&server) < 0,
+      "server server should reject uninitialized server");
   testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, NULL, 2, 2) < 0,
-      "server server should reject null heartbeat config");
+      serverInit(&server, -1, -1, 2, 2, &testHeartbeatCfg, NULL, NULL),
+      "fixture init should succeed");
+  server.resolveClaimFn = fakeLookup;
+  server.mode = sessionIfModeTun;
+  server.authTimeoutMs = 5000;
   testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 0, 2) < 0,
-      "server server should reject non-positive max session count");
-  testAssertTrue(
-      serverServeMultiClient(1, 2, fakeLookup, NULL, sessionIfModeTun, NULL, 5000, &testHeartbeatCfg, 2, 0) < 0,
-      "server server should reject non-positive max pre-auth session count");
+      serverServeMultiClient(&server) < 0,
+      "server server should reject missing poller fds");
+  serverDeinit(&server);
 }
 
 static void testSessionRunEntrypointsRejectInvalidConfigs(void) {

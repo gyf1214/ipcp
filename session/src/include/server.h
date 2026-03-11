@@ -45,6 +45,7 @@ typedef struct {
 
 struct server_t {
   ioReactor_t reactor;
+  ioListenPoller_t listenPoller;
   ioTunPoller_t tunPoller;
   bool tunReadPaused;
   int pendingOwnerSlot;
@@ -70,8 +71,6 @@ struct server_t {
 
 bool serverInit(
     server_t *server,
-    int tunFd,
-    int listenFd,
     int maxActiveSessions,
     int maxPreAuthSessions,
     const sessionHeartbeatConfig_t *heartbeatCfg,
@@ -133,14 +132,5 @@ bool serverRemovePreAuthConn(server_t *server, int preAuthSlot);
 preAuthConn_t *serverPreAuthAt(server_t *server, int preAuthSlot);
 bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot);
 
-int serverServeMultiClient(
-    int tunFd,
-    int listenFd,
-    sessionServerResolveClaimFn_t resolveClaimFn,
-    void *resolveClaimCtx,
-    sessionIfMode_t mode,
-    const sessionServerIdentity_t *serverIdentity,
-    int authTimeoutMs,
-    const sessionHeartbeatConfig_t *heartbeatCfg,
-    int maxActiveSessions,
-    int maxPreAuthSessions);
+int serverServeLocal(const sessionServerConfig_t *cfg);
+int serverServeMultiClient(server_t *server);
