@@ -24,7 +24,6 @@ void clientResetHeartbeatState(
   client->lastHeartbeatReqMs = nowMs;
   client->lastDataSentMs = nowMs;
   client->lastDataRecvMs = nowMs;
-  client->reactor.epollFd = -1;
   client->session = NULL;
   client->claim = NULL;
   client->claimNbytes = 0;
@@ -51,9 +50,9 @@ sessionQueueResult_t clientQueueTcpWithBackpressure(
   if (client == NULL) {
     return sessionQueueResultError;
   }
-  tcpPoller = client->tcpPoller;
-  tunPoller = client->tunPoller;
-  if (tcpPoller == NULL || tunPoller == NULL || data == NULL || nbytes <= 0) {
+  tcpPoller = &client->tcpPoller;
+  tunPoller = &client->tunPoller;
+  if (data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
   }
   if (client->runtimeOverflowNbytes > 0) {
@@ -91,11 +90,7 @@ static sessionQueueResult_t clientQueueTcpWithDrop(
   if (client == NULL || data == NULL || nbytes <= 0) {
     return sessionQueueResultError;
   }
-  tcpPoller = client->tcpPoller;
-  if (tcpPoller == NULL) {
-    return sessionQueueResultError;
-  }
-
+  tcpPoller = &client->tcpPoller;
   used = tcpPoller->outOffset + tcpPoller->outNbytes;
   if (used + nbytes > IoPollerQueueCapacity && tcpPoller->outOffset > 0) {
     used = tcpPoller->outNbytes;
@@ -235,12 +230,8 @@ bool clientServiceBackpressure(
   if (client == NULL || session == NULL || key == NULL) {
     return false;
   }
-  tcpPoller = client->tcpPoller;
-  tunPoller = client->tunPoller;
-  if (tcpPoller == NULL || tunPoller == NULL) {
-    return false;
-  }
-
+  tcpPoller = &client->tcpPoller;
+  tunPoller = &client->tunPoller;
   if (!sessionRetryOverflow(session, tcpPoller, tunPoller, event)) {
     return false;
   }
@@ -317,7 +308,7 @@ static bool clientQueueRawMsg(client_t *client, const unsigned char *buf, long n
   protocolFrame_t frame;
   protocolRawMsg_t raw;
 
-  if (client == NULL || client->tcpPoller == NULL || buf == NULL || nbytes <= 0) {
+  if (client == NULL || buf == NULL || nbytes <= 0) {
     return false;
   }
   raw.buf = (const char *)buf;
@@ -325,26 +316,26 @@ static bool clientQueueRawMsg(client_t *client, const unsigned char *buf, long n
   if (protocolEncodeRaw(&raw, &frame) != protocolStatusOk) {
     return false;
   }
-  return ioTcpWrite(client->tcpPoller, frame.buf, frame.nbytes);
+  return ioTcpWrite(&client->tcpPoller, frame.buf, frame.nbytes);
 }
 
 static bool clientQueueSecureMsg(client_t *client, const protocolMessage_t *msg) {
   protocolFrame_t frame;
 
-  if (client == NULL || client->tcpPoller == NULL || msg == NULL || client->key == NULL) {
+  if (client == NULL || msg == NULL || client->key == NULL) {
     return false;
   }
   if (protocolEncodeSecureMsg(msg, client->key, &frame) != protocolStatusOk) {
     return false;
   }
-  return ioTcpWrite(client->tcpPoller, frame.buf, frame.nbytes);
+  return ioTcpWrite(&client->tcpPoller, frame.buf, frame.nbytes);
 }
 
 static ioPollerAction_t clientStepSession(client_t *client, ioEvent_t event) {
-  if (client == NULL || client->session == NULL || client->tcpPoller == NULL || client->tunPoller == NULL || client->key == NULL) {
+  if (client == NULL || client->session == NULL || client->key == NULL) {
     return ioPollerStop;
   }
-  if (sessionStep(client->session, client->tcpPoller, client->tunPoller, event, client->key) == sessionStepStop) {
+  if (sessionStep(client->session, &client->tcpPoller, &client->tunPoller, event, client->key) == sessionStepStop) {
     return clientMarkRunStop(client, false);
   }
   if (!clientServiceBackpressure(client, client->session, event, client->key)) {
@@ -356,11 +347,11 @@ static ioPollerAction_t clientStepSession(client_t *client, ioEvent_t event) {
 static ioPollerAction_t clientCompletePreAuth(client_t *client, const char *carryBuf, long carryNbytes) {
   ioPollerAction_t action;
 
-  if (client == NULL || client->session == NULL || client->tunPoller == NULL || carryNbytes < 0) {
+  if (client == NULL || client->session == NULL || carryNbytes < 0) {
     return ioPollerStop;
   }
   client->preAuthState = clientPreAuthReady;
-  if (!ioReactorSetPollerReadEnabled(&client->tunPoller->poller, true)) {
+  if (!ioReactorSetPollerReadEnabled(&client->tunPoller.poller, true)) {
     return clientMarkRunStop(client, true);
   }
   if (carryNbytes > 0) {
@@ -380,7 +371,7 @@ static ioPollerAction_t clientCompletePreAuth(client_t *client, const char *carr
 static ioPollerAction_t clientHandlePreAuthTcpReadable(client_t *client) {
   char readBuf[ProtocolFrameSize];
 
-  if (client == NULL || client->tcpPoller == NULL) {
+  if (client == NULL) {
     return ioPollerStop;
   }
 
@@ -389,7 +380,7 @@ static ioPollerAction_t clientHandlePreAuthTcpReadable(client_t *client) {
     long nbytes = 0;
     long offset = 0;
 
-    readStatus = ioTcpRead(client->tcpPoller->poller.fd, readBuf, sizeof(readBuf), &nbytes);
+    readStatus = ioTcpRead(client->tcpPoller.poller.fd, readBuf, sizeof(readBuf), &nbytes);
     if (readStatus == ioStatusWouldBlock) {
       return ioPollerContinue;
     }
@@ -502,8 +493,6 @@ int clientServeConn(
     long claimNbytes,
     const unsigned char key[ProtocolPskSize],
     const sessionHeartbeatConfig_t *heartbeatCfg) {
-  ioTunPoller_t tunPoller;
-  ioTcpPoller_t tcpPoller;
   client_t client;
   session_t *session = NULL;
   int result = -1;
@@ -540,20 +529,18 @@ int clientServeConn(
     errf("setup reactor failed: %s", strerror(errno));
     goto cleanup;
   }
-  if (ioTunPollerInit(&tunPoller, client.reactor.epollFd, tunFd) != 0
-      || ioTcpPollerInit(&tcpPoller, client.reactor.epollFd, connFd) != 0) {
+  if (ioTunPollerInit(&client.tunPoller, client.reactor.epollFd, tunFd) != 0
+      || ioTcpPollerInit(&client.tcpPoller, client.reactor.epollFd, connFd) != 0) {
     errf("setup pollers failed: %s", strerror(errno));
     goto cleanup;
   }
-  client.tunPoller = &tunPoller;
-  client.tcpPoller = &tcpPoller;
 
-  tcpPoller.poller.callbacks = &tcpCallbacks;
-  tcpPoller.poller.ctx = &client;
-  tunPoller.poller.callbacks = &tunCallbacks;
-  tunPoller.poller.ctx = &client;
-  if (!ioReactorSetPollerReadEnabled(&tcpPoller.poller, true)
-      || !ioReactorSetPollerReadEnabled(&tunPoller.poller, false)) {
+  client.tcpPoller.poller.callbacks = &tcpCallbacks;
+  client.tcpPoller.poller.ctx = &client;
+  client.tunPoller.poller.callbacks = &tunCallbacks;
+  client.tunPoller.poller.ctx = &client;
+  if (!ioReactorSetPollerReadEnabled(&client.tcpPoller.poller, true)
+      || !ioReactorSetPollerReadEnabled(&client.tunPoller.poller, false)) {
     errf("reactor registration failed: %s", strerror(errno));
     goto cleanup;
   }

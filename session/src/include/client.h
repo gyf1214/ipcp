@@ -13,8 +13,8 @@ typedef enum {
 
 typedef struct client_t {
   ioReactor_t reactor;
-  ioTunPoller_t *tunPoller;
-  ioTcpPoller_t *tcpPoller;
+  ioTunPoller_t tunPoller;
+  ioTcpPoller_t tcpPoller;
   session_t *session;
   const unsigned char *claim;
   long claimNbytes;
