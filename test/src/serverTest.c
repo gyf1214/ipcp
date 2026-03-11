@@ -223,11 +223,15 @@ static void testServerRemoveClientClearsBorrowedPollerState(void) {
       serverAddClient(&server, 0, 160, testKey, claim2, sizeof(claim2)) == 0,
       "server should add active client");
   testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == 160, "active poller should borrow active connection fd");
+  testAssertTrue(
+      server.activeConns[0].tcpPoller.poller.ctx == &server.activeConns[0],
+      "active poller should carry active-conn callback ctx");
 
   testAssertTrue(serverRemoveClient(&server, 0), "remove should succeed");
   testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == -1, "remove should clear borrowed poller fd");
   testAssertTrue(server.activeConns[0].tcpPoller.poller.reactor == NULL, "remove should clear borrowed poller reactor");
   testAssertTrue(server.activeConns[0].tcpPoller.poller.events == 0, "remove should clear borrowed poller events");
+  testAssertTrue(server.activeConns[0].tcpPoller.poller.ctx == NULL, "remove should clear borrowed poller callback ctx");
   testAssertTrue(server.activeConns[0].session == NULL, "remove should clear borrowed session reference");
 
   serverDeinit(&server);
@@ -955,6 +959,7 @@ static void testServerCreateAndRemovePreAuthConnResetsState(void) {
   testAssertTrue(conn != NULL, "pre-auth connection should be retrievable");
   testAssertTrue(conn->tcpPoller.poller.fd == tcpPair[0], "pre-auth create should initialize embedded tcp poller fd");
   testAssertTrue(conn->tcpPoller.poller.kind == ioPollerTcp, "pre-auth create should mark embedded poller as tcp");
+  testAssertTrue(conn->tcpPoller.poller.ctx == conn, "pre-auth create should attach pre-auth callback ctx");
   conn->decoder.frame.nbytes = 99;
   conn->decoder.offset = 11;
   conn->decoder.hasFrame = 1;

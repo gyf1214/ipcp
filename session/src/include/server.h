@@ -13,6 +13,7 @@ typedef enum {
 } serverPendingRetry_t;
 
 typedef struct {
+  server_t *owner;
   int connFd;
   ioTcpPoller_t tcpPoller;
   long long authDeadlineMs;
@@ -32,6 +33,7 @@ typedef struct {
 } preAuthConn_t;
 
 typedef struct {
+  server_t *owner;
   int connFd;
   session_t *session;
   ioTcpPoller_t tcpPoller;
@@ -63,6 +65,9 @@ struct server_t {
   sessionServerIdentity_t serverIdentity;
   sessionIfMode_t mode;
   sessionHeartbeatConfig_t heartbeatCfg;
+  sessionServerResolveClaimFn_t resolveClaimFn;
+  void *resolveClaimCtx;
+  int authTimeoutMs;
   sessionNowMsFn_t nowMsFn;
   void *nowCtx;
 };
