@@ -69,7 +69,7 @@ struct ioReactor_t {
 };
 
 struct ioPoller_t {
-  int epollFd;
+  ioReactor_t *reactor;
   int fd;
   unsigned int events;
   ioPollerKind_t kind;
@@ -139,8 +139,8 @@ ioStatus_t ioListenPollerAcceptNonBlocking(
 bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port);
 bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode);
 
-int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd);
-int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd);
+int ioTcpPollerInit(ioTcpPoller_t *poller, ioReactor_t *reactor, int tcpFd);
+int ioTunPollerInit(ioTunPoller_t *poller, ioReactor_t *reactor, int tunFd);
 bool ioTcpWrite(ioTcpPoller_t *poller, const void *data, long nbytes);
 bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes);
 bool ioTcpServiceWriteEvent(ioTcpPoller_t *poller);

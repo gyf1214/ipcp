@@ -529,8 +529,8 @@ int clientServeConn(
     errf("setup reactor failed: %s", strerror(errno));
     goto cleanup;
   }
-  if (ioTunPollerInit(&client.tunPoller, client.reactor.epollFd, tunFd) != 0
-      || ioTcpPollerInit(&client.tcpPoller, client.reactor.epollFd, connFd) != 0) {
+  if (ioTunPollerInit(&client.tunPoller, &client.reactor, tunFd) != 0
+      || ioTcpPollerInit(&client.tcpPoller, &client.reactor, connFd) != 0) {
     errf("setup pollers failed: %s", strerror(errno));
     goto cleanup;
   }

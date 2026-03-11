@@ -93,7 +93,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   poller->capturedCount = 0;
 
   memset(&poller->tunPoller, 0, sizeof(poller->tunPoller));
-  poller->tunPoller.poller.epollFd = -1;
+  poller->tunPoller.poller.reactor = NULL;
   poller->tunPoller.poller.fd = tunFd;
   poller->tunPoller.poller.events = EPOLLRDHUP;
   poller->tunPoller.poller.kind = ioPollerTun;
@@ -103,7 +103,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   }
 
   memset(&poller->tcpPoller, 0, sizeof(poller->tcpPoller));
-  poller->tcpPoller.poller.epollFd = -1;
+  poller->tcpPoller.poller.reactor = NULL;
   poller->tcpPoller.poller.fd = tcpFd;
   poller->tcpPoller.poller.events = EPOLLRDHUP;
   poller->tcpPoller.poller.kind = ioPollerTcp;
@@ -367,8 +367,8 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
   setupSplitPollersFixture(&poller, tunPair, sourcePair);
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairA) == 0, "dest A pair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairB) == 0, "dest B pair should be created");
-  testAssertTrue(ioTcpPollerInit(&destPollerA, poller.reactor.epollFd, destPairA[0]) == 0, "dest A poller init should succeed");
-  testAssertTrue(ioTcpPollerInit(&destPollerB, poller.reactor.epollFd, destPairB[0]) == 0, "dest B poller init should succeed");
+  testAssertTrue(ioTcpPollerInit(&destPollerA, &poller.reactor, destPairA[0]) == 0, "dest A poller init should succeed");
+  testAssertTrue(ioTcpPollerInit(&destPollerB, &poller.reactor, destPairB[0]) == 0, "dest B poller init should succeed");
 
   session = sessionCreate(true, &defaultHeartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");

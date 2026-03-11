@@ -215,7 +215,7 @@ static void testServerRemoveClientClearsBorrowedPollerState(void) {
 
   testAssertTrue(serverRemoveClient(&server, 0), "remove should succeed");
   testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == -1, "remove should clear borrowed poller fd");
-  testAssertTrue(server.activeConns[0].tcpPoller.poller.epollFd == -1, "remove should clear borrowed poller epoll fd");
+  testAssertTrue(server.activeConns[0].tcpPoller.poller.reactor == NULL, "remove should clear borrowed poller reactor");
   testAssertTrue(server.activeConns[0].tcpPoller.poller.events == 0, "remove should clear borrowed poller events");
   testAssertTrue(server.activeConns[0].session == NULL, "remove should clear borrowed session reference");
 
@@ -813,7 +813,8 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   epollFd = epoll_create1(0);
   testAssertTrue(epollFd >= 0, "epoll create should succeed");
   server.epollFd = epollFd;
-  server.tunPoller.poller.epollFd = epollFd;
+  server.reactor.epollFd = epollFd;
+  server.tunPoller.poller.reactor = &server.reactor;
   event.events = server.tunPoller.poller.events;
   event.data.ptr = &server.tunPoller.poller;
   testAssertTrue(epoll_ctl(epollFd, EPOLL_CTL_ADD, tunPair[0], &event) == 0, "tun fd should be registered");

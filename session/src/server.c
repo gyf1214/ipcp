@@ -110,11 +110,12 @@ bool serverInit(
     return false;
   }
 
-  server->tunPoller.poller.epollFd = -1;
+  server->tunPoller.poller.reactor = NULL;
   server->tunPoller.poller.fd = tunFd;
   server->tunPoller.poller.kind = ioPollerTun;
   server->listenFd = listenFd;
   server->epollFd = -1;
+  server->reactor.epollFd = -1;
   server->tunPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   server->tunPoller.poller.readEnabled = true;
   server->tunPoller.readPos = 0;
@@ -215,7 +216,7 @@ int serverAddClient(
   server->activeConns[activeSlot].connFd = connFd;
   server->activeConns[activeSlot].session = session;
   sessionAttachServer(session, server);
-  server->activeConns[activeSlot].tcpPoller.poller.epollFd = server->epollFd;
+  server->activeConns[activeSlot].tcpPoller.poller.reactor = server->reactor.epollFd >= 0 ? &server->reactor : NULL;
   server->activeConns[activeSlot].tcpPoller.poller.fd = connFd;
   server->activeConns[activeSlot].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   server->activeConns[activeSlot].tcpPoller.poller.kind = ioPollerTcp;
@@ -258,7 +259,7 @@ bool serverRemoveClient(server_t *server, int slot) {
     }
   }
   sessionDestroy(server->activeConns[slot].session);
-  server->activeConns[slot].tcpPoller.poller.epollFd = -1;
+  server->activeConns[slot].tcpPoller.poller.reactor = NULL;
   server->activeConns[slot].tcpPoller.poller.fd = -1;
   server->activeConns[slot].tcpPoller.poller.events = 0;
   server->activeConns[slot].tcpPoller.poller.readEnabled = false;
@@ -1175,7 +1176,7 @@ static bool serverDispatchPreAuth(
       return false;
     }
     activeConnFd = serverConnFdAt(server, activeSlot);
-    server->activeConns[activeSlot].tcpPoller.poller.epollFd = server->epollFd;
+    server->activeConns[activeSlot].tcpPoller.poller.reactor = &server->reactor;
     if (!serverEpollCtl(
             server->epollFd,
             EPOLL_CTL_MOD,
@@ -1717,7 +1718,8 @@ int serverServeMultiClient(
     return -1;
   }
   server.epollFd = epollFd;
-  server.tunPoller.poller.epollFd = epollFd;
+  server.reactor.epollFd = epollFd;
+  server.tunPoller.poller.reactor = &server.reactor;
 
   if (!serverEpollCtl(epollFd, EPOLL_CTL_ADD, listenFd, EPOLLIN | EPOLLRDHUP, &server.listenFd)
       || !serverEpollCtl(epollFd, EPOLL_CTL_ADD, tunFd, server.tunPoller.poller.events, &server.tunPoller.poller)) {

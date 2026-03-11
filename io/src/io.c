@@ -30,7 +30,7 @@ static ioTunPoller_t *tunFromPoller(ioPoller_t *poller) {
 }
 
 typedef struct {
-  int epollFd;
+  ioReactor_t *reactor;
   int fd;
   ioPoller_t *header;
   long *outOffset;
@@ -40,7 +40,7 @@ typedef struct {
 
 static ioQueueState_t tcpQueueState(ioTcpPoller_t *poller) {
   ioQueueState_t state = {
-    .epollFd = poller->poller.epollFd,
+    .reactor = poller->poller.reactor,
     .fd = poller->poller.fd,
     .header = &poller->poller,
     .outOffset = &poller->outOffset,
@@ -69,7 +69,12 @@ static int pollerCtlPoller(int epollFd, int op, ioPoller_t *poller, unsigned int
 }
 
 static int pollerMod(ioQueueState_t state, unsigned int events) {
-  if (state.header == NULL || pollerCtlPoller(state.epollFd, EPOLL_CTL_MOD, state.header, events) < 0) {
+  if (state.header == NULL) {
+    return -1;
+  }
+  if (state.reactor != NULL
+      && state.reactor->epollFd >= 0
+      && pollerCtlPoller(state.reactor->epollFd, EPOLL_CTL_MOD, state.header, events) < 0) {
     return -1;
   }
   state.header->events = events;
@@ -140,7 +145,7 @@ static bool pollerQueueWrite(ioQueueState_t state, const void *data, long nbytes
 
   memcpy(state.outBuf + used, data, (size_t)nbytes);
   *state.outNbytes += nbytes;
-  if (state.epollFd < 0) {
+  if (state.reactor == NULL) {
     return true;
   }
   return pollerEnsureWriteInterest(state) == 0;
@@ -149,9 +154,6 @@ static bool pollerQueueWrite(ioQueueState_t state, const void *data, long nbytes
 static bool pollerSetReadEnabled(ioQueueState_t state, bool enabled) {
   unsigned int nextEvents = state.header->events;
 
-  if (state.epollFd < 0) {
-    return false;
-  }
   if (enabled) {
     nextEvents |= EPOLLIN;
   } else {
@@ -239,11 +241,13 @@ static int tunQueueFlush(ioTunPoller_t *poller) {
   }
 
   if ((poller->poller.events & EPOLLOUT) != 0) {
-    if (pollerCtlPoller(
-            poller->poller.epollFd,
-            EPOLL_CTL_MOD,
-            &poller->poller,
-            poller->poller.events & ~EPOLLOUT) < 0) {
+    if (poller->poller.reactor != NULL
+        && poller->poller.reactor->epollFd >= 0
+        && pollerCtlPoller(
+               poller->poller.reactor->epollFd,
+               EPOLL_CTL_MOD,
+               &poller->poller,
+               poller->poller.events & ~EPOLLOUT) < 0) {
       return -1;
     }
   }
@@ -258,10 +262,6 @@ static bool tunSetReadEnabled(ioTunPoller_t *poller, bool enabled) {
   if (poller == NULL) {
     return false;
   }
-  if (poller->poller.epollFd < 0) {
-    return false;
-  }
-
   nextEvents = poller->poller.events;
   if (enabled) {
     nextEvents |= EPOLLIN;
@@ -271,7 +271,9 @@ static bool tunSetReadEnabled(ioTunPoller_t *poller, bool enabled) {
   if (nextEvents == poller->poller.events) {
     return true;
   }
-  if (pollerCtlPoller(poller->poller.epollFd, EPOLL_CTL_MOD, &poller->poller, nextEvents) < 0) {
+  if (poller->poller.reactor != NULL
+      && poller->poller.reactor->epollFd >= 0
+      && pollerCtlPoller(poller->poller.reactor->epollFd, EPOLL_CTL_MOD, &poller->poller, nextEvents) < 0) {
     return false;
   }
   poller->poller.events = nextEvents;
@@ -317,7 +319,7 @@ bool ioReactorAddPoller(
     events |= EPOLLIN;
   }
 
-  poller->epollFd = reactor->epollFd;
+  poller->reactor = reactor;
   poller->callbacks = callbacks;
   poller->ctx = ctx;
   poller->readEnabled = readEnabled;
@@ -329,7 +331,7 @@ bool ioReactorAddPoller(
 bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled) {
   unsigned int events;
 
-  if (poller == NULL || poller->epollFd < 0 || poller->fd < 0) {
+  if (poller == NULL || poller->reactor == NULL || poller->reactor->epollFd < 0 || poller->fd < 0) {
     return false;
   }
 
@@ -339,7 +341,7 @@ bool ioReactorSetPollerReadEnabled(ioPoller_t *poller, bool enabled) {
   } else {
     events &= ~EPOLLIN;
   }
-  if (pollerCtlPoller(poller->epollFd, EPOLL_CTL_MOD, poller, events) < 0) {
+  if (pollerCtlPoller(poller->reactor->epollFd, EPOLL_CTL_MOD, poller, events) < 0) {
     return false;
   }
 
@@ -356,10 +358,12 @@ static ioReactorStepResult_t ioReactorApplyAction(ioPoller_t *poller, ioPollerAc
     return ioReactorStepStop;
   }
   if (action == ioPollerRemove) {
-    if (epoll_ctl(poller->epollFd, EPOLL_CTL_DEL, poller->fd, NULL) < 0) {
+    if (poller->reactor == NULL
+        || poller->reactor->epollFd < 0
+        || epoll_ctl(poller->reactor->epollFd, EPOLL_CTL_DEL, poller->fd, NULL) < 0) {
       return ioReactorStepError;
     }
-    poller->epollFd = -1;
+    poller->reactor = NULL;
     poller->events = 0;
     *removed = true;
     return ioReactorStepReady;
@@ -689,7 +693,7 @@ bool ioListenPollerListen(ioListenPoller_t *poller, const char *listenIP, int po
   }
 
   memset(poller, 0, sizeof(*poller));
-  poller->poller.epollFd = -1;
+  poller->poller.reactor = NULL;
   poller->poller.fd = listenFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
   poller->poller.kind = ioPollerListen;
@@ -716,7 +720,7 @@ ioStatus_t ioListenPollerAcceptNonBlocking(
   }
 
   memset(outTcpPoller, 0, sizeof(*outTcpPoller));
-  outTcpPoller->poller.epollFd = -1;
+  outTcpPoller->poller.reactor = NULL;
   outTcpPoller->poller.fd = connFd;
   outTcpPoller->poller.events = EPOLLIN | EPOLLRDHUP;
   outTcpPoller->poller.kind = ioPollerTcp;
@@ -741,7 +745,7 @@ bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port) {
   }
 
   memset(poller, 0, sizeof(*poller));
-  poller->poller.epollFd = -1;
+  poller->poller.reactor = NULL;
   poller->poller.fd = connFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
   poller->poller.kind = ioPollerTcp;
@@ -766,7 +770,7 @@ bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode)
   }
 
   memset(poller, 0, sizeof(*poller));
-  poller->poller.epollFd = -1;
+  poller->poller.reactor = NULL;
   poller->poller.fd = tunFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
   poller->poller.kind = ioPollerTun;
@@ -774,8 +778,8 @@ bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode)
   return true;
 }
 
-int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd) {
-  if (poller == NULL || tcpFd < 0 || epollFd < 0) {
+int ioTcpPollerInit(ioTcpPoller_t *poller, ioReactor_t *reactor, int tcpFd) {
+  if (poller == NULL || tcpFd < 0 || reactor == NULL || reactor->epollFd < 0) {
     return -1;
   }
   if (pollerSetNonBlocking(tcpFd) < 0) {
@@ -783,7 +787,7 @@ int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd) {
   }
 
   memset(poller, 0, sizeof(*poller));
-  poller->poller.epollFd = epollFd;
+  poller->poller.reactor = reactor;
   poller->poller.fd = tcpFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
   poller->poller.kind = ioPollerTcp;
@@ -793,14 +797,14 @@ int ioTcpPollerInit(ioTcpPoller_t *poller, int epollFd, int tcpFd) {
   poller->poller.callbacks = NULL;
   poller->poller.ctx = NULL;
 
-  if (pollerCtlPoller(epollFd, EPOLL_CTL_ADD, &poller->poller, poller->poller.events) < 0) {
+  if (pollerCtlPoller(reactor->epollFd, EPOLL_CTL_ADD, &poller->poller, poller->poller.events) < 0) {
     return -1;
   }
   return 0;
 }
 
-int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd) {
-  if (poller == NULL || tunFd < 0 || epollFd < 0) {
+int ioTunPollerInit(ioTunPoller_t *poller, ioReactor_t *reactor, int tunFd) {
+  if (poller == NULL || tunFd < 0 || reactor == NULL || reactor->epollFd < 0) {
     return -1;
   }
   if (pollerSetNonBlocking(tunFd) < 0) {
@@ -808,7 +812,7 @@ int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd) {
   }
 
   memset(poller, 0, sizeof(*poller));
-  poller->poller.epollFd = epollFd;
+  poller->poller.reactor = reactor;
   poller->poller.fd = tunFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
   poller->poller.kind = ioPollerTun;
@@ -822,7 +826,7 @@ int ioTunPollerInit(ioTunPoller_t *poller, int epollFd, int tunFd) {
   poller->poller.callbacks = NULL;
   poller->poller.ctx = NULL;
 
-  if (pollerCtlPoller(epollFd, EPOLL_CTL_ADD, &poller->poller, poller->poller.events) < 0) {
+  if (pollerCtlPoller(reactor->epollFd, EPOLL_CTL_ADD, &poller->poller, poller->poller.events) < 0) {
     return -1;
   }
   return 0;
@@ -844,11 +848,13 @@ bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes) {
   if (!tunQueueWrite(poller, data, nbytes)) {
     return false;
   }
-  if (poller->poller.epollFd < 0 || (poller->poller.events & EPOLLOUT) != 0) {
+  if (poller->poller.reactor == NULL
+      || poller->poller.reactor->epollFd < 0
+      || (poller->poller.events & EPOLLOUT) != 0) {
     return true;
   }
   if (pollerCtlPoller(
-          poller->poller.epollFd,
+          poller->poller.reactor->epollFd,
           EPOLL_CTL_MOD,
           &poller->poller,
           poller->poller.events | EPOLLOUT) < 0) {
@@ -861,7 +867,7 @@ bool ioTunWrite(ioTunPoller_t *poller, const void *data, long nbytes) {
 
 bool ioTcpServiceWriteEvent(ioTcpPoller_t *poller) {
   bool ok;
-  if (poller == NULL || poller->poller.epollFd < 0) {
+  if (poller == NULL || poller->poller.reactor == NULL || poller->poller.reactor->epollFd < 0) {
     return false;
   }
   ok = pollerFlushQueue(tcpQueueState(poller)) == 0;
@@ -870,7 +876,7 @@ bool ioTcpServiceWriteEvent(ioTcpPoller_t *poller) {
 
 bool ioTunServiceWriteEvent(ioTunPoller_t *poller) {
   bool ok;
-  if (poller == NULL || poller->poller.epollFd < 0) {
+  if (poller == NULL || poller->poller.reactor == NULL || poller->poller.reactor->epollFd < 0) {
     return false;
   }
   ok = tunQueueFlush(poller) == 0;

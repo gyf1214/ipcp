@@ -117,7 +117,7 @@ static void testIoReactorInitAndAddPoller(void) {
   testAssertTrue(
       ioReactorAddPoller(&reactor, &poller, &callbacks, &poller, true),
       "ioReactorAddPoller should register poller");
-  testAssertTrue(poller.epollFd == reactor.epollFd, "poller should bind reactor epoll fd");
+  testAssertTrue(poller.reactor == &reactor, "poller should bind reactor");
   testAssertTrue(poller.callbacks == &callbacks, "poller should store callback table");
   testAssertTrue(poller.ctx == &poller, "poller should store callback context");
   testAssertTrue((poller.events & EPOLLIN) != 0, "add should register read interest");
@@ -251,7 +251,7 @@ static void testIoPollerHeadersAndLowWatermarkEdge(void) {
   testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
 
   memset(&tcpPoller, 0, sizeof(tcpPoller));
-  tcpPoller.poller.epollFd = -1;
+  tcpPoller.poller.reactor = NULL;
   tcpPoller.poller.fd = socketFds[0];
   tcpPoller.poller.events = EPOLLRDHUP;
   tcpPoller.poller.kind = ioPollerTcp;
@@ -292,7 +292,7 @@ static void testIoReactorTcpWritableRearmsAfterFlush(void) {
   testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
 
   memset(&tcpPoller, 0, sizeof(tcpPoller));
-  tcpPoller.poller.epollFd = -1;
+  tcpPoller.poller.reactor = NULL;
   tcpPoller.poller.fd = socketFds[0];
   tcpPoller.poller.events = EPOLLRDHUP;
   tcpPoller.poller.kind = ioPollerTcp;
@@ -346,12 +346,30 @@ static void testIoListenPollerAcceptNonBlockingInitializesTcpPoller(void) {
 
   testAssertTrue(status == ioStatusOk, "listen accept non-blocking should accept pending connection");
   testAssertTrue(acceptedPoller.poller.fd >= 0, "accepted tcp poller should contain accepted fd");
-  testAssertTrue(acceptedPoller.poller.epollFd == -1, "accepted tcp poller should start detached from epoll");
+  testAssertTrue(acceptedPoller.poller.reactor == NULL, "accepted tcp poller should start detached from epoll");
   testAssertTrue(acceptedPoller.poller.kind == ioPollerTcp, "accepted poller kind should be tcp");
 
   close(clientFd);
   close(acceptedPoller.poller.fd);
   close(listenPoller.poller.fd);
+}
+
+static void testIoDetachedPollerSkipsEpollCtl(void) {
+  ioTcpPoller_t tcpPoller;
+
+  memset(&tcpPoller, 0, sizeof(tcpPoller));
+  tcpPoller.poller.reactor = NULL;
+  tcpPoller.poller.fd = -1;
+  tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  tcpPoller.poller.kind = ioPollerTcp;
+  tcpPoller.poller.readEnabled = true;
+
+  testAssertTrue(ioTcpSetReadEnabled(&tcpPoller, false), "detached poller read-disable should not require epoll");
+  testAssertTrue((tcpPoller.poller.events & EPOLLIN) == 0, "detached read-disable should clear EPOLLIN bit");
+  testAssertTrue(ioTcpSetReadEnabled(&tcpPoller, true), "detached poller read-enable should not require epoll");
+  testAssertTrue((tcpPoller.poller.events & EPOLLIN) != 0, "detached read-enable should set EPOLLIN bit");
+  testAssertTrue(ioTcpWrite(&tcpPoller, "q", 1), "detached poller queue write should skip epoll ctl");
+  testAssertTrue(ioTcpQueuedBytes(&tcpPoller) == 1, "detached queue write should still buffer bytes");
 }
 
 void runIoTests(void) {
@@ -371,4 +389,5 @@ void runIoTests(void) {
   testIoPollerHeadersAndLowWatermarkEdge();
   testIoReactorTcpWritableRearmsAfterFlush();
   testIoListenPollerAcceptNonBlockingInitializesTcpPoller();
+  testIoDetachedPollerSkipsEpollCtl();
 }

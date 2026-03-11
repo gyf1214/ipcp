@@ -45,6 +45,7 @@ typedef struct {
 struct server_t {
   int listenFd;
   int epollFd;
+  ioReactor_t reactor;
   ioTunPoller_t tunPoller;
   bool tunReadPaused;
   int pendingOwnerSlot;

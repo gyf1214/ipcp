@@ -103,7 +103,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   poller->capturedCount = 0;
 
   memset(&poller->client.tunPoller, 0, sizeof(poller->client.tunPoller));
-  poller->client.tunPoller.poller.epollFd = -1;
+  poller->client.tunPoller.poller.reactor = NULL;
   poller->client.tunPoller.poller.fd = tunFd;
   poller->client.tunPoller.poller.events = EPOLLRDHUP;
   poller->client.tunPoller.poller.kind = ioPollerTun;
@@ -114,7 +114,7 @@ static int setupSplitPollers(splitPollersFixture_t *poller, int tunFd, int tcpFd
   }
 
   memset(&poller->client.tcpPoller, 0, sizeof(poller->client.tcpPoller));
-  poller->client.tcpPoller.poller.epollFd = -1;
+  poller->client.tcpPoller.poller.reactor = NULL;
   poller->client.tcpPoller.poller.fd = tcpFd;
   poller->client.tcpPoller.poller.events = EPOLLRDHUP;
   poller->client.tcpPoller.poller.kind = ioPollerTcp;
