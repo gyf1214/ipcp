@@ -860,49 +860,73 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   close(tunPair[1]);
 }
 
+typedef struct {
+  server_t server;
+} serverFixture_t;
+
 static void serverFixtureSetup(
-    server_t *server,
+    serverFixture_t *fixture,
     int maxSessions,
     int tunPair[2],
     int tcpPairA[2],
     int tcpPairB[2],
     int *slotA,
     int *slotB) {
+  testAssertTrue(fixture != NULL, "fixture should not be null");
+  testAssertTrue(tunPair != NULL, "tunPair should not be null");
+  testAssertTrue(tcpPairA != NULL, "tcpPairA should not be null");
+  testAssertTrue(tcpPairB != NULL, "tcpPairB should not be null");
+  testAssertTrue(slotA != NULL, "slotA should not be null");
+  testAssertTrue(slotB != NULL, "slotB should not be null");
+  memset(&fixture->server, 0, sizeof(fixture->server));
+  *slotA = -1;
+  *slotB = -1;
+  tcpPairB[0] = -1;
+  tcpPairB[1] = -1;
+
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp pair A should be created");
   testAssertTrue(
-      serverInit(server, tunPair[0], 72, maxSessions, maxSessions, &testHeartbeatCfg, NULL, NULL),
+      serverInit(&fixture->server, tunPair[0], 72, maxSessions, maxSessions, &testHeartbeatCfg, NULL, NULL),
       "server init should succeed");
 
-  *slotA = serverAddClient(server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2));
+  *slotA = serverAddClient(&fixture->server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2));
   testAssertTrue(*slotA == 0, "first client should be added");
 
-  *slotB = -1;
   if (maxSessions > 1) {
     testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
-    *slotB = serverAddClient(server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+    *slotB = serverAddClient(&fixture->server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
     testAssertTrue(*slotB == 1, "second client should be added");
   }
 }
 
 static void serverFixtureTeardown(
-    server_t *server,
+    serverFixture_t *fixture,
     int tunPair[2],
     int tcpPairA[2],
     int tcpPairB[2],
     int slotA,
     int slotB) {
+  testAssertTrue(fixture != NULL, "fixture should not be null");
   if (slotA >= 0) {
-    (void)serverRemoveClient(server, slotA);
+    (void)serverRemoveClient(&fixture->server, slotA);
   }
   if (slotB >= 0) {
-    (void)serverRemoveClient(server, slotB);
+    (void)serverRemoveClient(&fixture->server, slotB);
   }
-  serverDeinit(server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPairA[0]);
-  close(tcpPairA[1]);
+  serverDeinit(&fixture->server);
+  if (tunPair[0] >= 0) {
+    close(tunPair[0]);
+  }
+  if (tunPair[1] >= 0) {
+    close(tunPair[1]);
+  }
+  if (tcpPairA[0] >= 0) {
+    close(tcpPairA[0]);
+  }
+  if (tcpPairA[1] >= 0) {
+    close(tcpPairA[1]);
+  }
   if (tcpPairB[0] >= 0) {
     close(tcpPairB[0]);
   }
@@ -1132,7 +1156,7 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
 
 static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   unsigned char key[ProtocolPskSize];
-  server_t server;
+  serverFixture_t fixture;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2] = {-1, -1};
@@ -1146,28 +1170,28 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   memset(key, 0x51, sizeof(key));
   memset(fill, 'p', sizeof(fill));
   memset(tunPayload, 'q', sizeof(tunPayload));
-  serverFixtureSetup(&server, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  session = serverSessionAt(&server, slotA);
+  serverFixtureSetup(&fixture, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  session = serverSessionAt(&fixture.server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
-  poller = &server.activeConns[slotA].tcpPoller;
+  poller = &fixture.server.activeConns[slotA].tcpPoller;
 
   testAssertTrue(
       ioTcpWrite(poller, fill, IoPollerQueueCapacity - 16),
       "prefill tcp queue should succeed");
   testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
-      runSessionStepSplit(session, poller, &server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStepSplit(session, poller, &fixture.server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "session should continue on overflow");
-  testAssertTrue(serverHasPendingTunToTcp(&server), "server overflow should retain pending data in server");
-  testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending exists");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
+  testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "server overflow should retain pending data in server");
+  testAssertTrue(fixture.server.tunReadPaused, "server server should mark tun read paused while pending exists");
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
 
-  serverFixtureTeardown(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&fixture, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(void) {
   unsigned char key[ProtocolPskSize];
-  server_t server;
+  serverFixture_t fixture;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2];
@@ -1184,11 +1208,11 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   memset(key, 0x52, sizeof(key));
   memset(fill, 'r', sizeof(fill));
   memset(tunPayload, 's', sizeof(tunPayload));
-  serverFixtureSetup(&server, 2, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  ownerSession = serverSessionAt(&server, slotA);
-  otherSession = serverSessionAt(&server, slotB);
-  ownerPoller = &server.activeConns[slotA].tcpPoller;
-  otherPoller = &server.activeConns[slotB].tcpPoller;
+  serverFixtureSetup(&fixture, 2, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  ownerSession = serverSessionAt(&fixture.server, slotA);
+  otherSession = serverSessionAt(&fixture.server, slotB);
+  ownerPoller = &fixture.server.activeConns[slotA].tcpPoller;
+  otherPoller = &fixture.server.activeConns[slotB].tcpPoller;
   testAssertTrue(ownerSession != NULL, "owner session should exist");
   testAssertTrue(otherSession != NULL, "other session should exist");
 
@@ -1197,53 +1221,53 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
       "prefill owner tcp queue should succeed");
   testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStepSplit(ownerSession, ownerPoller, &fixture.server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow on owner should continue");
-  testAssertTrue(serverHasPendingTunToTcp(&server), "owner overflow should store server pending bytes");
-  testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending exists");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while server pending exists");
+  testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "owner overflow should store server pending bytes");
+  testAssertTrue(fixture.server.tunReadPaused, "server server should mark tun read paused while pending exists");
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while server pending exists");
 
   testAssertTrue(
-      runSessionStepSplit(otherSession, otherPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      runSessionStepSplit(otherSession, otherPoller, &fixture.server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "non-owner tcp write path should continue");
   testAssertTrue(
-      serverServiceBackpressure(&server, slotB, ioEventTcpWrite),
+      serverServiceBackpressure(&fixture.server, slotB, ioEventTcpWrite),
       "non-owner backpressure service should continue");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "non-owner should not consume server pending");
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "non-owner should not consume server pending");
 
   ownerPoller->outOffset = 0;
   ownerPoller->outNbytes = IoPollerLowWatermark + 100;
   testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      runSessionStepSplit(ownerSession, ownerPoller, &fixture.server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "owner tcp write path should continue after first drain");
   testAssertTrue(
-      serverServiceBackpressure(&server, slotA, ioEventTcpWrite),
+      serverServiceBackpressure(&fixture.server, slotA, ioEventTcpWrite),
       "owner backpressure service should continue above low watermark");
   queued = ioTcpQueuedBytes(ownerPoller);
   testAssertTrue(queued > IoPollerLowWatermark, "owner queue should remain above low watermark");
-  testAssertTrue(serverHasPendingTunToTcp(&server), "owner pending payload should remain while queue is above low watermark");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
+  testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "owner pending payload should remain while queue is above low watermark");
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should stay disabled above low watermark");
 
   ownerPoller->outOffset = 0;
   ownerPoller->outNbytes = IoPollerLowWatermark;
   testAssertTrue(
-      runSessionStepSplit(ownerSession, ownerPoller, &server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
+      runSessionStepSplit(ownerSession, ownerPoller, &fixture.server.tunPoller, ioEventTcpWrite, key) == sessionStepContinue,
       "owner tcp write path should continue after second drain");
   queued = ioTcpQueuedBytes(ownerPoller);
   testAssertTrue(queued <= IoPollerLowWatermark, "owner queue should drain to low watermark before retry");
   testAssertTrue(
-      serverServiceBackpressure(&server, slotA, ioEventTcpWrite),
+      serverServiceBackpressure(&fixture.server, slotA, ioEventTcpWrite),
       "owner backpressure service should continue at low watermark");
-  testAssertTrue(!serverHasPendingTunToTcp(&server), "owner pending payload should clear once queue drains to low watermark");
-  testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused at low watermark");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
+  testAssertTrue(!serverHasPendingTunToTcp(&fixture.server), "owner pending payload should clear once queue drains to low watermark");
+  testAssertTrue(!fixture.server.tunReadPaused, "server server should clear tun read paused at low watermark");
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
 
-  serverFixtureTeardown(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&fixture, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(void) {
   unsigned char key[ProtocolPskSize];
-  server_t server;
+  serverFixture_t fixture;
   int tunPair[2];
   int tcpPairA[2];
   int tcpPairB[2] = {-1, -1};
@@ -1257,27 +1281,27 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   memset(key, 0x53, sizeof(key));
   memset(fill, 'u', sizeof(fill));
   memset(tunPayload, 'v', sizeof(tunPayload));
-  serverFixtureSetup(&server, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
-  session = serverSessionAt(&server, slotA);
+  serverFixtureSetup(&fixture, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  session = serverSessionAt(&fixture.server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
-  poller = &server.activeConns[slotA].tcpPoller;
+  poller = &fixture.server.activeConns[slotA].tcpPoller;
 
   testAssertTrue(
       ioTcpWrite(poller, fill, IoPollerQueueCapacity - 16),
       "prefill tcp queue should succeed");
   testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
   testAssertTrue(
-      runSessionStepSplit(session, poller, &server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
+      runSessionStepSplit(session, poller, &fixture.server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
-  testAssertTrue(server.tunReadPaused, "server server should mark tun read paused while pending is active");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
+  testAssertTrue(fixture.server.tunReadPaused, "server server should mark tun read paused while pending is active");
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
 
-  testAssertTrue(serverRemoveClient(&server, slotA), "owner removal should succeed");
+  testAssertTrue(serverRemoveClient(&fixture.server, slotA), "owner removal should succeed");
   slotA = -1;
-  testAssertTrue(!server.tunReadPaused, "server server should clear tun read paused after owner drop");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
+  testAssertTrue(!fixture.server.tunReadPaused, "server server should clear tun read paused after owner drop");
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
 
-  serverFixtureTeardown(&server, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&fixture, tunPair, tcpPairA, tcpPairB, slotA, slotB);
 }
 
 static void testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload(void) {
