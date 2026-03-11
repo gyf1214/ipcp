@@ -35,6 +35,12 @@ static inline bool sessionEventFixturePopEvent(sessionEventFixture_t *fixture, i
 
 extern const ioPollerCallbacks_t sessionEventFixtureCallbacks;
 bool sessionTestInitTcpPollerFromFd(ioTcpPoller_t *poller, int tcpFd);
+bool sessionTestSocketPairOpen(int sockType, int pair[2]);
+void sessionTestSocketPairClose(int pair[2]);
+bool sessionTestTcpPairOpen(int pair[2]);
+void sessionTestTcpPairClose(int pair[2]);
+bool sessionTestTunPairOpen(int pair[2]);
+void sessionTestTunPairClose(int pair[2]);
 /* TODO(test-harness-cleanup): add a shared tun-poller-from-fd helper to mirror TCP setup. */
 
 static inline void sessionEventFixtureReset(sessionEventFixture_t *fixture) {

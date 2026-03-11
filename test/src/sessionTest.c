@@ -90,6 +90,48 @@ bool sessionTestInitTcpPollerFromFd(ioTcpPoller_t *poller, int tcpFd) {
   return true;
 }
 
+bool sessionTestSocketPairOpen(int sockType, int pair[2]) {
+  if (pair == NULL) {
+    return false;
+  }
+  pair[0] = -1;
+  pair[1] = -1;
+  if (socketpair(AF_UNIX, sockType, 0, pair) != 0) {
+    return false;
+  }
+  return true;
+}
+
+void sessionTestSocketPairClose(int pair[2]) {
+  if (pair == NULL) {
+    return;
+  }
+  if (pair[0] >= 0) {
+    close(pair[0]);
+    pair[0] = -1;
+  }
+  if (pair[1] >= 0) {
+    close(pair[1]);
+    pair[1] = -1;
+  }
+}
+
+bool sessionTestTcpPairOpen(int pair[2]) {
+  return sessionTestSocketPairOpen(SOCK_STREAM, pair);
+}
+
+void sessionTestTcpPairClose(int pair[2]) {
+  sessionTestSocketPairClose(pair);
+}
+
+bool sessionTestTunPairOpen(int pair[2]) {
+  return sessionTestSocketPairOpen(SOCK_DGRAM, pair);
+}
+
+void sessionTestTunPairClose(int pair[2]) {
+  sessionTestSocketPairClose(pair);
+}
+
 static int sessionFixtureSetup(sessionFixture_t *poller, int tunFd, int tcpFd) {
   if (poller == NULL) {
     return -1;
@@ -143,17 +185,15 @@ static long long fakeNow(void *ctx) {
 }
 
 static void sessionFixtureSetupWithPairs(sessionFixture_t *poller, int tunPair[2], int tcpPair[2]) {
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
+  testAssertTrue(sessionTestTunPairOpen(tunPair), "tun socketpair should be created");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPair), "tcp socketpair should be created");
   testAssertTrue(sessionFixtureSetup(poller, tunPair[0], tcpPair[0]) == 0, "setupSplitPollers should succeed");
 }
 
 static void sessionFixtureTeardownWithPairs(sessionFixture_t *poller, int tunPair[2], int tcpPair[2]) {
   sessionFixtureTeardown(poller);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  sessionTestTunPairClose(tunPair);
+  sessionTestTcpPairClose(tcpPair);
 }
 
 static sessionStepResult_t runSessionStep(session_t *session, sessionFixture_t *poller, ioEvent_t event, const unsigned char key[ProtocolPskSize]) {
@@ -367,8 +407,8 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
   memset(fill, 'q', sizeof(fill));
   memset(payload, 'r', sizeof(payload));
   sessionFixtureSetupWithPairs(&poller, tunPair, sourcePair);
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairA) == 0, "dest A pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, destPairB) == 0, "dest B pair should be created");
+  testAssertTrue(sessionTestTcpPairOpen(destPairA), "dest A pair should be created");
+  testAssertTrue(sessionTestTcpPairOpen(destPairB), "dest B pair should be created");
   testAssertTrue(sessionTestInitTcpPollerFromFd(&destPollerA, destPairA[0]), "dest A poller init should succeed");
   testAssertTrue(sessionTestInitTcpPollerFromFd(&destPollerB, destPairB[0]), "dest B poller init should succeed");
   testAssertTrue(
@@ -408,10 +448,8 @@ static void testSessionDestinationAwareTcpQueueAndDropApis(void) {
 
   sessionDestroy(session);
   sessionFixtureTeardownWithPairs(&poller, tunPair, sourcePair);
-  close(destPairA[0]);
-  close(destPairA[1]);
-  close(destPairB[0]);
-  close(destPairB[1]);
+  sessionTestTcpPairClose(destPairA);
+  sessionTestTcpPairClose(destPairB);
 }
 
 static void testSessionQueueTunWithDropForSession(void) {
@@ -440,6 +478,25 @@ static void testSessionQueueTunWithDropForSession(void) {
 
   sessionDestroy(session);
   sessionFixtureTeardownWithPairs(&poller, tunPair, tcpPair);
+}
+
+static void testSessionPairHelpersOpenExpectedSocketTypes(void) {
+  int tunPair[2] = {-1, -1};
+  int tcpPair[2] = {-1, -1};
+  int sockType = 0;
+  socklen_t sockTypeLen = (socklen_t)sizeof(sockType);
+
+  testAssertTrue(sessionTestTunPairOpen(tunPair), "tun pair helper should open socketpair");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPair), "tcp pair helper should open socketpair");
+
+  testAssertTrue(getsockopt(tunPair[0], SOL_SOCKET, SO_TYPE, &sockType, &sockTypeLen) == 0, "getsockopt tun should succeed");
+  testAssertTrue(sockType == SOCK_DGRAM, "tun helper should create datagram sockets");
+  sockTypeLen = (socklen_t)sizeof(sockType);
+  testAssertTrue(getsockopt(tcpPair[0], SOL_SOCKET, SO_TYPE, &sockType, &sockTypeLen) == 0, "getsockopt tcp should succeed");
+  testAssertTrue(sockType == SOCK_STREAM, "tcp helper should create stream sockets");
+
+  sessionTestTunPairClose(tunPair);
+  sessionTestTcpPairClose(tcpPair);
 }
 
 static void testSessionCreateRejectsNullHeartbeatConfig(void) {
@@ -496,4 +553,5 @@ void runSessionTests(void) {
   testSessionRetryOverflowKeepsPendingWhenTunQueueStillSaturated();
   testSessionDestinationAwareTcpQueueAndDropApis();
   testSessionQueueTunWithDropForSession();
+  testSessionPairHelpersOpenExpectedSocketTypes();
 }

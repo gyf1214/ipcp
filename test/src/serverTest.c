@@ -107,6 +107,28 @@ static bool serverInitFixture(
 
 #define serverInit(...) serverInitFixture(__VA_ARGS__)
 
+typedef struct {
+  server_t server;
+  int tunPair[2];
+  int tcpPair[2];
+} serverFixture_t;
+
+static void serverFixtureSetup(
+    serverFixture_t *fixture,
+    int listenFd,
+    int maxActiveSessions,
+    int maxPreAuthSessions,
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    sessionNowMsFn_t nowMsFn,
+    void *nowCtx);
+static int serverFixtureAddClient(
+    serverFixture_t *fixture,
+    int keySlot,
+    const unsigned char key[ProtocolPskSize],
+    const unsigned char *claim,
+    long claimNbytes);
+static void serverFixtureTeardown(serverFixture_t *fixture);
+
 static void testServerServeMultiClientRejectsInvalidArgs(void) {
   server_t server;
   memset(&server, 0, sizeof(server));
@@ -338,47 +360,40 @@ static void testServerRoundRobinRetryCursorRotates(void) {
 }
 
 static void testServerPendingTunToTcpOwnerControlsRetryAndReadInterest(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   unsigned char payload[] = "pending-owner-payload";
   serverPendingRetry_t retry;
+  int slot;
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 52, 1, 1, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "slot should be added");
+  serverFixtureSetup(&fixture, 52, 1, 1, &testHeartbeatCfg, NULL, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "slot should be added");
 
-  server.activeConns[0].tcpPoller.outOffset = 0;
-  server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
+  fixture.server.activeConns[0].tcpPoller.outOffset = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity;
 
   testAssertTrue(
-      serverStorePendingTunToTcp(&server, 0, payload, (long)sizeof(payload)),
+      serverStorePendingTunToTcp(&fixture.server, 0, payload, (long)sizeof(payload)),
       "storing pending tun-to-tcp payload should succeed");
-  testAssertTrue(serverHasPendingTunToTcp(&server), "server should report pending tun-to-tcp payload");
-  testAssertTrue(serverPendingTunToTcpOwner(&server) == 0, "server should record pending owner slot");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending is active");
+  testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "server should report pending tun-to-tcp payload");
+  testAssertTrue(serverPendingTunToTcpOwner(&fixture.server) == 0, "server should record pending owner slot");
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending is active");
 
-  retry = serverRetryPendingTunToTcp(&server, 1, &server.activeConns[0].tcpPoller);
+  retry = serverRetryPendingTunToTcp(&fixture.server, 1, &fixture.server.activeConns[0].tcpPoller);
   testAssertTrue(retry == serverPendingRetryBlocked, "non-owner retry should be blocked");
-  testAssertTrue(serverHasPendingTunToTcp(&server), "non-owner retry should not consume pending payload");
+  testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "non-owner retry should not consume pending payload");
 
-  server.activeConns[0].tcpPoller.outOffset = 0;
-  server.activeConns[0].tcpPoller.outNbytes = 0;
-  retry = serverRetryPendingTunToTcp(&server, 0, &server.activeConns[0].tcpPoller);
+  fixture.server.activeConns[0].tcpPoller.outOffset = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = 0;
+  retry = serverRetryPendingTunToTcp(&fixture.server, 0, &fixture.server.activeConns[0].tcpPoller);
   testAssertTrue(retry == serverPendingRetryQueued, "owner retry should queue pending payload");
-  testAssertTrue(!serverHasPendingTunToTcp(&server), "owner retry should clear pending payload");
+  testAssertTrue(!serverHasPendingTunToTcp(&fixture.server), "owner retry should clear pending payload");
 
   testAssertTrue(
-      serverSetTunReadEnabled(&server, true),
+      serverSetTunReadEnabled(&fixture.server, true),
       "read interest should be re-enabled after pending payload clears");
-  testAssertTrue((server.tunPoller.poller.events & EPOLLIN) != 0, "server should enable tun epollin when requested");
-
-  serverDeinit(&server);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
-  close(tunPair[0]);
-  close(tunPair[1]);
+  testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) != 0, "server should enable tun epollin when requested");
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerRoutesTunIngressByClaimMatch(void) {
@@ -623,37 +638,28 @@ static void testServerBroadcastFanoutSkipsSaturatedClient(void) {
 }
 
 static void testServerQueueWithDropSkipsOverflowWithoutPendingState(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   const char payload[] = "drop-me";
   sessionQueueResult_t result;
+  int slot;
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
-  testAssertTrue(
-      serverInit(&server, tunPair[0], 78, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server init should succeed");
-  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
+  serverFixtureSetup(&fixture, 78, 1, 1, &testHeartbeatCfg, NULL, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "server client should be added");
 
-  server.activeConns[0].tcpPoller.outOffset = 0;
-  server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity - 2;
+  fixture.server.activeConns[0].tcpPoller.outOffset = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = IoPollerQueueCapacity - 2;
 
   result = serverQueueTcpWithDrop(
-      &server.activeConns[0].tcpPoller,
+      &fixture.server.activeConns[0].tcpPoller,
       payload,
       (long)sizeof(payload) - 1);
   testAssertTrue(result == sessionQueueResultBlocked, "queue-with-drop should report dropped on overflow");
   testAssertTrue(
-      server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity - 2,
+      fixture.server.activeConns[0].tcpPoller.outNbytes == IoPollerQueueCapacity - 2,
       "queue-with-drop should leave queue unchanged when dropping");
-  testAssertTrue(!serverHasPendingTunToTcp(&server), "queue-with-drop should not use shared pending state");
-
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  testAssertTrue(!serverHasPendingTunToTcp(&fixture.server), "queue-with-drop should not use shared pending state");
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
@@ -800,9 +806,7 @@ static void testServerRoutesTcpIngressAcrossClientsAndTun(void) {
 }
 
 static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   unsigned char toServer[] = {
       0x00, 0x00, 0x08, 0x00,
       0x45, 0x00, 0x00, 0x14,
@@ -815,181 +819,136 @@ static void testServerTcpIngressToTunRequiresWriteServiceProgress(void) {
   ssize_t nread;
   int flags;
   int attempts;
+  int slot;
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp pair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 91, 1, 1, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
-  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "slot should be active");
-  testAssertTrue(ioReactorInit(&server.reactor), "reactor init should succeed");
-  server.tunPoller.poller.reactor = &server.reactor;
+  serverFixtureSetup(&fixture, 91, 1, 1, &testHeartbeatCfg, NULL, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "slot should be active");
+  testAssertTrue(ioReactorInit(&fixture.server.reactor), "reactor init should succeed");
+  fixture.server.tunPoller.poller.reactor = &fixture.server.reactor;
   testAssertTrue(
-      ioReactorAddPoller(&server.reactor, &server.tunPoller.poller, &sessionEventFixtureCallbacks, NULL, true),
+      ioReactorAddPoller(&fixture.server.reactor, &fixture.server.tunPoller.poller, &sessionEventFixtureCallbacks, NULL, true),
       "tun poller should be attached to reactor");
 
-  server.mode = sessionIfModeTun;
-  server.serverIdentity.claim[0] = 10;
-  server.serverIdentity.claim[1] = 0;
-  server.serverIdentity.claim[2] = 0;
-  server.serverIdentity.claim[3] = 1;
-  server.serverIdentity.claimNbytes = 4;
+  fixture.server.mode = sessionIfModeTun;
+  fixture.server.serverIdentity.claim[0] = 10;
+  fixture.server.serverIdentity.claim[1] = 0;
+  fixture.server.serverIdentity.claim[2] = 0;
+  fixture.server.serverIdentity.claim[3] = 1;
+  fixture.server.serverIdentity.claimNbytes = 4;
 
   testAssertTrue(
-      serverRouteTcpIngressPacket(&server, &server.activeConns[0], toServer, sizeof(toServer)),
+      serverRouteTcpIngressPacket(&fixture.server, &fixture.server.activeConns[0], toServer, sizeof(toServer)),
       "tcp ingress to server identity should queue tun payload");
-  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) > 0, "tun payload should be queued");
+  testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) > 0, "tun payload should be queued");
 
-  flags = fcntl(tunPair[1], F_GETFL, 0);
+  flags = fcntl(fixture.tunPair[1], F_GETFL, 0);
   testAssertTrue(flags >= 0, "peer flags fetch should succeed");
-  testAssertTrue(fcntl(tunPair[1], F_SETFL, flags | O_NONBLOCK) == 0, "peer should become nonblocking");
-  nread = read(tunPair[1], peerBuf, sizeof(peerBuf));
+  testAssertTrue(fcntl(fixture.tunPair[1], F_SETFL, flags | O_NONBLOCK) == 0, "peer should become nonblocking");
+  nread = read(fixture.tunPair[1], peerBuf, sizeof(peerBuf));
   testAssertTrue(nread < 0, "without explicit write service, queued tun bytes should not flush");
 
-  for (attempts = 0; attempts < 8 && ioTunQueuedBytes(&server.tunPoller) > 0; attempts++) {
-    ioReactorStepResult_t step = ioReactorStep(&server.reactor, 50);
+  for (attempts = 0; attempts < 8 && ioTunQueuedBytes(&fixture.server.tunPoller) > 0; attempts++) {
+    ioReactorStepResult_t step = ioReactorStep(&fixture.server.reactor, 50);
     testAssertTrue(step == ioReactorStepReady || step == ioReactorStepTimeout, "reactor write drive should remain healthy");
   }
-  testAssertTrue(ioTunQueuedBytes(&server.tunPoller) == 0, "reactor should flush queued tun payload");
-  nread = read(tunPair[1], peerBuf, sizeof(peerBuf));
+  testAssertTrue(ioTunQueuedBytes(&fixture.server.tunPoller) == 0, "reactor should flush queued tun payload");
+  nread = read(fixture.tunPair[1], peerBuf, sizeof(peerBuf));
   testAssertTrue(nread == (ssize_t)sizeof(toServer), "reactor write drive should flush queued payload");
 
-  ioReactorDispose(&server.reactor);
-  serverDeinit(&server);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
-  close(tunPair[0]);
-  close(tunPair[1]);
+  ioReactorDispose(&fixture.server.reactor);
+  serverFixtureTeardown(&fixture);
 }
-
-typedef struct {
-  server_t server;
-} serverFixture_t;
 
 static void serverFixtureSetup(
     serverFixture_t *fixture,
-    int maxSessions,
-    int tunPair[2],
-    int tcpPairA[2],
-    int tcpPairB[2],
-    int *slotA,
-    int *slotB) {
+    int listenFd,
+    int maxActiveSessions,
+    int maxPreAuthSessions,
+    const sessionHeartbeatConfig_t *heartbeatCfg,
+    sessionNowMsFn_t nowMsFn,
+    void *nowCtx) {
   testAssertTrue(fixture != NULL, "fixture should not be null");
-  testAssertTrue(tunPair != NULL, "tunPair should not be null");
-  testAssertTrue(tcpPairA != NULL, "tcpPairA should not be null");
-  testAssertTrue(tcpPairB != NULL, "tcpPairB should not be null");
-  testAssertTrue(slotA != NULL, "slotA should not be null");
-  testAssertTrue(slotB != NULL, "slotB should not be null");
   memset(&fixture->server, 0, sizeof(fixture->server));
-  *slotA = -1;
-  *slotB = -1;
-  tcpPairB[0] = -1;
-  tcpPairB[1] = -1;
-
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairA) == 0, "tcp pair A should be created");
+  fixture->tunPair[0] = -1;
+  fixture->tunPair[1] = -1;
+  fixture->tcpPair[0] = -1;
+  fixture->tcpPair[1] = -1;
+  testAssertTrue(sessionTestTunPairOpen(fixture->tunPair), "tun socketpair should be created");
+  testAssertTrue(sessionTestTcpPairOpen(fixture->tcpPair), "tcp socketpair should be created");
   testAssertTrue(
-      serverInit(&fixture->server, tunPair[0], 72, maxSessions, maxSessions, &testHeartbeatCfg, NULL, NULL),
+      serverInit(
+          &fixture->server,
+          fixture->tunPair[0],
+          listenFd,
+          maxActiveSessions,
+          maxPreAuthSessions,
+          heartbeatCfg,
+          nowMsFn,
+          nowCtx),
       "server init should succeed");
-
-  *slotA = serverAddClient(&fixture->server, 0, tcpPairA[0], testKey, claim2, sizeof(claim2));
-  testAssertTrue(*slotA == 0, "first client should be added");
-
-  if (maxSessions > 1) {
-    testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPairB) == 0, "tcp pair B should be created");
-    *slotB = serverAddClient(&fixture->server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
-    testAssertTrue(*slotB == 1, "second client should be added");
-  }
 }
 
-static void serverFixtureTeardown(
+static int serverFixtureAddClient(
     serverFixture_t *fixture,
-    int tunPair[2],
-    int tcpPairA[2],
-    int tcpPairB[2],
-    int slotA,
-    int slotB) {
+    int keySlot,
+    const unsigned char key[ProtocolPskSize],
+    const unsigned char *claim,
+    long claimNbytes) {
+  if (fixture == NULL || key == NULL || claim == NULL || claimNbytes <= 0) {
+    return -1;
+  }
+  return serverAddClient(&fixture->server, keySlot, fixture->tcpPair[0], key, claim, claimNbytes);
+}
+
+static void serverFixtureTeardown(serverFixture_t *fixture) {
   testAssertTrue(fixture != NULL, "fixture should not be null");
-  if (slotA >= 0) {
-    (void)serverRemoveClient(&fixture->server, slotA);
-  }
-  if (slotB >= 0) {
-    (void)serverRemoveClient(&fixture->server, slotB);
-  }
   serverDeinit(&fixture->server);
-  if (tunPair[0] >= 0) {
-    close(tunPair[0]);
-  }
-  if (tunPair[1] >= 0) {
-    close(tunPair[1]);
-  }
-  if (tcpPairA[0] >= 0) {
-    close(tcpPairA[0]);
-  }
-  if (tcpPairA[1] >= 0) {
-    close(tcpPairA[1]);
-  }
-  if (tcpPairB[0] >= 0) {
-    close(tcpPairB[0]);
-  }
-  if (tcpPairB[1] >= 0) {
-    close(tcpPairB[1]);
-  }
+  sessionTestTunPairClose(fixture->tunPair);
+  sessionTestTcpPairClose(fixture->tcpPair);
 }
 
 static void testServerHeartbeatTimeoutStopsSession(void) {
   unsigned char key[ProtocolPskSize];
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   int slot;
   session_t *session;
   ioTcpPoller_t *tcpPoller;
 
   memset(key, 0x11, sizeof(key));
   fakeNowMs = 0;
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(
-      serverInit(&server, tunPair[0], 84, 1, 1, &testHeartbeatCfg, fakeNow, NULL),
-      "server init should succeed");
-  slot = serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2));
+  serverFixtureSetup(&fixture, 84, 1, 1, &testHeartbeatCfg, fakeNow, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
   testAssertTrue(slot == 0, "server should add active client");
-  session = serverSessionAt(&server, slot);
-  tcpPoller = &server.activeConns[slot].tcpPoller;
+  session = serverSessionAt(&fixture.server, slot);
+  tcpPoller = &fixture.server.activeConns[slot].tcpPoller;
   testAssertTrue(session != NULL, "session should be retrievable from server active slot");
 
   fakeNowMs = 15000;
   testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, tcpPoller, &server.tunPoller, ioEventTimeout, key) == sessionStepStop,
+      runSessionStepWithSuppressedStderr(session, tcpPoller, &fixture.server.tunPoller, ioEventTimeout, key) == sessionStepStop,
       "server should stop after heartbeat timeout");
 
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerCreateAndRemovePreAuthConnResetsState(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   int slot;
   preAuthConn_t *conn;
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 84, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  serverFixtureSetup(&fixture, 84, 2, 2, &testHeartbeatCfg, NULL, NULL);
 
   testAssertTrue(
-      sessionTestInitTcpPollerFromFd(&server.preAuthConns[0].tcpPoller, tcpPair[0]),
+      sessionTestInitTcpPollerFromFd(&fixture.server.preAuthConns[0].tcpPoller, fixture.tcpPair[0]),
       "pre-auth tcp poller init should succeed");
-  server.preAuthConns[0].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
-  server.preAuthConns[0].tcpPoller.poller.readEnabled = true;
-  slot = serverCreatePreAuthConn(&server, 0, 12345);
+  fixture.server.preAuthConns[0].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  fixture.server.preAuthConns[0].tcpPoller.poller.readEnabled = true;
+  slot = serverCreatePreAuthConn(&fixture.server, 0, 12345);
   testAssertTrue(slot >= 0, "pre-auth slot should be allocated");
-  conn = serverPreAuthAt(&server, slot);
+  conn = serverPreAuthAt(&fixture.server, slot);
   testAssertTrue(conn != NULL, "pre-auth connection should be retrievable");
-  testAssertTrue(conn->tcpPoller.poller.fd == tcpPair[0], "pre-auth create should initialize embedded tcp poller fd");
+  testAssertTrue(conn->tcpPoller.poller.fd == fixture.tcpPair[0], "pre-auth create should initialize embedded tcp poller fd");
   testAssertTrue(conn->tcpPoller.poller.kind == ioPollerKindTcp, "pre-auth create should mark embedded poller as tcp");
   testAssertTrue(conn->tcpPoller.poller.ctx == conn, "pre-auth create should attach pre-auth callback ctx");
   conn->decoder.frame.nbytes = 99;
@@ -1006,30 +965,23 @@ static void testServerCreateAndRemovePreAuthConnResetsState(void) {
   conn->authWriteNbytes = 6;
   conn->authState = 2;
 
-  testAssertTrue(serverRemovePreAuthConn(&server, slot), "pre-auth remove should succeed");
-  testAssertTrue(serverPreAuthAt(&server, slot) == NULL, "removed pre-auth slot should be inactive");
-  testAssertTrue(server.preAuthCount == 0, "pre-auth count should decrement after remove");
-  testAssertTrue(server.preAuthConns[slot].tcpPoller.poller.fd == -1, "removed slot should reset poller fd");
-  testAssertTrue(server.preAuthConns[slot].claimNbytes == 0, "removed slot should clear claim length");
-  testAssertTrue(server.preAuthConns[slot].tcpReadCarryNbytes == 0, "removed slot should clear carry length");
-  testAssertTrue(server.preAuthConns[slot].authWriteOffset == 0, "removed slot should reset auth write offset");
-  testAssertTrue(server.preAuthConns[slot].authWriteNbytes == 0, "removed slot should reset auth write length");
-  testAssertTrue(server.preAuthConns[slot].authState == 0, "removed slot should reset auth state");
-  testAssertTrue(server.preAuthConns[slot].decoder.hasFrame == 0, "removed slot should clear decoder state");
-  testAssertTrue(server.preAuthConns[slot].decoder.offset == 0, "removed slot should clear decoder offset");
-  testAssertTrue(server.preAuthConns[slot].decoder.frame.nbytes == 0, "removed slot should clear decoder frame length");
-
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  testAssertTrue(serverRemovePreAuthConn(&fixture.server, slot), "pre-auth remove should succeed");
+  testAssertTrue(serverPreAuthAt(&fixture.server, slot) == NULL, "removed pre-auth slot should be inactive");
+  testAssertTrue(fixture.server.preAuthCount == 0, "pre-auth count should decrement after remove");
+  testAssertTrue(fixture.server.preAuthConns[slot].tcpPoller.poller.fd == -1, "removed slot should reset poller fd");
+  testAssertTrue(fixture.server.preAuthConns[slot].claimNbytes == 0, "removed slot should clear claim length");
+  testAssertTrue(fixture.server.preAuthConns[slot].tcpReadCarryNbytes == 0, "removed slot should clear carry length");
+  testAssertTrue(fixture.server.preAuthConns[slot].authWriteOffset == 0, "removed slot should reset auth write offset");
+  testAssertTrue(fixture.server.preAuthConns[slot].authWriteNbytes == 0, "removed slot should reset auth write length");
+  testAssertTrue(fixture.server.preAuthConns[slot].authState == 0, "removed slot should reset auth state");
+  testAssertTrue(fixture.server.preAuthConns[slot].decoder.hasFrame == 0, "removed slot should clear decoder state");
+  testAssertTrue(fixture.server.preAuthConns[slot].decoder.offset == 0, "removed slot should clear decoder offset");
+  testAssertTrue(fixture.server.preAuthConns[slot].decoder.frame.nbytes == 0, "removed slot should clear decoder frame length");
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   int slot;
   preAuthConn_t *conn;
   protocolDecoder_t helloDecoder;
@@ -1037,18 +989,16 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   long helloCarryNbytes = 5;
   session_t *activeSession;
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(serverInit(&server, tunPair[0], 85, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
+  serverFixtureSetup(&fixture, 85, 2, 2, &testHeartbeatCfg, NULL, NULL);
 
   testAssertTrue(
-      sessionTestInitTcpPollerFromFd(&server.preAuthConns[0].tcpPoller, tcpPair[0]),
+      sessionTestInitTcpPollerFromFd(&fixture.server.preAuthConns[0].tcpPoller, fixture.tcpPair[0]),
       "pre-auth tcp poller init should succeed");
-  server.preAuthConns[0].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
-  server.preAuthConns[0].tcpPoller.poller.readEnabled = true;
-  slot = serverCreatePreAuthConn(&server, 0, 23456);
+  fixture.server.preAuthConns[0].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  fixture.server.preAuthConns[0].tcpPoller.poller.readEnabled = true;
+  slot = serverCreatePreAuthConn(&fixture.server, 0, 23456);
   testAssertTrue(slot >= 0, "pre-auth slot should be allocated");
-  conn = serverPreAuthAt(&server, slot);
+  conn = serverPreAuthAt(&fixture.server, slot);
   testAssertTrue(conn != NULL, "pre-auth connection should be retrievable");
   conn->resolvedActiveSlot = 0;
   memcpy(conn->resolvedKey, testKey, sizeof(conn->resolvedKey));
@@ -1062,34 +1012,34 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   memset(conn->tcpReadCarryBuf, 0, sizeof(conn->tcpReadCarryBuf));
   memcpy(conn->tcpReadCarryBuf, "hello", (size_t)helloCarryNbytes);
   conn->tcpReadCarryNbytes = helloCarryNbytes;
-  testAssertTrue(ioReactorInit(&server.reactor), "reactor init should succeed");
-  conn->tcpPoller.poller.reactor = &server.reactor;
+  testAssertTrue(ioReactorInit(&fixture.server.reactor), "reactor init should succeed");
+  conn->tcpPoller.poller.reactor = &fixture.server.reactor;
   testAssertTrue(
-      ioReactorAddPoller(&server.reactor, &conn->tcpPoller.poller, &sessionEventFixtureCallbacks, NULL, true),
+      ioReactorAddPoller(&fixture.server.reactor, &conn->tcpPoller.poller, &sessionEventFixtureCallbacks, NULL, true),
       "pre-auth poller should be attached");
 
   helloDecoder = conn->decoder;
   memcpy(helloCarryBuf, conn->tcpReadCarryBuf, (size_t)helloCarryNbytes);
-  testAssertTrue(conn->tcpPoller.poller.fd == tcpPair[0], "pre-auth poller should own connection fd before promote");
-  testAssertTrue(serverPromoteToActiveSlot(&server, slot), "promote should create active session");
-  testAssertTrue(server.preAuthCount == 1, "promote should keep pre-auth slot until handoff");
-  testAssertTrue(server.activeCount == 1, "promote should increment active count");
-  testAssertTrue(server.activeConns[0].tcpPoller.poller.fd == -1, "active poller should be detached before handoff");
+  testAssertTrue(conn->tcpPoller.poller.fd == fixture.tcpPair[0], "pre-auth poller should own connection fd before promote");
+  testAssertTrue(serverPromoteToActiveSlot(&fixture.server, slot), "promote should create active session");
+  testAssertTrue(fixture.server.preAuthCount == 1, "promote should keep pre-auth slot until handoff");
+  testAssertTrue(fixture.server.activeCount == 1, "promote should increment active count");
+  testAssertTrue(fixture.server.activeConns[0].tcpPoller.poller.fd == -1, "active poller should be detached before handoff");
   testAssertTrue(
       ioTcpPollerHandoff(
-          &server.activeConns[0].tcpPoller,
+          &fixture.server.activeConns[0].tcpPoller,
           &conn->tcpPoller,
           &sessionEventFixtureCallbacks,
           NULL,
           true),
       "promote handoff should retarget to active poller");
-  testAssertTrue(serverRemovePreAuthConn(&server, slot), "promote handoff should clear pre-auth slot");
-  testAssertTrue(server.preAuthCount == 0, "promote handoff should remove pre-auth slot");
+  testAssertTrue(serverRemovePreAuthConn(&fixture.server, slot), "promote handoff should clear pre-auth slot");
+  testAssertTrue(fixture.server.preAuthCount == 0, "promote handoff should remove pre-auth slot");
   testAssertTrue(
-      server.activeConns[0].tcpPoller.poller.fd == tcpPair[0],
+      fixture.server.activeConns[0].tcpPoller.poller.fd == fixture.tcpPair[0],
       "promote should bind active poller to pre-auth-owned connection fd");
 
-  activeSession = serverSessionAt(&server, 0);
+  activeSession = serverSessionAt(&fixture.server, 0);
   testAssertTrue(activeSession != NULL, "promoted active session should exist");
   testAssertTrue(
       sessionPromoteFromPreAuth(activeSession, &helloDecoder, helloCarryBuf, helloCarryNbytes),
@@ -1104,19 +1054,13 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
       memcmp(activeSession->tcpReadCarryBuf, helloCarryBuf, (size_t)helloCarryNbytes) == 0,
       "session carry bytes should match");
 
-  ioReactorDispose(&server.reactor);
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  ioReactorDispose(&fixture.server.reactor);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
   unsigned char key[ProtocolPskSize];
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   int slot;
   session_t *session;
   ioTcpPoller_t *tcpPoller;
@@ -1127,41 +1071,29 @@ static void testServerHeartbeatTimeoutUsesConfiguredTimeout(void) {
 
   memset(key, 0x33, sizeof(key));
   fakeNowMs = 0;
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
-  testAssertTrue(
-      serverInit(&server, tunPair[0], 85, 1, 1, &heartbeatCfg, fakeNow, NULL),
-      "server init should succeed");
-  slot = serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2));
+  serverFixtureSetup(&fixture, 85, 1, 1, &heartbeatCfg, fakeNow, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
   testAssertTrue(slot == 0, "server should add active client");
-  session = serverSessionAt(&server, slot);
-  tcpPoller = &server.activeConns[slot].tcpPoller;
+  session = serverSessionAt(&fixture.server, slot);
+  tcpPoller = &fixture.server.activeConns[slot].tcpPoller;
   testAssertTrue(session != NULL, "session should be retrievable from server active slot");
 
   fakeNowMs = 8999;
   testAssertTrue(
-      sessionStep(session, tcpPoller, &server.tunPoller, ioEventTimeout, key) == sessionStepContinue,
+      sessionStep(session, tcpPoller, &fixture.server.tunPoller, ioEventTimeout, key) == sessionStepContinue,
       "server should continue before configured timeout");
   fakeNowMs = 9000;
   testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, tcpPoller, &server.tunPoller, ioEventTimeout, key) == sessionStepStop,
+      runSessionStepWithSuppressedStderr(session, tcpPoller, &fixture.server.tunPoller, ioEventTimeout, key) == sessionStepStop,
       "server should stop at configured timeout");
 
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   unsigned char key[ProtocolPskSize];
   serverFixture_t fixture;
-  int tunPair[2];
-  int tcpPairA[2];
-  int tcpPairB[2] = {-1, -1};
   int slotA;
-  int slotB;
   char fill[IoPollerQueueCapacity];
   char tunPayload[128];
   session_t *session;
@@ -1170,7 +1102,9 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   memset(key, 0x51, sizeof(key));
   memset(fill, 'p', sizeof(fill));
   memset(tunPayload, 'q', sizeof(tunPayload));
-  serverFixtureSetup(&fixture, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  serverFixtureSetup(&fixture, 72, 1, 1, &testHeartbeatCfg, NULL, NULL);
+  slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slotA == 0, "first client should be added");
   session = serverSessionAt(&fixture.server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
   poller = &fixture.server.activeConns[slotA].tcpPoller;
@@ -1178,7 +1112,9 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   testAssertTrue(
       ioTcpWrite(poller, fill, IoPollerQueueCapacity - 16),
       "prefill tcp queue should succeed");
-  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
+  testAssertTrue(
+      write(fixture.tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload),
+      "tun write should succeed");
   testAssertTrue(
       runSessionStepSplit(session, poller, &fixture.server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "session should continue on overflow");
@@ -1186,17 +1122,15 @@ static void testServerTunOverflowDisablesTunEpollinGlobally(void) {
   testAssertTrue(fixture.server.tunReadPaused, "server server should mark tun read paused while pending exists");
   testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "server should disable tun epollin while pending exists");
 
-  serverFixtureTeardown(&fixture, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(void) {
   unsigned char key[ProtocolPskSize];
   serverFixture_t fixture;
-  int tunPair[2];
-  int tcpPairA[2];
-  int tcpPairB[2];
   int slotA;
   int slotB;
+  int tcpPairB[2];
   char fill[IoPollerQueueCapacity];
   char tunPayload[128];
   session_t *ownerSession;
@@ -1208,7 +1142,12 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   memset(key, 0x52, sizeof(key));
   memset(fill, 'r', sizeof(fill));
   memset(tunPayload, 's', sizeof(tunPayload));
-  serverFixtureSetup(&fixture, 2, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  serverFixtureSetup(&fixture, 72, 2, 2, &testHeartbeatCfg, NULL, NULL);
+  slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slotA == 0, "first client should be added");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPairB), "tcp pair B should be created");
+  slotB = serverAddClient(&fixture.server, 1, tcpPairB[0], testKey, claim3, sizeof(claim3));
+  testAssertTrue(slotB == 1, "second client should be added");
   ownerSession = serverSessionAt(&fixture.server, slotA);
   otherSession = serverSessionAt(&fixture.server, slotB);
   ownerPoller = &fixture.server.activeConns[slotA].tcpPoller;
@@ -1219,7 +1158,9 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(
       ioTcpWrite(ownerPoller, fill, IoPollerQueueCapacity - 16),
       "prefill owner tcp queue should succeed");
-  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
+  testAssertTrue(
+      write(fixture.tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload),
+      "tun write should succeed");
   testAssertTrue(
       runSessionStepSplit(ownerSession, ownerPoller, &fixture.server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow on owner should continue");
@@ -1262,17 +1203,14 @@ static void testServerPendingRetriesOnOwnerAndResumesTunEpollinAtLowWatermark(vo
   testAssertTrue(!fixture.server.tunReadPaused, "server server should clear tun read paused at low watermark");
   testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should resume at low watermark");
 
-  serverFixtureTeardown(&fixture, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&fixture);
+  sessionTestTcpPairClose(tcpPairB);
 }
 
 static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(void) {
   unsigned char key[ProtocolPskSize];
   serverFixture_t fixture;
-  int tunPair[2];
-  int tcpPairA[2];
-  int tcpPairB[2] = {-1, -1};
   int slotA;
-  int slotB;
   char fill[IoPollerQueueCapacity];
   char tunPayload[128];
   session_t *session;
@@ -1281,7 +1219,9 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   memset(key, 0x53, sizeof(key));
   memset(fill, 'u', sizeof(fill));
   memset(tunPayload, 'v', sizeof(tunPayload));
-  serverFixtureSetup(&fixture, 1, tunPair, tcpPairA, tcpPairB, &slotA, &slotB);
+  serverFixtureSetup(&fixture, 72, 1, 1, &testHeartbeatCfg, NULL, NULL);
+  slotA = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slotA == 0, "first client should be added");
   session = serverSessionAt(&fixture.server, slotA);
   testAssertTrue(session != NULL, "server session should exist");
   poller = &fixture.server.activeConns[slotA].tcpPoller;
@@ -1289,7 +1229,9 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   testAssertTrue(
       ioTcpWrite(poller, fill, IoPollerQueueCapacity - 16),
       "prefill tcp queue should succeed");
-  testAssertTrue(write(tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload), "tun write should succeed");
+  testAssertTrue(
+      write(fixture.tunPair[1], tunPayload, sizeof(tunPayload)) == (long)sizeof(tunPayload),
+      "tun write should succeed");
   testAssertTrue(
       runSessionStepSplit(session, poller, &fixture.server.tunPoller, ioEventTunRead, key) == sessionStepContinue,
       "overflow path should continue");
@@ -1297,124 +1239,98 @@ static void testServerOwnerDisconnectDropsRuntimePendingAndResumesTunEpollin(voi
   testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) == 0, "tun epollin should be disabled while pending is active");
 
   testAssertTrue(serverRemoveClient(&fixture.server, slotA), "owner removal should succeed");
-  slotA = -1;
   testAssertTrue(!fixture.server.tunReadPaused, "server server should clear tun read paused after owner drop");
   testAssertTrue((fixture.server.tunPoller.poller.events & EPOLLIN) != 0, "tun epollin should re-enable after owner disconnect drop");
 
-  serverFixtureTeardown(&fixture, tunPair, tcpPairA, tcpPairB, slotA, slotB);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerQueueBackpressureBlocksAndStoresRuntimePendingPayload(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   char fill[IoPollerQueueCapacity];
   char payload[128];
   sessionQueueResult_t result;
+  int slot;
 
   memset(fill, 'w', sizeof(fill));
   memset(payload, 'z', sizeof(payload));
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
+  serverFixtureSetup(&fixture, 80, 1, 1, &testHeartbeatCfg, NULL, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "server client should be added");
   testAssertTrue(
-      serverInit(&server, tunPair[0], 80, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server server init should succeed");
-  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
-  testAssertTrue(
-      ioTcpWrite(&server.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity - 16),
+      ioTcpWrite(&fixture.server.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity - 16),
       "prefill server tcp queue should succeed");
   result = serverQueueTcpWithBackpressure(
-      &server, &server.activeConns[0], payload, sizeof(payload));
+      &fixture.server, &fixture.server.activeConns[0], payload, sizeof(payload));
   testAssertTrue(result == sessionQueueResultBlocked, "server queue api should block on overflow");
-  testAssertTrue(serverHasPendingTunToTcp(&server), "server queue api should store server pending payload");
-  testAssertTrue(serverPendingTunToTcpOwner(&server) == 0, "server pending payload owner should match slot");
-
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "server queue api should store server pending payload");
+  testAssertTrue(serverPendingTunToTcpOwner(&fixture.server) == 0, "server pending payload owner should match slot");
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerInboundHeartbeatHandlerQueuesAckAndRefreshesTimestamp(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   long long lastValidInboundMs = 17;
   protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
   sessionQueueResult_t result;
+  int slot;
 
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
-  testAssertTrue(
-      serverInit(&server, tunPair[0], 81, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server server init should succeed");
-  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
+  serverFixtureSetup(&fixture, 81, 1, 1, &testHeartbeatCfg, NULL, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "server client should be added");
 
   result = serverHandleInboundMessage(
-      &server,
-      &server.activeConns[0],
+      &fixture.server,
+      &fixture.server.activeConns[0],
       testKey,
       &lastValidInboundMs,
       &req);
   testAssertTrue(result == sessionQueueResultQueued, "server inbound heartbeat request should route through server handler");
   testAssertTrue(lastValidInboundMs > 0, "server handler should refresh last valid inbound timestamp");
 
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerBackpressurePrioritizesHeartbeatAckBeforeRuntimePendingRetry(void) {
-  server_t server;
-  int tunPair[2];
-  int tcpPair[2];
+  serverFixture_t fixture;
   long long lastValidInboundMs = 0;
   char fill[IoPollerQueueCapacity];
   unsigned char pendingPayload[128];
   protocolMessage_t req = {.type = protocolMsgHeartbeatReq, .nbytes = 0, .buf = NULL};
   sessionQueueResult_t result;
+  int slot;
 
   memset(fill, 'j', sizeof(fill));
   memset(pendingPayload, 'k', sizeof(pendingPayload));
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "server tun pair should be created");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "server tcp pair should be created");
+  serverFixtureSetup(&fixture, 82, 1, 1, &testHeartbeatCfg, NULL, NULL);
+  slot = serverFixtureAddClient(&fixture, 0, testKey, claim2, sizeof(claim2));
+  testAssertTrue(slot == 0, "server client should be added");
   testAssertTrue(
-      serverInit(&server, tunPair[0], 82, 1, 1, &testHeartbeatCfg, NULL, NULL),
-      "server server init should succeed");
-  testAssertTrue(serverAddClient(&server, 0, tcpPair[0], testKey, claim2, sizeof(claim2)) == 0, "server client should be added");
-  testAssertTrue(
-      serverStorePendingTunToTcp(&server, 0, pendingPayload, sizeof(pendingPayload)),
+      serverStorePendingTunToTcp(&fixture.server, 0, pendingPayload, sizeof(pendingPayload)),
       "server should accept existing runtime pending payload");
   testAssertTrue(
-      ioTcpWrite(&server.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity),
+      ioTcpWrite(&fixture.server.activeConns[0].tcpPoller, fill, IoPollerQueueCapacity),
       "prefill server tcp queue should succeed");
 
   result = serverHandleInboundMessage(
-      &server,
-      &server.activeConns[0],
+      &fixture.server,
+      &fixture.server.activeConns[0],
       testKey,
       &lastValidInboundMs,
       &req);
   testAssertTrue(result == sessionQueueResultBlocked, "server heartbeat ack should block while runtime pending exists");
-  testAssertTrue(serverHasPendingTunToTcp(&server), "runtime pending should still be present before retry cycle");
+  testAssertTrue(serverHasPendingTunToTcp(&fixture.server), "runtime pending should still be present before retry cycle");
 
-  server.activeConns[0].tcpPoller.outOffset = 0;
-  server.activeConns[0].tcpPoller.outNbytes = IoPollerLowWatermark;
+  fixture.server.activeConns[0].tcpPoller.outOffset = 0;
+  fixture.server.activeConns[0].tcpPoller.outNbytes = IoPollerLowWatermark;
   testAssertTrue(
-      serverServiceBackpressure(&server, 0, ioEventTcpWrite),
+      serverServiceBackpressure(&fixture.server, 0, ioEventTcpWrite),
       "server backpressure service should continue on owner write event");
   testAssertTrue(
-      serverHasPendingTunToTcp(&server),
+      serverHasPendingTunToTcp(&fixture.server),
       "server should preserve runtime pending payload while prioritizing heartbeat ack retry");
 
-  serverDeinit(&server);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
+  serverFixtureTeardown(&fixture);
 }
 
 static void testServerHeartbeatTickTimeoutBoundary(void) {

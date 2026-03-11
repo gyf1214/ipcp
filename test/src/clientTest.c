@@ -31,6 +31,8 @@ static long long fakeNowMs = 0;
 typedef struct {
   client_t client;
   sessionEventFixture_t events;
+  int tunPair[2];
+  int tcpPair[2];
 } clientFixture_t;
 
 static int writeAll(int fd, const void *buf, long nbytes) {
@@ -84,8 +86,8 @@ static int readWireFrame(int fd, protocolFrame_t *frame) {
 }
 
 static void setupPairs(int tunPair[2], int tcpPair[2]) {
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tunPair) == 0, "tun socketpair should succeed");
-  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should succeed");
+  testAssertTrue(sessionTestTunPairOpen(tunPair), "tun socketpair should succeed");
+  testAssertTrue(sessionTestTcpPairOpen(tcpPair), "tcp socketpair should succeed");
 }
 
 static long long fakeNow(void *ctx) {
@@ -93,26 +95,35 @@ static long long fakeNow(void *ctx) {
   return fakeNowMs;
 }
 
-static int clientFixtureSetup(
-    clientFixture_t *fixture,
-    int tunFd,
-    int tcpFd,
-    int heartbeatIntervalMs,
-    int heartbeatTimeoutMs) {
+static int clientFixtureSetup(clientFixture_t *fixture, int heartbeatIntervalMs, int heartbeatTimeoutMs) {
   if (fixture == NULL) {
+    return -1;
+  }
+
+  fixture->tunPair[0] = -1;
+  fixture->tunPair[1] = -1;
+  fixture->tcpPair[0] = -1;
+  fixture->tcpPair[1] = -1;
+  if (!sessionTestTunPairOpen(fixture->tunPair)) {
+    return -1;
+  }
+  if (!sessionTestTcpPairOpen(fixture->tcpPair)) {
+    sessionTestTunPairClose(fixture->tunPair);
     return -1;
   }
 
   memset(&fixture->client, 0, sizeof(fixture->client));
   clientResetHeartbeatState(&fixture->client, heartbeatIntervalMs, heartbeatTimeoutMs, 0);
   if (!ioReactorInit(&fixture->client.reactor)) {
+    sessionTestTunPairClose(fixture->tunPair);
+    sessionTestTcpPairClose(fixture->tcpPair);
     return -1;
   }
   sessionEventFixtureReset(&fixture->events);
 
   memset(&fixture->client.tunPoller, 0, sizeof(fixture->client.tunPoller));
   fixture->client.tunPoller.poller.reactor = NULL;
-  fixture->client.tunPoller.poller.fd = tunFd;
+  fixture->client.tunPoller.poller.fd = fixture->tunPair[0];
   fixture->client.tunPoller.poller.events = EPOLLRDHUP;
   fixture->client.tunPoller.poller.kind = ioPollerKindTun;
   if (!ioReactorAddPoller(
@@ -122,12 +133,16 @@ static int clientFixtureSetup(
           &fixture->events,
           true)) {
     ioReactorDispose(&fixture->client.reactor);
+    sessionTestTunPairClose(fixture->tunPair);
+    sessionTestTcpPairClose(fixture->tcpPair);
     return -1;
   }
 
   memset(&fixture->client.tcpPoller, 0, sizeof(fixture->client.tcpPoller));
-  if (!sessionTestInitTcpPollerFromFd(&fixture->client.tcpPoller, tcpFd)) {
+  if (!sessionTestInitTcpPollerFromFd(&fixture->client.tcpPoller, fixture->tcpPair[0])) {
     ioReactorDispose(&fixture->client.reactor);
+    sessionTestTunPairClose(fixture->tunPair);
+    sessionTestTcpPairClose(fixture->tcpPair);
     return -1;
   }
   if (!ioReactorAddPoller(
@@ -137,6 +152,8 @@ static int clientFixtureSetup(
           &fixture->events,
           true)) {
     ioReactorDispose(&fixture->client.reactor);
+    sessionTestTunPairClose(fixture->tunPair);
+    sessionTestTcpPairClose(fixture->tcpPair);
     return -1;
   }
 
@@ -146,6 +163,8 @@ static int clientFixtureSetup(
 static void clientFixtureTeardown(clientFixture_t *fixture) {
   if (fixture != NULL) {
     ioReactorDispose(&fixture->client.reactor);
+    sessionTestTunPairClose(fixture->tunPair);
+    sessionTestTcpPairClose(fixture->tcpPair);
   }
 }
 
@@ -437,12 +456,9 @@ static void testClientSessionRuntimeWiringAcceptsClientContext(void) {
 
 static void testClientResetHeartbeatStateInitializesRuntimeScaffold(void) {
   clientFixture_t fixture;
-  int tunPair[2];
-  int tcpPair[2];
   client_t *client = NULL;
 
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   client = &fixture.client;
   client->preAuthState = clientPreAuthFailed;
   client->runFailed = true;
@@ -453,16 +469,10 @@ static void testClientResetHeartbeatStateInitializesRuntimeScaffold(void) {
   testAssertTrue(client->reactor.epollFd >= 0, "client runtime reset should preserve embedded reactor registration");
 
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
   clientFixture_t fixture;
-  int tunPair[2];
-  int tcpPair[2];
   client_t *client = NULL;
   char fill[IoPollerQueueCapacity];
   char payload[128];
@@ -470,8 +480,7 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
 
   memset(fill, 'w', sizeof(fill));
   memset(payload, 'z', sizeof(payload));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   client = &fixture.client;
 
   testAssertTrue(
@@ -486,23 +495,16 @@ static void testClientQueueBackpressureBlocksAndStoresPendingPayload(void) {
   testAssertTrue(client->runtimeOverflowNbytes > 0, "client queue api should store pending tcp payload");
 
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientInboundHandlerAcceptsHeartbeatAckAndRefreshesTimestamp(void) {
   clientFixture_t fixture;
-  int tunPair[2];
-  int tcpPair[2];
   client_t *client = NULL;
   long long lastValidInboundMs = 17;
   protocolMessage_t ack = {.type = protocolMsgHeartbeatAck, .nbytes = 0, .buf = NULL};
   sessionQueueResult_t result;
 
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   client = &fixture.client;
   clientResetHeartbeatState(client, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs, 0);
   client->heartbeatAckPending = true;
@@ -517,21 +519,14 @@ static void testClientInboundHandlerAcceptsHeartbeatAckAndRefreshesTimestamp(voi
   testAssertTrue(!client->heartbeatAckPending, "client handler should clear heartbeat pending on ack");
 
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientHeartbeatTickSetsPendingAndTimestamps(void) {
   clientFixture_t fixture;
-  int tunPair[2];
-  int tcpPair[2];
   client_t *client = NULL;
   bool ok;
 
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   client = &fixture.client;
 
   ok = clientHeartbeatTick(client, 6000, testClientKey);
@@ -541,21 +536,14 @@ static void testClientHeartbeatTickSetsPendingAndTimestamps(void) {
   testAssertTrue(client->lastHeartbeatReqMs == 6000, "client heartbeat handler should capture last request timestamp");
 
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
   clientFixture_t fixture;
-  int tunPair[2];
-  int tcpPair[2];
   client_t *client = NULL;
   session_t *session;
 
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   client = &fixture.client;
@@ -571,23 +559,16 @@ static void testClientBackpressureServiceSucceedsWithoutPendingBytes(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientBackpressureServiceSkipsRetryOnTimeoutEvent(void) {
   clientFixture_t fixture;
-  int tunPair[2];
-  int tcpPair[2];
   client_t *client = NULL;
   session_t *session;
   const char tunPayload[] = "pending-tun";
   const char tcpPayload[] = "pending-tcp";
 
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   client = &fixture.client;
@@ -614,26 +595,19 @@ static void testClientBackpressureServiceSkipsRetryOnTimeoutEvent(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientHeartbeatUsesConfiguredInterval(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   sessionHeartbeatConfig_t testCfg = {
       .intervalMs = 2000,
       .timeoutMs = 6000,
   };
 
   memset(key, 0x31, sizeof(key));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &testCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -653,26 +627,19 @@ static void testClientHeartbeatUsesConfiguredInterval(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientHeartbeatTimeoutUsesConfiguredTimeout(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   sessionHeartbeatConfig_t testCfg = {
       .intervalMs = 2000,
       .timeoutMs = 6000,
   };
 
   memset(key, 0x32, sizeof(key));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &testCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -698,25 +665,18 @@ static void testClientHeartbeatTimeoutUsesConfiguredTimeout(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientHeartbeatRequestAndAckFlow(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   char wire[ProtocolFrameSize];
   long wireNbytes;
   ioEvent_t event;
 
   memset(key, 0x22, sizeof(key));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -734,7 +694,7 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
   testAssertTrue(client->heartbeatAckPending, "heartbeat should become pending after idle interval");
 
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatAck, NULL, 0, wire);
-  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(write(fixture.tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(clientFixtureWaitEventOfKind(&fixture, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
   event = ioEventTcpRead;
   testAssertTrue(
@@ -744,18 +704,12 @@ static void testClientHeartbeatRequestAndAckFlow(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientTunReadQueuesEncryptedTcpFrame(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   char out[ProtocolFrameSize];
   long nbytes;
   protocolDecoder_t decoder;
@@ -765,15 +719,14 @@ static void testClientTunReadQueuesEncryptedTcpFrame(void) {
   ioEvent_t event;
 
   memset(key, 0x44, sizeof(key));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   wireClientSession(session, client);
 
   testAssertTrue(
-      write(tunPair[1], payload, strlen(payload)) == (ssize_t)strlen(payload),
+      write(fixture.tunPair[1], payload, strlen(payload)) == (ssize_t)strlen(payload),
       "tun write should succeed");
   testAssertTrue(clientFixtureWaitEventOfKind(&fixture, 100, ioEventTunRead), "reactor callback should capture tun readable event");
   event = ioEventTunRead;
@@ -782,7 +735,7 @@ static void testClientTunReadQueuesEncryptedTcpFrame(void) {
       "tun read event should continue");
   testAssertTrue(clientFixtureDrainWriteQueue(&fixture, true, 50), "reactor should flush queued tcp payload");
 
-  nbytes = read(tcpPair[1], out, sizeof(out));
+  nbytes = read(fixture.tcpPair[1], out, sizeof(out));
   testAssertTrue(nbytes > 0, "tcp peer should receive encrypted wire frame");
 
   protocolDecoderInit(&decoder);
@@ -795,18 +748,12 @@ static void testClientTunReadQueuesEncryptedTcpFrame(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientTcpReadQueuesTunWrite(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   char wire[ProtocolFrameSize];
   long wireNbytes;
   char out[128];
@@ -814,15 +761,14 @@ static void testClientTcpReadQueuesTunWrite(void) {
   ioEvent_t event;
 
   memset(key, 0x45, sizeof(key));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   wireClientSession(session, client);
 
   wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)strlen(payload), wire);
-  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(write(fixture.tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(clientFixtureWaitEventOfKind(&fixture, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
   event = ioEventTcpRead;
   testAssertTrue(
@@ -831,32 +777,25 @@ static void testClientTcpReadQueuesTunWrite(void) {
   testAssertTrue(clientFixtureDrainWriteQueue(&fixture, false, 50), "reactor should flush queued tun payload");
 
   testAssertTrue(
-      recv(tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (ssize_t)strlen(payload),
+      recv(fixture.tunPair[1], out, sizeof(out), MSG_DONTWAIT) == (ssize_t)strlen(payload),
       "tun peer should receive payload");
   testAssertTrue(memcmp(out, payload, strlen(payload)) == 0, "tun payload should match");
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientHeartbeatStillSendsWhenInboundRecentlyActive(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   char wire[ProtocolFrameSize];
   long wireNbytes;
   static const char payload[] = "recv-only";
   ioEvent_t event;
 
   memset(key, 0x25, sizeof(key));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -864,7 +803,7 @@ static void testClientHeartbeatStillSendsWhenInboundRecentlyActive(void) {
 
   fakeNowMs = 5500;
   wireNbytes = writeSecureWire(key, protocolMsgData, payload, (long)(sizeof(payload) - 1), wire);
-  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(write(fixture.tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(clientFixtureWaitEventOfKind(&fixture, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
   event = ioEventTcpRead;
   testAssertTrue(
@@ -875,24 +814,17 @@ static void testClientHeartbeatStillSendsWhenInboundRecentlyActive(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   char fill[IoPollerQueueCapacity];
 
   memset(key, 0x24, sizeof(key));
   memset(fill, 'h', sizeof(fill));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -909,18 +841,12 @@ static void testClientHeartbeatPendingSetOnlyWhenReqEnqueueSucceeds(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientHeartbeatBlockedReqEventuallyTracksPendingForAck(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   char fill[IoPollerQueueCapacity];
   char wire[ProtocolFrameSize];
   long wireNbytes;
@@ -928,8 +854,7 @@ static void testClientHeartbeatBlockedReqEventuallyTracksPendingForAck(void) {
 
   memset(key, 0x26, sizeof(key));
   memset(fill, 'i', sizeof(fill));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   fakeNowMs = 0;
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
@@ -960,7 +885,7 @@ static void testClientHeartbeatBlockedReqEventuallyTracksPendingForAck(void) {
   testAssertTrue(client->heartbeatAckPending, "client should track pending heartbeat after timeout retry queues request");
 
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatAck, NULL, 0, wire);
-  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(write(fixture.tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(clientFixtureWaitEventOfKind(&fixture, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
   event = ioEventTcpRead;
   testAssertTrue(
@@ -970,30 +895,23 @@ static void testClientHeartbeatBlockedReqEventuallyTracksPendingForAck(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 static void testClientRejectsInboundHeartbeatRequest(void) {
   unsigned char key[ProtocolPskSize];
   clientFixture_t fixture;
   client_t *client = &fixture.client;
-  int tunPair[2];
-  int tcpPair[2];
   char wire[ProtocolFrameSize];
   long wireNbytes;
   ioEvent_t event;
 
   memset(key, 0x23, sizeof(key));
-  setupPairs(tunPair, tcpPair);
-  testAssertTrue(clientFixtureSetup(&fixture, tunPair[0], tcpPair[0], heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
+  testAssertTrue(clientFixtureSetup(&fixture, heartbeatCfg.intervalMs, heartbeatCfg.timeoutMs) == 0, "setup split pollers should succeed");
   session_t *session = sessionCreate(false, &heartbeatCfg, fakeNow, NULL);
   testAssertTrue(session != NULL, "session create should succeed");
   wireClientSession(session, client);
   wireNbytes = writeSecureWire(key, protocolMsgHeartbeatReq, NULL, 0, wire);
-  testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
+  testAssertTrue(write(fixture.tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(clientFixtureWaitEventOfKind(&fixture, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
   event = ioEventTcpRead;
   testLogExpectedErrorMarker("reject-inbound-heartbeat-request", "BEGIN");
@@ -1004,10 +922,6 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
-  close(tunPair[0]);
-  close(tunPair[1]);
-  close(tcpPair[0]);
-  close(tcpPair[1]);
 }
 
 void runClientTests(void) {
