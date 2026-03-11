@@ -125,7 +125,10 @@ bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, lo
 bool serverRouteTunIngressPacket(server_t *server, const void *packet, long packetNbytes);
 bool serverRouteTcpIngressPacket(server_t *server, activeConn_t *sourceConn, const void *packet, long packetNbytes);
 
-int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadlineMs);
+int serverCreatePreAuthConn(
+    server_t *server,
+    int preAuthSlot,
+    long long authDeadlineMs);
 bool serverRemovePreAuthConn(server_t *server, int preAuthSlot);
 preAuthConn_t *serverPreAuthAt(server_t *server, int preAuthSlot);
 bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot);

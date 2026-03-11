@@ -114,7 +114,7 @@ static int clientFixtureSetup(
   fixture->client.tunPoller.poller.reactor = NULL;
   fixture->client.tunPoller.poller.fd = tunFd;
   fixture->client.tunPoller.poller.events = EPOLLRDHUP;
-  fixture->client.tunPoller.poller.kind = ioPollerTun;
+  fixture->client.tunPoller.poller.kind = ioPollerKindTun;
   if (!ioReactorAddPoller(
           &fixture->client.reactor,
           &fixture->client.tunPoller.poller,
@@ -129,7 +129,7 @@ static int clientFixtureSetup(
   fixture->client.tcpPoller.poller.reactor = NULL;
   fixture->client.tcpPoller.poller.fd = tcpFd;
   fixture->client.tcpPoller.poller.events = EPOLLRDHUP;
-  fixture->client.tcpPoller.poller.kind = ioPollerTcp;
+  fixture->client.tcpPoller.poller.kind = ioPollerKindTcp;
   if (!ioReactorAddPoller(
           &fixture->client.reactor,
           &fixture->client.tcpPoller.poller,
@@ -279,12 +279,12 @@ static int clientRunLoopOnFds(
   }
 
   client.tunPoller.poller.fd = tunFd;
-  client.tunPoller.poller.kind = ioPollerTun;
+  client.tunPoller.poller.kind = ioPollerKindTun;
   client.tunPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   client.tunPoller.poller.readEnabled = true;
 
   client.tcpPoller.poller.fd = tcpFd;
-  client.tcpPoller.poller.kind = ioPollerTcp;
+  client.tcpPoller.poller.kind = ioPollerKindTcp;
   client.tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   client.tcpPoller.poller.readEnabled = true;
 

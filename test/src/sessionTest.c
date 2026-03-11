@@ -44,9 +44,9 @@ static ioPollerAction_t runtimeEventFixtureOnReadable(void *ctx, ioReactor_t *re
   if (fixture == NULL || poller == NULL) {
     return ioPollerContinue;
   }
-  if (poller->kind == ioPollerTun) {
+  if (poller->kind == ioPollerKindTun) {
     runtimeEventFixtureCaptureEvent(fixture, ioEventTunRead);
-  } else if (poller->kind == ioPollerTcp) {
+  } else if (poller->kind == ioPollerKindTcp) {
     runtimeEventFixtureCaptureEvent(fixture, ioEventTcpRead);
   }
   return ioPollerContinue;
@@ -58,9 +58,9 @@ static ioPollerAction_t runtimeEventFixtureOnLowWatermark(void *ctx, ioPoller_t 
   if (fixture == NULL || poller == NULL) {
     return ioPollerContinue;
   }
-  if (poller->kind == ioPollerTun) {
+  if (poller->kind == ioPollerKindTun) {
     runtimeEventFixtureCaptureEvent(fixture, ioEventTunWrite);
-  } else if (poller->kind == ioPollerTcp) {
+  } else if (poller->kind == ioPollerKindTcp) {
     runtimeEventFixtureCaptureEvent(fixture, ioEventTcpWrite);
   }
   return ioPollerContinue;
@@ -87,9 +87,9 @@ static ioPollerAction_t sessionPollerFixtureOnReadable(void *ctx, ioReactor_t *r
   if (fixture == NULL || poller == NULL) {
     return ioPollerContinue;
   }
-  if (poller->kind == ioPollerTun) {
+  if (poller->kind == ioPollerKindTun) {
     sessionPollerFixtureCaptureEvent(fixture, ioEventTunRead);
-  } else if (poller->kind == ioPollerTcp) {
+  } else if (poller->kind == ioPollerKindTcp) {
     sessionPollerFixtureCaptureEvent(fixture, ioEventTcpRead);
   }
   return ioPollerContinue;
@@ -101,9 +101,9 @@ static ioPollerAction_t sessionPollerFixtureOnLowWatermark(void *ctx, ioPoller_t
   if (fixture == NULL || poller == NULL) {
     return ioPollerContinue;
   }
-  if (poller->kind == ioPollerTun) {
+  if (poller->kind == ioPollerKindTun) {
     sessionPollerFixtureCaptureEvent(fixture, ioEventTunWrite);
-  } else if (poller->kind == ioPollerTcp) {
+  } else if (poller->kind == ioPollerKindTcp) {
     sessionPollerFixtureCaptureEvent(fixture, ioEventTcpWrite);
   }
   return ioPollerContinue;
@@ -130,7 +130,7 @@ static int setupSessionPollerFixture(sessionPollerFixture_t *poller, int tunFd, 
   poller->tunPoller.poller.reactor = NULL;
   poller->tunPoller.poller.fd = tunFd;
   poller->tunPoller.poller.events = EPOLLRDHUP;
-  poller->tunPoller.poller.kind = ioPollerTun;
+  poller->tunPoller.poller.kind = ioPollerKindTun;
   if (!ioReactorAddPoller(&poller->reactor, &poller->tunPoller.poller, &sessionPollerFixtureCallbacks, poller, true)) {
     ioReactorDispose(&poller->reactor);
     return -1;
@@ -140,7 +140,7 @@ static int setupSessionPollerFixture(sessionPollerFixture_t *poller, int tunFd, 
   poller->tcpPoller.poller.reactor = NULL;
   poller->tcpPoller.poller.fd = tcpFd;
   poller->tcpPoller.poller.events = EPOLLRDHUP;
-  poller->tcpPoller.poller.kind = ioPollerTcp;
+  poller->tcpPoller.poller.kind = ioPollerKindTcp;
   if (!ioReactorAddPoller(&poller->reactor, &poller->tcpPoller.poller, &sessionPollerFixtureCallbacks, poller, true)) {
     ioReactorDispose(&poller->reactor);
     return -1;

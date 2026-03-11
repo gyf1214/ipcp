@@ -16,14 +16,14 @@
 #define ioContainerOf(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
 static ioTcpPoller_t *tcpFromPoller(ioPoller_t *poller) {
-  if (poller == NULL || poller->kind != ioPollerTcp) {
+  if (poller == NULL || poller->kind != ioPollerKindTcp) {
     return NULL;
   }
   return ioContainerOf(poller, ioTcpPoller_t, poller);
 }
 
 static ioTunPoller_t *tunFromPoller(ioPoller_t *poller) {
-  if (poller == NULL || poller->kind != ioPollerTun) {
+  if (poller == NULL || poller->kind != ioPollerKindTun) {
     return NULL;
   }
   return ioContainerOf(poller, ioTunPoller_t, poller);
@@ -731,7 +731,7 @@ int ioTcpConnect(const char *remoteIP, int port) {
   return connFd;
 }
 
-bool ioListenPollerListen(ioListenPoller_t *poller, const char *listenIP, int port) {
+bool ioPollerListen(ioListenPoller_t *poller, const char *listenIP, int port) {
   int listenFd;
 
   if (poller == NULL) {
@@ -751,12 +751,12 @@ bool ioListenPollerListen(ioListenPoller_t *poller, const char *listenIP, int po
   poller->poller.reactor = NULL;
   poller->poller.fd = listenFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
-  poller->poller.kind = ioPollerListen;
+  poller->poller.kind = ioPollerKindListen;
   poller->poller.readEnabled = true;
   return true;
 }
 
-ioStatus_t ioListenPollerAcceptNonBlocking(
+ioStatus_t ioPollerAccept(
     ioListenPoller_t *listenPoller,
     ioTcpPoller_t *outTcpPoller,
     char *peerIp,
@@ -778,12 +778,12 @@ ioStatus_t ioListenPollerAcceptNonBlocking(
   outTcpPoller->poller.reactor = NULL;
   outTcpPoller->poller.fd = connFd;
   outTcpPoller->poller.events = EPOLLIN | EPOLLRDHUP;
-  outTcpPoller->poller.kind = ioPollerTcp;
+  outTcpPoller->poller.kind = ioPollerKindTcp;
   outTcpPoller->poller.readEnabled = true;
   return ioStatusOk;
 }
 
-bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port) {
+bool ioPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port) {
   int connFd;
 
   if (poller == NULL) {
@@ -803,7 +803,7 @@ bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port) {
   poller->poller.reactor = NULL;
   poller->poller.fd = connFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
-  poller->poller.kind = ioPollerTcp;
+  poller->poller.kind = ioPollerKindTcp;
   poller->poller.readEnabled = true;
   return true;
 }
@@ -824,7 +824,7 @@ bool ioTcpPollerHandoff(
   if (src->poller.reactor == NULL
       || src->poller.reactor->epollFd < 0
       || src->poller.fd < 0
-      || src->poller.kind != ioPollerTcp) {
+      || src->poller.kind != ioPollerKindTcp) {
     return false;
   }
   if (dst->poller.reactor != NULL || dst->poller.fd > 0 || dst->outNbytes != 0 || dst->outOffset != 0) {
@@ -834,7 +834,7 @@ bool ioTcpPollerHandoff(
   dstBefore = *dst;
   srcBefore = *src;
   *dst = *src;
-  dst->poller.kind = ioPollerTcp;
+  dst->poller.kind = ioPollerKindTcp;
   dst->poller.callbacks = callbacks;
   dst->poller.ctx = ctx;
 
@@ -855,7 +855,7 @@ bool ioTcpPollerHandoff(
 
   memset(src, 0, sizeof(*src));
   src->poller.fd = -1;
-  src->poller.kind = ioPollerTcp;
+  src->poller.kind = ioPollerKindTcp;
   return true;
 }
 
@@ -869,7 +869,7 @@ void ioTcpPollerDispose(ioTcpPoller_t *poller) {
   memset(poller->outBuf, 0, sizeof(poller->outBuf));
 }
 
-bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode) {
+bool ioPollerOpenTun(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode) {
   int tunFd;
 
   if (poller == NULL) {
@@ -889,7 +889,7 @@ bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode)
   poller->poller.reactor = NULL;
   poller->poller.fd = tunFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
-  poller->poller.kind = ioPollerTun;
+  poller->poller.kind = ioPollerKindTun;
   poller->poller.readEnabled = true;
   return true;
 }
@@ -921,7 +921,7 @@ int ioTcpPollerInit(ioTcpPoller_t *poller, ioReactor_t *reactor, int tcpFd) {
   poller->poller.reactor = reactor;
   poller->poller.fd = tcpFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
-  poller->poller.kind = ioPollerTcp;
+  poller->poller.kind = ioPollerKindTcp;
   poller->poller.readEnabled = true;
   poller->outOffset = 0;
   poller->outNbytes = 0;
@@ -946,7 +946,7 @@ int ioTunPollerInit(ioTunPoller_t *poller, ioReactor_t *reactor, int tunFd) {
   poller->poller.reactor = reactor;
   poller->poller.fd = tunFd;
   poller->poller.events = EPOLLIN | EPOLLRDHUP;
-  poller->poller.kind = ioPollerTun;
+  poller->poller.kind = ioPollerKindTun;
   poller->poller.readEnabled = true;
   poller->readPos = 0;
   poller->writePos = 0;

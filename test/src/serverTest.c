@@ -934,12 +934,17 @@ static void testServerCreateAndRemovePreAuthConnResetsState(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 84, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
 
-  slot = serverCreatePreAuthConn(&server, tcpPair[0], 12345);
+  memset(&server.preAuthConns[0].tcpPoller, 0, sizeof(server.preAuthConns[0].tcpPoller));
+  server.preAuthConns[0].tcpPoller.poller.fd = tcpPair[0];
+  server.preAuthConns[0].tcpPoller.poller.kind = ioPollerKindTcp;
+  server.preAuthConns[0].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  server.preAuthConns[0].tcpPoller.poller.readEnabled = true;
+  slot = serverCreatePreAuthConn(&server, 0, 12345);
   testAssertTrue(slot >= 0, "pre-auth slot should be allocated");
   conn = serverPreAuthAt(&server, slot);
   testAssertTrue(conn != NULL, "pre-auth connection should be retrievable");
   testAssertTrue(conn->tcpPoller.poller.fd == tcpPair[0], "pre-auth create should initialize embedded tcp poller fd");
-  testAssertTrue(conn->tcpPoller.poller.kind == ioPollerTcp, "pre-auth create should mark embedded poller as tcp");
+  testAssertTrue(conn->tcpPoller.poller.kind == ioPollerKindTcp, "pre-auth create should mark embedded poller as tcp");
   testAssertTrue(conn->tcpPoller.poller.ctx == conn, "pre-auth create should attach pre-auth callback ctx");
   conn->decoder.frame.nbytes = 99;
   conn->decoder.offset = 11;
@@ -990,7 +995,12 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, tcpPair) == 0, "tcp socketpair should be created");
   testAssertTrue(serverInit(&server, tunPair[0], 85, 2, 2, &testHeartbeatCfg, NULL, NULL), "server init should succeed");
 
-  slot = serverCreatePreAuthConn(&server, tcpPair[0], 23456);
+  memset(&server.preAuthConns[0].tcpPoller, 0, sizeof(server.preAuthConns[0].tcpPoller));
+  server.preAuthConns[0].tcpPoller.poller.fd = tcpPair[0];
+  server.preAuthConns[0].tcpPoller.poller.kind = ioPollerKindTcp;
+  server.preAuthConns[0].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  server.preAuthConns[0].tcpPoller.poller.readEnabled = true;
+  slot = serverCreatePreAuthConn(&server, 0, 23456);
   testAssertTrue(slot >= 0, "pre-auth slot should be allocated");
   conn = serverPreAuthAt(&server, slot);
   testAssertTrue(conn != NULL, "pre-auth connection should be retrievable");
@@ -998,10 +1008,6 @@ static void testServerPromoteToActiveSlotAndApplyCarryState(void) {
   memcpy(conn->resolvedKey, testKey, sizeof(conn->resolvedKey));
   memcpy(conn->claim, claim2, sizeof(claim2));
   conn->claimNbytes = (long)sizeof(claim2);
-  conn->tcpPoller.poller.fd = tcpPair[0];
-  conn->tcpPoller.poller.kind = ioPollerTcp;
-  conn->tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
-  conn->tcpPoller.poller.readEnabled = true;
   protocolDecoderInit(&conn->decoder);
   conn->decoder.hasFrame = 1;
   conn->decoder.offset = 7;

@@ -585,11 +585,11 @@ int clientServeRemote(
     errf("setup reactor failed: %s", strerror(errno));
     goto cleanup;
   }
-  if (!ioTunPollerOpen(&client.tunPoller, ifName, ifMode)) {
+  if (!ioPollerOpenTun(&client.tunPoller, ifName, ifMode)) {
     errf("setup tun poller failed: %s", strerror(errno));
     goto cleanup;
   }
-  if (!ioTcpPollerConnect(&client.tcpPoller, remoteIP, port)) {
+  if (!ioPollerConnect(&client.tcpPoller, remoteIP, port)) {
     errf("setup tcp poller failed: %s", strerror(errno));
     goto cleanup;
   }

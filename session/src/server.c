@@ -45,6 +45,19 @@ static bool preAuthSlotIndexValid(const server_t *server, int slot) {
   return server != NULL && server->preAuthConns != NULL && slot >= 0 && slot < server->maxPreAuthSessions;
 }
 
+static int serverFindFreePreAuthSlot(const server_t *server) {
+  int slot;
+  if (server == NULL || server->preAuthConns == NULL) {
+    return -1;
+  }
+  for (slot = 0; slot < server->maxPreAuthSessions; slot++) {
+    if (!server->preAuthConns[slot].active) {
+      return slot;
+    }
+  }
+  return -1;
+}
+
 static int serverActiveSlotFromConn(const server_t *server, const activeConn_t *conn) {
   ptrdiff_t slot;
   if (server == NULL || server->activeConns == NULL || conn == NULL) {
@@ -123,7 +136,7 @@ bool serverInit(
 
   server->tunPoller.poller.reactor = NULL;
   server->tunPoller.poller.fd = tunFd;
-  server->tunPoller.poller.kind = ioPollerTun;
+  server->tunPoller.poller.kind = ioPollerKindTun;
   server->reactor.epollFd = -1;
   server->tunPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   server->tunPoller.poller.readEnabled = true;
@@ -228,7 +241,7 @@ int serverAddClient(
   server->activeConns[activeSlot].tcpPoller.poller.reactor = server->reactor.epollFd >= 0 ? &server->reactor : NULL;
   server->activeConns[activeSlot].tcpPoller.poller.fd = connFd;
   server->activeConns[activeSlot].tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
-  server->activeConns[activeSlot].tcpPoller.poller.kind = ioPollerTcp;
+  server->activeConns[activeSlot].tcpPoller.poller.kind = ioPollerKindTcp;
   server->activeConns[activeSlot].tcpPoller.poller.callbacks = NULL;
   server->activeConns[activeSlot].tcpPoller.poller.ctx = &server->activeConns[activeSlot];
   server->activeConns[activeSlot].tcpPoller.poller.readEnabled = true;
@@ -717,38 +730,37 @@ bool serverHasActiveClaim(const server_t *server, const unsigned char *claim, lo
   return false;
 }
 
-int serverCreatePreAuthConn(server_t *server, int connFd, long long authDeadlineMs) {
-  int i;
+int serverCreatePreAuthConn(
+    server_t *server,
+    int preAuthSlot,
+    long long authDeadlineMs) {
+  ioTcpPoller_t pollerCopy;
+  preAuthConn_t *conn;
 
-  if (server == NULL || server->preAuthConns == NULL || connFd < 0) {
+  if (server == NULL
+      || server->preAuthConns == NULL
+      || !preAuthSlotIndexValid(server, preAuthSlot)) {
     return -1;
   }
-  if (server->preAuthCount >= server->maxPreAuthSessions) {
+  conn = &server->preAuthConns[preAuthSlot];
+  if (conn->active
+      || conn->tcpPoller.poller.fd < 0
+      || conn->tcpPoller.poller.kind != ioPollerKindTcp
+      || server->preAuthCount >= server->maxPreAuthSessions) {
     return -1;
   }
-
-  for (i = 0; i < server->maxPreAuthSessions; i++) {
-    preAuthConn_t *conn = &server->preAuthConns[i];
-    if (conn->active) {
-      continue;
-    }
-    memset(conn, 0, sizeof(*conn));
-    conn->owner = server;
-    conn->tcpPoller.poller.fd = connFd;
-    conn->tcpPoller.poller.kind = ioPollerTcp;
-    conn->tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
-    conn->tcpPoller.poller.callbacks = NULL;
-    conn->tcpPoller.poller.ctx = conn;
-    conn->tcpPoller.poller.readEnabled = true;
-    conn->authDeadlineMs = authDeadlineMs;
-    conn->resolvedActiveSlot = -1;
-    protocolDecoderInit(&conn->decoder);
-    conn->active = true;
-    server->preAuthCount++;
-    return i;
-  }
-
-  return -1;
+  pollerCopy = conn->tcpPoller;
+  memset(conn, 0, sizeof(*conn));
+  conn->owner = server;
+  conn->tcpPoller = pollerCopy;
+  conn->tcpPoller.poller.kind = ioPollerKindTcp;
+  conn->tcpPoller.poller.ctx = conn;
+  conn->authDeadlineMs = authDeadlineMs;
+  conn->resolvedActiveSlot = -1;
+  protocolDecoderInit(&conn->decoder);
+  conn->active = true;
+  server->preAuthCount++;
+  return preAuthSlot;
 }
 
 bool serverRemovePreAuthConn(server_t *server, int preAuthSlot) {
@@ -831,7 +843,7 @@ bool serverPromoteToActiveSlot(server_t *server, int preAuthSlot) {
   server->activeConns[activeSlot].tcpPoller.poller.reactor = NULL;
   server->activeConns[activeSlot].tcpPoller.poller.fd = -1;
   server->activeConns[activeSlot].tcpPoller.poller.events = 0;
-  server->activeConns[activeSlot].tcpPoller.poller.kind = ioPollerTcp;
+  server->activeConns[activeSlot].tcpPoller.poller.kind = ioPollerKindTcp;
   server->activeConns[activeSlot].tcpPoller.poller.callbacks = NULL;
   server->activeConns[activeSlot].tcpPoller.poller.ctx = &server->activeConns[activeSlot];
   server->activeConns[activeSlot].tcpPoller.poller.readEnabled = false;
@@ -1571,43 +1583,59 @@ static ioPollerAction_t serverOnListenReadable(void *ctx, ioReactor_t *reactor, 
   server = runtime->server;
 
   while (1) {
-    ioTcpPoller_t acceptedPoller;
     char clientIp[256];
     int clientPort = 0;
     ioStatus_t status;
     long long nowMs;
     int preAuthSlot;
+    preAuthConn_t *conn;
 
-    memset(&acceptedPoller, 0, sizeof(acceptedPoller));
-    acceptedPoller.poller.fd = -1;
-    status = ioListenPollerAcceptNonBlocking(
-        listenPoller, &acceptedPoller, clientIp, sizeof(clientIp), &clientPort);
+    nowMs = serverNowMs(server);
+    if (nowMs < 0) {
+      return ioPollerStop;
+    }
+    preAuthSlot = serverFindFreePreAuthSlot(server);
+    if (preAuthSlot < 0) {
+      break;
+    }
+    conn = &server->preAuthConns[preAuthSlot];
+    memset(&conn->tcpPoller, 0, sizeof(conn->tcpPoller));
+    conn->tcpPoller.poller.fd = -1;
+
+    status = ioPollerAccept(
+        listenPoller, &conn->tcpPoller, clientIp, sizeof(clientIp), &clientPort);
     if (status == ioStatusWouldBlock) {
       break;
     }
     if (status != ioStatusOk) {
+      if (conn->tcpPoller.poller.fd >= 0) {
+        ioTcpPollerDispose(&conn->tcpPoller);
+      }
+      memset(&conn->tcpPoller, 0, sizeof(conn->tcpPoller));
+      conn->tcpPoller.poller.fd = -1;
       return ioPollerStop;
     }
-    nowMs = serverNowMs(server);
-    if (nowMs < 0) {
-      ioTcpPollerDispose(&acceptedPoller);
-      return ioPollerStop;
-    }
-    preAuthSlot = serverCreatePreAuthConn(server, acceptedPoller.poller.fd, nowMs + server->authTimeoutMs);
-    if (preAuthSlot < 0) {
-      ioTcpPollerDispose(&acceptedPoller);
+    if (conn->tcpPoller.poller.fd < 0) {
+      memset(&conn->tcpPoller, 0, sizeof(conn->tcpPoller));
+      conn->tcpPoller.poller.fd = -1;
       continue;
     }
-    acceptedPoller.poller.fd = -1;
-    server->preAuthConns[preAuthSlot].tcpPoller.poller.reactor = &server->reactor;
+    conn->tcpPoller.poller.ctx = conn;
     if (!ioReactorAddPoller(
             &server->reactor,
-            &server->preAuthConns[preAuthSlot].tcpPoller.poller,
+            &conn->tcpPoller.poller,
             &serverPreAuthCallbacks,
-            &server->preAuthConns[preAuthSlot],
+            conn,
             true)) {
-      ioTcpPollerDispose(&server->preAuthConns[preAuthSlot].tcpPoller);
-      (void)serverRemovePreAuthConn(server, preAuthSlot);
+      ioTcpPollerDispose(&conn->tcpPoller);
+      memset(&conn->tcpPoller, 0, sizeof(conn->tcpPoller));
+      conn->tcpPoller.poller.fd = -1;
+      return ioPollerStop;
+    }
+    if (serverCreatePreAuthConn(server, preAuthSlot, nowMs + server->authTimeoutMs) < 0) {
+      ioTcpPollerDispose(&conn->tcpPoller);
+      memset(&conn->tcpPoller, 0, sizeof(conn->tcpPoller));
+      conn->tcpPoller.poller.fd = -1;
       return ioPollerStop;
     }
   }
@@ -1616,7 +1644,7 @@ static ioPollerAction_t serverOnListenReadable(void *ctx, ioReactor_t *reactor, 
 }
 
 static ioPollerAction_t serverOnListenReadableAdapter(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
-  if (poller == NULL || poller->kind != ioPollerListen) {
+  if (poller == NULL || poller->kind != ioPollerKindListen) {
     return ioPollerStop;
   }
   return serverOnListenReadable(ctx, reactor, (ioListenPoller_t *)poller);
@@ -1830,7 +1858,7 @@ int serverServeMultiClient(
   memset(&listenPoller, 0, sizeof(listenPoller));
   listenPoller.poller.reactor = NULL;
   listenPoller.poller.fd = listenFd;
-  listenPoller.poller.kind = ioPollerListen;
+  listenPoller.poller.kind = ioPollerKindListen;
   listenPoller.poller.events = EPOLLIN | EPOLLRDHUP;
   listenPoller.poller.readEnabled = true;
 

@@ -49,9 +49,9 @@ typedef enum {
 } ioReactorStepResult_t;
 
 typedef enum {
-  ioPollerListen = 0,
-  ioPollerTcp,
-  ioPollerTun,
+  ioPollerKindListen = 0,
+  ioPollerKindTcp,
+  ioPollerKindTun,
 } ioPollerKind_t;
 
 typedef ioPollerAction_t (*ioClosedFn_t)(void *ctx, ioPoller_t *poller);
@@ -128,15 +128,15 @@ int ioTcpListen(const char *listenIP, int port);
 int ioTcpAccept(int listenFd, char *peerIp, long peerIpSize, int *peerPort);
 ioStatus_t ioTcpAcceptNonBlocking(int listenFd, int *outConnFd, char *peerIp, long peerIpSize, int *peerPort);
 int ioTcpConnect(const char *remoteIP, int port);
-bool ioListenPollerListen(ioListenPoller_t *poller, const char *listenIP, int port);
-ioStatus_t ioListenPollerAcceptNonBlocking(
+bool ioPollerListen(ioListenPoller_t *poller, const char *listenIP, int port);
+ioStatus_t ioPollerAccept(
     ioListenPoller_t *listenPoller,
     ioTcpPoller_t *outTcpPoller,
     char *peerIp,
     long peerIpSize,
     int *peerPort);
-bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port);
-bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode);
+bool ioPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port);
+bool ioPollerOpenTun(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode);
 bool ioTcpPollerHandoff(
     ioTcpPoller_t *dst,
     ioTcpPoller_t *src,
