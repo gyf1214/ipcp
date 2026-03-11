@@ -9,3 +9,8 @@ static inline void testAssertTrue(int cond, const char *msg) {
     exit(1);
   }
 }
+
+static inline void testLogExpectedErrorMarker(const char *label, const char *phase) {
+  fprintf(stderr, "[TEST][EXPECTED-ERROR][%s] %s\n", label, phase);
+  fflush(stderr);
+}

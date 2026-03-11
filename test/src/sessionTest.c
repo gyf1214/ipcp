@@ -160,30 +160,6 @@ static sessionStepResult_t runSessionStep(session_t *session, sessionFixture_t *
   return sessionStep(session, &poller->tcpPoller, &poller->tunPoller, event, key);
 }
 
-static sessionStepResult_t runSessionStepWithSuppressedStderr(
-    session_t *session,
-    sessionFixture_t *poller,
-    ioEvent_t event,
-    const unsigned char key[ProtocolPskSize]) {
-  int savedStderr = dup(STDERR_FILENO);
-  int nullFd = -1;
-  sessionStepResult_t result;
-  testAssertTrue(savedStderr >= 0, "dup stderr should succeed");
-
-  fflush(stderr);
-  nullFd = open("/dev/null", O_WRONLY);
-  testAssertTrue(nullFd >= 0, "open /dev/null should succeed");
-  testAssertTrue(dup2(nullFd, STDERR_FILENO) >= 0, "redirect stderr should succeed");
-  close(nullFd);
-
-  result = runSessionStep(session, poller, event, key);
-
-  fflush(stderr);
-  testAssertTrue(dup2(savedStderr, STDERR_FILENO) >= 0, "restore stderr should succeed");
-  close(savedStderr);
-  return result;
-}
-
 static void assertSessionStepBehaviorWhenRuntimeMissing(bool isServer, bool expectAbort) {
   sessionFixture_t poller;
   int tunPair[2];
@@ -200,7 +176,10 @@ static void assertSessionStepBehaviorWhenRuntimeMissing(bool isServer, bool expe
   if (pid == 0) {
     session_t *session = sessionCreate(isServer, &defaultHeartbeatCfg, fakeNow, NULL);
     testAssertTrue(session != NULL, "session create should succeed");
-    (void)runSessionStepWithSuppressedStderr(session, &poller, ioEventTimeout, key);
+    if (expectAbort) {
+      testLogExpectedErrorMarker("missing-runtime-assert", "BEGIN");
+    }
+    (void)runSessionStep(session, &poller, ioEventTimeout, key);
     sessionDestroy(session);
     _exit(0);
   }
@@ -209,6 +188,7 @@ static void assertSessionStepBehaviorWhenRuntimeMissing(bool isServer, bool expe
   if (expectAbort) {
     testAssertTrue(WIFSIGNALED(status), "child should terminate via signal");
     testAssertTrue(WTERMSIG(status) == SIGABRT, "child should abort on missing runtime");
+    testLogExpectedErrorMarker("missing-runtime-assert", "END");
   } else {
     testAssertTrue(WIFEXITED(status), "child should exit cleanly");
     testAssertTrue(WEXITSTATUS(status) == 0, "child should return success without runtime assertion");

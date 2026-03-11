@@ -202,30 +202,6 @@ static sessionStepResult_t runSessionStep(session_t *session, clientFixture_t *f
   return sessionStep(session, &fixture->client.tcpPoller, &fixture->client.tunPoller, event, key);
 }
 
-static sessionStepResult_t runSessionStepWithSuppressedStderr(
-    session_t *session,
-    clientFixture_t *fixture,
-    ioEvent_t event,
-    const unsigned char key[ProtocolPskSize]) {
-  int savedStderr = dup(STDERR_FILENO);
-  int nullFd = -1;
-  sessionStepResult_t result;
-  testAssertTrue(savedStderr >= 0, "dup stderr should succeed");
-
-  fflush(stderr);
-  nullFd = open("/dev/null", O_WRONLY);
-  testAssertTrue(nullFd >= 0, "open /dev/null should succeed");
-  testAssertTrue(dup2(nullFd, STDERR_FILENO) >= 0, "redirect stderr should succeed");
-  close(nullFd);
-
-  result = runSessionStep(session, fixture, event, key);
-
-  fflush(stderr);
-  testAssertTrue(dup2(savedStderr, STDERR_FILENO) >= 0, "restore stderr should succeed");
-  close(savedStderr);
-  return result;
-}
-
 static void wireClientSession(session_t *session, client_t *client) {
   sessionAttachClient(session, client);
 }
@@ -709,14 +685,16 @@ static void testClientHeartbeatTimeoutUsesConfiguredTimeout(void) {
   testAssertTrue(client->heartbeatAckPending, "heartbeat request should be pending");
 
   fakeNowMs = 7999;
+  testLogExpectedErrorMarker("heartbeat-timeout-threshold", "BEGIN");
   testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &fixture, ioEventTimeout, key) == sessionStepContinue,
+      runSessionStep(session, &fixture, ioEventTimeout, key) == sessionStepContinue,
       "client should continue before configured timeout");
 
   fakeNowMs = 8000;
   testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &fixture, ioEventTimeout, key) == sessionStepStop,
+      runSessionStep(session, &fixture, ioEventTimeout, key) == sessionStepStop,
       "client should stop at configured timeout");
+  testLogExpectedErrorMarker("heartbeat-timeout-threshold", "END");
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
@@ -1018,9 +996,11 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
   testAssertTrue(write(tcpPair[1], wire, (size_t)wireNbytes) == wireNbytes, "tcp write should succeed");
   testAssertTrue(clientFixtureWaitEventOfKind(&fixture, 100, ioEventTcpRead), "reactor callback should capture tcp readable event");
   event = ioEventTcpRead;
+  testLogExpectedErrorMarker("reject-inbound-heartbeat-request", "BEGIN");
   testAssertTrue(
-      runSessionStepWithSuppressedStderr(session, &fixture, event, key) == sessionStepStop,
+      runSessionStep(session, &fixture, event, key) == sessionStepStop,
       "client should stop on inbound heartbeat request");
+  testLogExpectedErrorMarker("reject-inbound-heartbeat-request", "END");
 
   sessionDestroy(session);
   clientFixtureTeardown(&fixture);
