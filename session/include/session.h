@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 
+#include "io.h"
 #include "protocol.h"
 
 #define SessionClaimSize 16
@@ -44,8 +45,10 @@ typedef struct {
 } sessionServerConfig_t;
 
 typedef struct {
-  int tunFd;
-  int connFd;
+  const char *ifName;
+  ioIfMode_t ifMode;
+  const char *remoteIP;
+  int port;
   const unsigned char *claim;
   long claimNbytes;
   const unsigned char *key;

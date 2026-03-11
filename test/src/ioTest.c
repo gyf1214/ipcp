@@ -89,6 +89,85 @@ static void testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty(void) {
   close(listenFd);
 }
 
+static void testIoListenPollerListenRejectNullPoller(void) {
+  testAssertTrue(!ioListenPollerListen(NULL, "127.0.0.1", 46112), "listen poller listen should reject null poller");
+}
+
+static void testIoListenPollerAcceptNonBlockingRejectInvalidArgs(void) {
+  ioListenPoller_t listenPoller;
+  ioTcpPoller_t tcpPoller;
+  ioStatus_t status;
+
+  memset(&listenPoller, 0, sizeof(listenPoller));
+  memset(&tcpPoller, 0, sizeof(tcpPoller));
+
+  status = ioListenPollerAcceptNonBlocking(NULL, &tcpPoller, NULL, 0, NULL);
+  testAssertTrue(status == ioStatusError, "accept non-blocking should reject null listen poller");
+  status = ioListenPollerAcceptNonBlocking(&listenPoller, NULL, NULL, 0, NULL);
+  testAssertTrue(status == ioStatusError, "accept non-blocking should reject null output poller");
+
+  listenPoller.poller.fd = -1;
+  status = ioListenPollerAcceptNonBlocking(&listenPoller, &tcpPoller, NULL, 0, NULL);
+  testAssertTrue(status == ioStatusError, "accept non-blocking should reject negative listen fd");
+}
+
+static void testIoTcpPollerConnectRejectInvalidArgs(void) {
+  ioTcpPoller_t poller;
+
+  memset(&poller, 0, sizeof(poller));
+  testAssertTrue(!ioTcpPollerConnect(NULL, "127.0.0.1", 5000), "tcp poller connect should reject null poller");
+  testAssertTrue(!ioTcpPollerConnect(&poller, NULL, 5000), "tcp poller connect should reject null remote ip");
+  testAssertTrue(!ioTcpPollerConnect(&poller, "127.0.0.1", 0), "tcp poller connect should reject invalid remote port");
+  testAssertTrue(
+      !ioTcpPollerConnect(&poller, "not-an-ip", 5000),
+      "tcp poller connect should reject invalid remote ip format");
+}
+
+static void testIoTcpPollerConnectInitializesPoller(void) {
+  ioTcpPoller_t tcpPoller;
+  int listenFd;
+  int acceptedFd = -1;
+  int attempts;
+  ioStatus_t status;
+
+  memset(&tcpPoller, 0, sizeof(tcpPoller));
+  listenFd = ioTcpListen("127.0.0.1", 46113);
+  testAssertTrue(listenFd >= 0, "listen setup should succeed");
+  testAssertTrue(
+      ioTcpPollerConnect(&tcpPoller, "127.0.0.1", 46113),
+      "tcp poller connect should succeed against local listener");
+
+  status = ioTcpAcceptNonBlocking(listenFd, &acceptedFd, NULL, 0, NULL);
+  if (status == ioStatusWouldBlock) {
+    for (attempts = 0; attempts < 10 && status == ioStatusWouldBlock; attempts++) {
+      usleep(1000);
+      status = ioTcpAcceptNonBlocking(listenFd, &acceptedFd, NULL, 0, NULL);
+    }
+  }
+
+  testAssertTrue(status == ioStatusOk, "accept should observe connected client");
+  testAssertTrue(tcpPoller.poller.fd >= 0, "connected tcp poller should carry fd");
+  testAssertTrue(tcpPoller.poller.reactor == NULL, "connected tcp poller should be detached");
+  testAssertTrue(tcpPoller.poller.kind == ioPollerTcp, "connected tcp poller kind should be tcp");
+  testAssertTrue((tcpPoller.poller.events & EPOLLIN) != 0, "connected tcp poller should enable EPOLLIN");
+  testAssertTrue((tcpPoller.poller.events & EPOLLRDHUP) != 0, "connected tcp poller should enable EPOLLRDHUP");
+
+  close(acceptedFd);
+  close(tcpPoller.poller.fd);
+  close(listenFd);
+}
+
+static void testIoTunPollerOpenRejectInvalidArgs(void) {
+  ioTunPoller_t poller;
+
+  memset(&poller, 0, sizeof(poller));
+  testAssertTrue(!ioTunPollerOpen(NULL, "tun0", ioIfModeTun), "tun poller open should reject null poller");
+  testAssertTrue(!ioTunPollerOpen(&poller, NULL, ioIfModeTun), "tun poller open should reject null interface name");
+  testAssertTrue(
+      !ioTunPollerOpen(&poller, "tun0", (ioIfMode_t)99),
+      "tun poller open should reject invalid interface mode");
+}
+
 static void testIoReactorPublicContracts(void) {
   ioReactor_t reactor;
   ioPoller_t poller;
@@ -382,6 +461,11 @@ void runIoTests(void) {
   testIoTcpConnectRejectInvalidIp();
   testIoTcpListenBacklogIsGreaterThanOne();
   testIoTcpAcceptNonBlockingWouldBlockWhenQueueEmpty();
+  testIoListenPollerListenRejectNullPoller();
+  testIoListenPollerAcceptNonBlockingRejectInvalidArgs();
+  testIoTcpPollerConnectRejectInvalidArgs();
+  testIoTcpPollerConnectInitializesPoller();
+  testIoTunPollerOpenRejectInvalidArgs();
   testIoReactorPublicContracts();
   testIoReactorInitAndAddPoller();
   testIoReactorStepTimeoutAndStop();

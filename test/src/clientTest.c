@@ -279,16 +279,88 @@ static void wireClientSession(session_t *session, client_t *client) {
   sessionAttachClient(session, client);
 }
 
-static void testClientServeConnRejectsInvalidArgs(void) {
+static int setNonBlockingFd(int fd) {
+  int flags;
+
+  flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    return -1;
+  }
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    return -1;
+  }
+  return 0;
+}
+
+static int clientRunLoopOnFds(
+    int tunFd,
+    int tcpFd,
+    const unsigned char *claim,
+    long claimNbytes,
+    const unsigned char key[ProtocolPskSize],
+    const sessionHeartbeatConfig_t *cfg) {
+  client_t client;
+  session_t *session = NULL;
+  int result = -1;
+
+  if (tunFd < 0 || tcpFd < 0 || claim == NULL || claimNbytes <= 0 || key == NULL || cfg == NULL) {
+    return -1;
+  }
+  if (setNonBlockingFd(tunFd) != 0 || setNonBlockingFd(tcpFd) != 0) {
+    return -1;
+  }
+
+  memset(&client, 0, sizeof(client));
+  clientResetHeartbeatState(&client, cfg->intervalMs, cfg->timeoutMs, 0);
+  session = sessionCreate(false, cfg, NULL, NULL);
+  if (session == NULL) {
+    return -1;
+  }
+
+  sessionAttachClient(session, &client);
+  client.claim = claim;
+  client.claimNbytes = claimNbytes;
+  client.key = key;
+  client.session = session;
+
+  if (!ioReactorInit(&client.reactor)) {
+    goto cleanup;
+  }
+
+  client.tunPoller.poller.fd = tunFd;
+  client.tunPoller.poller.kind = ioPollerTun;
+  client.tunPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  client.tunPoller.poller.readEnabled = true;
+
+  client.tcpPoller.poller.fd = tcpFd;
+  client.tcpPoller.poller.kind = ioPollerTcp;
+  client.tcpPoller.poller.events = EPOLLIN | EPOLLRDHUP;
+  client.tcpPoller.poller.readEnabled = true;
+
+  if (!clientRegisterRuntimePollers(&client)) {
+    goto cleanup;
+  }
+
+  result = clientRunLoop(&client);
+
+cleanup:
+  ioReactorDeinit(&client.reactor);
+  sessionDestroy(session);
+  return result;
+}
+
+static void testClientRunLoopRejectsInvalidArgs(void) {
   testAssertTrue(
-      clientServeConn(-1, -1, NULL, 0, NULL, &heartbeatCfg) != 0,
-      "clientServeConn should reject invalid args");
+      clientRunLoopOnFds(-1, -1, NULL, 0, NULL, &heartbeatCfg) != 0,
+      "client loop harness should reject invalid args");
 }
 
 static void testSessionRunClientRejectsInvalidConfig(void) {
   sessionClientConfig_t cfg = {
-      .tunFd = 3,
-      .connFd = 4,
+      .ifName = "tun0",
+      .ifMode = ioIfModeTun,
+      .remoteIP = "127.0.0.1",
+      .port = 4455,
       .claim = testClaim,
       .claimNbytes = (long)sizeof(testClaim),
       .key = testClientKey,
@@ -296,12 +368,18 @@ static void testSessionRunClientRejectsInvalidConfig(void) {
   };
   testAssertTrue(sessionRunClient(NULL) != 0, "sessionRunClient should reject null config");
 
-  cfg.tunFd = -1;
-  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject invalid tun fd");
-  cfg.tunFd = 3;
-  cfg.connFd = -1;
-  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject invalid conn fd");
-  cfg.connFd = 4;
+  cfg.ifName = NULL;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject null interface name");
+  cfg.ifName = "tun0";
+  cfg.ifMode = (ioIfMode_t)99;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject invalid interface mode");
+  cfg.ifMode = ioIfModeTun;
+  cfg.remoteIP = NULL;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject null remote ip");
+  cfg.remoteIP = "127.0.0.1";
+  cfg.port = 0;
+  testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject invalid remote port");
+  cfg.port = 4455;
   cfg.claim = NULL;
   testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject null claim");
   cfg.claim = testClaim;
@@ -318,7 +396,7 @@ static void testSessionRunClientRejectsInvalidConfig(void) {
   testAssertTrue(sessionRunClient(&cfg) != 0, "sessionRunClient should reject heartbeat timeout <= interval");
 }
 
-static void testClientServeConnFailsOnInvalidChallengeLength(void) {
+static void testClientRunLoopFailsOnInvalidChallengeLength(void) {
   int tunPair[2];
   int tcpPair[2];
   pid_t pid;
@@ -333,7 +411,7 @@ static void testClientServeConnFailsOnInvalidChallengeLength(void) {
   if (pid == 0) {
     close(tunPair[1]);
     close(tcpPair[1]);
-    _exit(clientServeConn(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
+    _exit(clientRunLoopOnFds(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
   }
 
   close(tunPair[0]);
@@ -352,7 +430,7 @@ static void testClientServeConnFailsOnInvalidChallengeLength(void) {
   testAssertTrue(WEXITSTATUS(status) == 1, "client should fail on invalid challenge length");
 }
 
-static void testClientServeConnHandshakeAndStopOnPeerClose(void) {
+static void testClientRunLoopHandshakeAndStopOnPeerClose(void) {
   int tunPair[2];
   int tcpPair[2];
   pid_t pid;
@@ -374,7 +452,7 @@ static void testClientServeConnHandshakeAndStopOnPeerClose(void) {
   if (pid == 0) {
     close(tunPair[1]);
     close(tcpPair[1]);
-    _exit(clientServeConn(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
+    _exit(clientRunLoopOnFds(tunPair[0], tcpPair[0], testClaim, sizeof(testClaim), testClientKey, &heartbeatCfg) == 0 ? 0 : 1);
   }
 
   close(tunPair[0]);
@@ -1001,10 +1079,10 @@ static void testClientRejectsInboundHeartbeatRequest(void) {
 }
 
 void runClientTests(void) {
-  testClientServeConnRejectsInvalidArgs();
+  testClientRunLoopRejectsInvalidArgs();
   testSessionRunClientRejectsInvalidConfig();
-  testClientServeConnFailsOnInvalidChallengeLength();
-  testClientServeConnHandshakeAndStopOnPeerClose();
+  testClientRunLoopFailsOnInvalidChallengeLength();
+  testClientRunLoopHandshakeAndStopOnPeerClose();
   testClientSessionRuntimeWiringAcceptsClientContext();
   testClientResetHeartbeatStateInitializesRuntimeScaffold();
   testClientQueueBackpressureBlocksAndStoresPendingPayload();

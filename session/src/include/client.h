@@ -65,9 +65,13 @@ bool clientServiceBackpressure(
     session_t *session,
     ioEvent_t event,
     const unsigned char key[ProtocolPskSize]);
-int clientServeConn(
-    int tunFd,
-    int connFd,
+bool clientRegisterRuntimePollers(client_t *client);
+int clientRunLoop(client_t *client);
+int clientServeRemote(
+    const char *ifName,
+    ioIfMode_t ifMode,
+    const char *remoteIP,
+    int port,
     const unsigned char *claim,
     long claimNbytes,
     const unsigned char key[ProtocolPskSize],

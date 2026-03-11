@@ -108,28 +108,11 @@ static int connTcp(
     long claimNbytes,
     const unsigned char key[ProtocolPskSize],
     const sessionHeartbeatConfig_t *heartbeatCfg) {
-  int tunFd = -1;
-  int connFd = -1;
-  int status = -1;
-
-  logf("opening tun device %s", ifName);
-  tunFd = ioTunOpen(ifName, toIoIfMode(ifMode));
-  if (tunFd < 0) {
-    errf("failed to open tun device %s: %s", ifName, strerror(errno));
-    goto cleanup;
-  }
-  logf("successfully opened tun device %s", ifName);
-
-  connFd = ioTcpConnect(remoteIP, port);
-  if (connFd < 0) {
-    errf("connect to %s:%d failed: %s", remoteIP, port, strerror(errno));
-    goto cleanup;
-  }
-  logf("connected to %s:%d", remoteIP, port);
-
   sessionClientConfig_t sessionCfg = {
-      .tunFd = tunFd,
-      .connFd = connFd,
+      .ifName = ifName,
+      .ifMode = toIoIfMode(ifMode),
+      .remoteIP = remoteIP,
+      .port = port,
       .claim = claim,
       .claimNbytes = claimNbytes,
       .key = key,
@@ -137,19 +120,9 @@ static int connTcp(
   };
   if (sessionRunClient(&sessionCfg) != 0) {
     errf("client session failed");
-    goto cleanup;
+    return -1;
   }
-
-  status = 0;
-
-cleanup:
-  if (connFd >= 0) {
-    close(connFd);
-  }
-  if (tunFd >= 0) {
-    close(tunFd);
-  }
-  return status;
+  return 0;
 }
 
 int main(int argc, char **argv) {

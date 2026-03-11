@@ -629,8 +629,12 @@ int sessionRunServer(const sessionServerConfig_t *cfg) {
 
 int sessionRunClient(const sessionClientConfig_t *cfg) {
   if (cfg == NULL
-      || cfg->tunFd < 0
-      || cfg->connFd < 0
+      || cfg->ifName == NULL
+      || cfg->ifName[0] == '\0'
+      || (cfg->ifMode != ioIfModeTun && cfg->ifMode != ioIfModeTap)
+      || cfg->remoteIP == NULL
+      || cfg->port <= 0
+      || cfg->port > 65535
       || cfg->claim == NULL
       || cfg->claimNbytes <= 0
       || cfg->key == NULL
@@ -638,7 +642,15 @@ int sessionRunClient(const sessionClientConfig_t *cfg) {
       || cfg->heartbeat.timeoutMs <= cfg->heartbeat.intervalMs) {
     return -1;
   }
-  return clientServeConn(cfg->tunFd, cfg->connFd, cfg->claim, cfg->claimNbytes, cfg->key, &cfg->heartbeat);
+  return clientServeRemote(
+      cfg->ifName,
+      cfg->ifMode,
+      cfg->remoteIP,
+      cfg->port,
+      cfg->claim,
+      cfg->claimNbytes,
+      cfg->key,
+      &cfg->heartbeat);
 }
 
 bool sessionApiSmoke(void) {
