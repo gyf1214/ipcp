@@ -29,27 +29,6 @@ static ioTunPoller_t *tunFromPoller(ioPoller_t *poller) {
   return ioContainerOf(poller, ioTunPoller_t, poller);
 }
 
-typedef struct {
-  ioReactor_t *reactor;
-  int fd;
-  ioPoller_t *header;
-  long *outOffset;
-  long *outNbytes;
-  unsigned char *outBuf;
-} ioQueueState_t;
-
-static ioQueueState_t tcpQueueState(ioTcpPoller_t *poller) {
-  ioQueueState_t state = {
-    .reactor = poller->poller.reactor,
-    .fd = poller->poller.fd,
-    .header = &poller->poller,
-    .outOffset = &poller->outOffset,
-    .outNbytes = &poller->outNbytes,
-    .outBuf = poller->outBuf,
-  };
-  return state;
-}
-
 static int pollerSetNonBlocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0) {
@@ -68,40 +47,40 @@ static int pollerCtlPoller(int epollFd, int op, ioPoller_t *poller, unsigned int
   return epoll_ctl(epollFd, op, poller->fd, &event);
 }
 
-static int pollerMod(ioQueueState_t state, unsigned int events) {
-  if (state.header == NULL) {
+static int pollerMod(ioTcpPoller_t *poller, unsigned int events) {
+  if (poller == NULL) {
     return -1;
   }
-  if (state.reactor != NULL
-      && state.reactor->epollFd >= 0
-      && pollerCtlPoller(state.reactor->epollFd, EPOLL_CTL_MOD, state.header, events) < 0) {
+  if (poller->poller.reactor != NULL
+      && poller->poller.reactor->epollFd >= 0
+      && pollerCtlPoller(poller->poller.reactor->epollFd, EPOLL_CTL_MOD, &poller->poller, events) < 0) {
     return -1;
   }
-  state.header->events = events;
-  state.header->readEnabled = (events & EPOLLIN) != 0;
+  poller->poller.events = events;
+  poller->poller.readEnabled = (events & EPOLLIN) != 0;
   return 0;
 }
 
-static int pollerEnsureWriteInterest(ioQueueState_t state) {
-  if ((state.header->events & EPOLLOUT) != 0) {
+static int pollerEnsureWriteInterest(ioTcpPoller_t *poller) {
+  if ((poller->poller.events & EPOLLOUT) != 0) {
     return 0;
   }
-  return pollerMod(state, state.header->events | EPOLLOUT);
+  return pollerMod(poller, poller->poller.events | EPOLLOUT);
 }
 
-static int pollerDisableWriteInterest(ioQueueState_t state) {
-  if ((state.header->events & EPOLLOUT) == 0) {
+static int pollerDisableWriteInterest(ioTcpPoller_t *poller) {
+  if ((poller->poller.events & EPOLLOUT) == 0) {
     return 0;
   }
-  return pollerMod(state, state.header->events & ~EPOLLOUT);
+  return pollerMod(poller, poller->poller.events & ~EPOLLOUT);
 }
 
-static int pollerFlushQueue(ioQueueState_t state) {
-  while (*state.outNbytes > 0) {
-    long wrote = (long)write(state.fd, state.outBuf + *state.outOffset, (size_t)*state.outNbytes);
+static int pollerFlushQueue(ioTcpPoller_t *poller) {
+  while (poller->outNbytes > 0) {
+    long wrote = (long)write(poller->poller.fd, poller->outBuf + poller->outOffset, (size_t)poller->outNbytes);
     if (wrote > 0) {
-      *state.outOffset += wrote;
-      *state.outNbytes -= wrote;
+      poller->outOffset += wrote;
+      poller->outNbytes -= wrote;
       continue;
     }
 
@@ -118,48 +97,48 @@ static int pollerFlushQueue(ioQueueState_t state) {
     return -1;
   }
 
-  *state.outOffset = 0;
-  if (pollerDisableWriteInterest(state) < 0) {
+  poller->outOffset = 0;
+  if (pollerDisableWriteInterest(poller) < 0) {
     return -1;
   }
 
   return 0;
 }
 
-static bool pollerQueueWrite(ioQueueState_t state, const void *data, long nbytes) {
+static bool pollerQueueWrite(ioTcpPoller_t *poller, const void *data, long nbytes) {
   long used;
 
-  if (data == NULL || nbytes <= 0 || nbytes > IoPollerQueueCapacity) {
+  if (poller == NULL || data == NULL || nbytes <= 0 || nbytes > IoPollerQueueCapacity) {
     return false;
   }
 
-  used = *state.outOffset + *state.outNbytes;
-  if (used + nbytes > IoPollerQueueCapacity && *state.outOffset > 0) {
-    memmove(state.outBuf, state.outBuf + *state.outOffset, (size_t)*state.outNbytes);
-    *state.outOffset = 0;
-    used = *state.outNbytes;
+  used = poller->outOffset + poller->outNbytes;
+  if (used + nbytes > IoPollerQueueCapacity && poller->outOffset > 0) {
+    memmove(poller->outBuf, poller->outBuf + poller->outOffset, (size_t)poller->outNbytes);
+    poller->outOffset = 0;
+    used = poller->outNbytes;
   }
   if (used + nbytes > IoPollerQueueCapacity) {
     return false;
   }
 
-  memcpy(state.outBuf + used, data, (size_t)nbytes);
-  *state.outNbytes += nbytes;
-  if (state.reactor == NULL) {
+  memcpy(poller->outBuf + used, data, (size_t)nbytes);
+  poller->outNbytes += nbytes;
+  if (poller->poller.reactor == NULL) {
     return true;
   }
-  return pollerEnsureWriteInterest(state) == 0;
+  return pollerEnsureWriteInterest(poller) == 0;
 }
 
-static bool pollerSetReadEnabled(ioQueueState_t state, bool enabled) {
-  unsigned int nextEvents = state.header->events;
+static bool pollerSetReadEnabled(ioTcpPoller_t *poller, bool enabled) {
+  unsigned int nextEvents = poller->poller.events;
 
   if (enabled) {
     nextEvents |= EPOLLIN;
   } else {
     nextEvents &= ~EPOLLIN;
   }
-  return pollerMod(state, nextEvents) == 0;
+  return pollerMod(poller, nextEvents) == 0;
 }
 
 static int tunFrameNext(int index) {
@@ -381,7 +360,7 @@ static bool pollerServiceWritable(ioPoller_t *poller, long *outBefore, long *out
 
   if (tcp != NULL) {
     *outBefore = tcp->outNbytes;
-    if (pollerFlushQueue(tcpQueueState(tcp)) < 0) {
+    if (pollerFlushQueue(tcp) < 0) {
       return false;
     }
     *outAfter = tcp->outNbytes;
@@ -837,7 +816,7 @@ bool ioTcpWrite(ioTcpPoller_t *poller, const void *data, long nbytes) {
   if (poller == NULL) {
     return false;
   }
-  ok = pollerQueueWrite(tcpQueueState(poller), data, nbytes);
+  ok = pollerQueueWrite(poller, data, nbytes);
   return ok;
 }
 
@@ -870,7 +849,7 @@ bool ioTcpServiceWriteEvent(ioTcpPoller_t *poller) {
   if (poller == NULL || poller->poller.reactor == NULL || poller->poller.reactor->epollFd < 0) {
     return false;
   }
-  ok = pollerFlushQueue(tcpQueueState(poller)) == 0;
+  ok = pollerFlushQueue(poller) == 0;
   return ok;
 }
 
@@ -888,7 +867,7 @@ bool ioTcpSetReadEnabled(ioTcpPoller_t *poller, bool enabled) {
   if (poller == NULL) {
     return false;
   }
-  ok = pollerSetReadEnabled(tcpQueueState(poller), enabled);
+  ok = pollerSetReadEnabled(poller, enabled);
   return ok;
 }
 
