@@ -137,6 +137,12 @@ ioStatus_t ioListenPollerAcceptNonBlocking(
     int *peerPort);
 bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port);
 bool ioTunPollerOpen(ioTunPoller_t *poller, const char *ifName, ioIfMode_t mode);
+bool ioTcpPollerHandoff(
+    ioTcpPoller_t *dst,
+    ioTcpPoller_t *src,
+    const ioPollerCallbacks_t *callbacks,
+    void *ctx,
+    bool readEnabled);
 void ioTcpPollerDispose(ioTcpPoller_t *poller);
 void ioTunPollerDispose(ioTunPoller_t *poller);
 

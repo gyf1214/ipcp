@@ -232,6 +232,10 @@ typedef struct {
   int orderLen;
 } reactorCallbackCounts_t;
 
+typedef struct {
+  int readableCalls;
+} handoffReadableCounts_t;
+
 static ioPollerAction_t reactorReadableStop(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
   reactorCallbackCounts_t *counts = ctx;
   (void)reactor;
@@ -263,6 +267,14 @@ static ioPollerAction_t reactorReadableCount(void *ctx, ioReactor_t *reactor, io
     counts->order[counts->orderLen++] = 'R';
     counts->order[counts->orderLen] = '\0';
   }
+  return ioPollerContinue;
+}
+
+static ioPollerAction_t reactorReadableHandoffCount(void *ctx, ioReactor_t *reactor, ioPoller_t *poller) {
+  handoffReadableCounts_t *counts = ctx;
+  (void)reactor;
+  (void)poller;
+  counts->readableCalls++;
   return ioPollerContinue;
 }
 
@@ -635,6 +647,132 @@ static void testIoTunPollerDisposeDetachesClosesAndResetsState(void) {
   ioReactorDispose(&reactor);
 }
 
+static void testIoTcpPollerHandoffRejectsInvalidArgs(void) {
+  ioTcpPoller_t src;
+  ioTcpPoller_t dst;
+  ioPollerCallbacks_t callbacks = {0};
+
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+
+  testAssertTrue(
+      !ioTcpPollerHandoff(NULL, &src, &callbacks, NULL, true),
+      "handoff should reject null destination");
+  testAssertTrue(
+      !ioTcpPollerHandoff(&dst, NULL, &callbacks, NULL, true),
+      "handoff should reject null source");
+  testAssertTrue(
+      !ioTcpPollerHandoff(&dst, &src, NULL, NULL, true),
+      "handoff should reject null callbacks");
+}
+
+static void testIoTcpPollerHandoffTransfersAttachmentAndQueue(void) {
+  ioReactor_t reactor;
+  ioTcpPoller_t src;
+  ioTcpPoller_t dst;
+  ioPollerCallbacks_t srcCallbacks = {0};
+  ioPollerCallbacks_t dstCallbacks = {0};
+  handoffReadableCounts_t srcCounts = {0};
+  handoffReadableCounts_t dstCounts = {0};
+  int socketFds[2];
+  long queuedBefore;
+  int srcFdBefore;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  src.poller.fd = socketFds[0];
+  src.poller.kind = ioPollerTcp;
+  src.poller.events = EPOLLRDHUP;
+
+  srcCallbacks.onReadable = reactorReadableHandoffCount;
+  dstCallbacks.onReadable = reactorReadableHandoffCount;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &src.poller, &srcCallbacks, &srcCounts, true),
+      "source poller should be registered");
+  testAssertTrue(ioTcpWrite(&src, "queued", 6), "queue write should succeed before handoff");
+  queuedBefore = ioTcpQueuedBytes(&src);
+  srcFdBefore = src.poller.fd;
+
+  testAssertTrue(
+      ioTcpPollerHandoff(&dst, &src, &dstCallbacks, &dstCounts, false),
+      "handoff should transfer source fd and runtime state");
+
+  testAssertTrue(dst.poller.fd == srcFdBefore, "destination should own source fd after handoff");
+  testAssertTrue(dst.poller.reactor == &reactor, "destination should stay attached to reactor");
+  testAssertTrue(dst.poller.callbacks == &dstCallbacks, "destination should receive new callback table");
+  testAssertTrue(dst.poller.ctx == &dstCounts, "destination should receive new callback context");
+  testAssertTrue((dst.poller.events & EPOLLIN) == 0, "destination should apply requested read-disabled state");
+  testAssertTrue((dst.poller.events & EPOLLRDHUP) != 0, "destination should keep close detection flags");
+  testAssertTrue(ioTcpQueuedBytes(&dst) == queuedBefore, "destination should inherit queued bytes");
+
+  testAssertTrue(src.poller.reactor == NULL, "source should be detached after handoff");
+  testAssertTrue(src.poller.fd == -1, "source fd should be cleared after handoff");
+  testAssertTrue(src.poller.events == 0, "source event mask should be cleared after handoff");
+  testAssertTrue(src.poller.callbacks == NULL, "source callbacks should be cleared after handoff");
+  testAssertTrue(src.poller.ctx == NULL, "source ctx should be cleared after handoff");
+  testAssertTrue(ioTcpQueuedBytes(&src) == 0, "source queue should be cleared after handoff");
+
+  testAssertTrue(write(socketFds[1], "r", 1) == 1, "peer should write readable byte");
+  testAssertTrue(ioReactorSetPollerReadEnabled(&dst.poller, true), "destination read-enable should succeed");
+  testAssertTrue(ioReactorStep(&reactor, 100) == ioReactorStepReady, "reactor step should dispatch handoff destination");
+  testAssertTrue(dstCounts.readableCalls > 0, "destination readable callback should run");
+  testAssertTrue(srcCounts.readableCalls == 0, "source readable callback should not run after handoff");
+
+  ioReactorDispose(&reactor);
+  close(socketFds[0]);
+  close(socketFds[1]);
+}
+
+static void testIoTcpPollerHandoffPreservesSourceOnModFailure(void) {
+  ioReactor_t reactor;
+  ioTcpPoller_t src;
+  ioTcpPoller_t dst;
+  ioPollerCallbacks_t srcCallbacks = {0};
+  ioPollerCallbacks_t dstCallbacks = {0};
+  handoffReadableCounts_t srcCounts = {0};
+  int socketFds[2];
+  int srcFdBefore;
+  long srcQueuedBefore;
+  unsigned int srcEventsBefore;
+
+  testAssertTrue(socketpair(AF_UNIX, SOCK_STREAM, 0, socketFds) == 0, "socketpair should be created");
+  testAssertTrue(ioReactorInit(&reactor), "ioReactorInit should succeed");
+
+  memset(&src, 0, sizeof(src));
+  memset(&dst, 0, sizeof(dst));
+  src.poller.fd = socketFds[0];
+  src.poller.kind = ioPollerTcp;
+  src.poller.events = EPOLLRDHUP;
+  srcCallbacks.onReadable = reactorReadableHandoffCount;
+  testAssertTrue(
+      ioReactorAddPoller(&reactor, &src.poller, &srcCallbacks, &srcCounts, true),
+      "source poller should be registered");
+  testAssertTrue(ioTcpWrite(&src, "queued", 6), "queue write should succeed before failure path");
+
+  srcFdBefore = src.poller.fd;
+  srcQueuedBefore = ioTcpQueuedBytes(&src);
+  srcEventsBefore = src.poller.events;
+  testAssertTrue(close(reactor.epollFd) == 0, "closing reactor epoll fd should succeed");
+
+  testAssertTrue(
+      !ioTcpPollerHandoff(&dst, &src, &dstCallbacks, &srcCounts, true),
+      "handoff should fail when epoll mod fails");
+  testAssertTrue(src.poller.fd == srcFdBefore, "source fd should remain unchanged on handoff failure");
+  testAssertTrue(src.poller.reactor == &reactor, "source reactor should remain unchanged on handoff failure");
+  testAssertTrue(src.poller.events == srcEventsBefore, "source events should remain unchanged on handoff failure");
+  testAssertTrue(ioTcpQueuedBytes(&src) == srcQueuedBefore, "source queue should remain unchanged on handoff failure");
+  testAssertTrue(dst.poller.fd == 0, "destination should remain untouched on handoff failure");
+  testAssertTrue(ioTcpQueuedBytes(&dst) == 0, "destination queue should remain empty on handoff failure");
+
+  reactor.epollFd = -1;
+  ioReactorDispose(&reactor);
+  close(socketFds[0]);
+  close(socketFds[1]);
+}
+
 void runIoTests(void) {
   testIoPollerReadOk();
   testIoPollerReadClosed();
@@ -663,4 +801,7 @@ void runIoTests(void) {
   testIoTunWriteEpollCtlFailureDoesNotQueue();
   testIoTcpPollerDisposeDetachesClosesAndResetsState();
   testIoTunPollerDisposeDetachesClosesAndResetsState();
+  testIoTcpPollerHandoffRejectsInvalidArgs();
+  testIoTcpPollerHandoffTransfersAttachmentAndQueue();
+  testIoTcpPollerHandoffPreservesSourceOnModFailure();
 }

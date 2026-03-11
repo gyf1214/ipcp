@@ -801,6 +801,57 @@ bool ioTcpPollerConnect(ioTcpPoller_t *poller, const char *remoteIP, int port) {
   return true;
 }
 
+bool ioTcpPollerHandoff(
+    ioTcpPoller_t *dst,
+    ioTcpPoller_t *src,
+    const ioPollerCallbacks_t *callbacks,
+    void *ctx,
+    bool readEnabled) {
+  ioTcpPoller_t dstBefore;
+  ioTcpPoller_t srcBefore;
+  unsigned int nextEvents;
+
+  if (dst == NULL || src == NULL || callbacks == NULL || dst == src) {
+    return false;
+  }
+  if (src->poller.reactor == NULL
+      || src->poller.reactor->epollFd < 0
+      || src->poller.fd < 0
+      || src->poller.kind != ioPollerTcp) {
+    return false;
+  }
+  if (dst->poller.reactor != NULL || dst->poller.fd > 0 || dst->outNbytes != 0 || dst->outOffset != 0) {
+    return false;
+  }
+
+  dstBefore = *dst;
+  srcBefore = *src;
+  *dst = *src;
+  dst->poller.kind = ioPollerTcp;
+  dst->poller.callbacks = callbacks;
+  dst->poller.ctx = ctx;
+
+  nextEvents = dst->poller.events;
+  if (readEnabled) {
+    nextEvents |= EPOLLIN;
+  } else {
+    nextEvents &= ~EPOLLIN;
+  }
+  dst->poller.events = nextEvents;
+  dst->poller.readEnabled = readEnabled;
+
+  if (pollerCtlPoller(src->poller.reactor->epollFd, EPOLL_CTL_MOD, &dst->poller, dst->poller.events) < 0) {
+    *dst = dstBefore;
+    *src = srcBefore;
+    return false;
+  }
+
+  memset(src, 0, sizeof(*src));
+  src->poller.fd = -1;
+  src->poller.kind = ioPollerTcp;
+  return true;
+}
+
 void ioTcpPollerDispose(ioTcpPoller_t *poller) {
   if (poller == NULL) {
     return;
