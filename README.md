@@ -125,7 +125,8 @@ Supported schema:
 - Client mode uses top-level `key_file` and claim field by mode:
   - `if_mode: "tun"` requires `tun_ip`
   - `if_mode: "tap"` requires `tap_mac`
-- Server mode requires `auth_timeout_ms` and `credentials` list:
+- Server mode requires `auth_timeout_ms`, `max_pre_auth_sessions`, and `credentials` list:
+  - `max_pre_auth_sessions` is a positive integer limit for concurrent pre-auth handshake sessions
   - `if_mode: "tun"` requires top-level `tun_ip` CIDR (for example `10.250.0.1/24`)
   - `if_mode: "tap"` requires top-level `tap_mac`
   - `if_mode: "tun"` entries use `tun_ip` + `key_file`
@@ -150,6 +151,7 @@ head -c 32 /dev/urandom > secret.key
   "listen_ip": "0.0.0.0",
   "listen_port": 5000,
   "auth_timeout_ms": 5000,
+  "max_pre_auth_sessions": 8,
   "tun_ip": "10.10.0.1/24",
   "credentials": [
     {
